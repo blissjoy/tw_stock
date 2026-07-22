@@ -1,0 +1,24 @@
+ebook/
+ref-project/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local scratch databases (production db path/persistence strategy decided separately)
+*.db
+*.sqlite
+*.sqlite3
+
+# Local script run logs (e.g. scripts/backfill_history.py stdout redirected to a file)
+*.log
+backfill_log.txt

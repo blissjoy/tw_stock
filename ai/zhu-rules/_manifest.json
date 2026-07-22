@@ -1,0 +1,3842 @@
+{
+  "total_rules": 246,
+  "by_category": {
+    "K棒型態": 37,
+    "停損停利資金管理": 6,
+    "切線軌道線": 15,
+    "均線": 30,
+    "技術指標": 24,
+    "支撐壓力": 20,
+    "經典型態總覽": 33,
+    "綜合操作SOP": 9,
+    "缺口": 24,
+    "趨勢判定": 18,
+    "選股策略": 19,
+    "量價": 11
+  },
+  "by_confidence": {
+    "中": 88,
+    "中高": 13,
+    "低": 10,
+    "高": 135
+  },
+  "by_programmable": {
+    "是": 166,
+    "部分": 80
+  },
+  "quality_issues": {
+    "missing_rule_id": [],
+    "duplicate_rule_ids": [],
+    "broken_links": []
+  },
+  "rules": [
+    {
+      "rule_id": "R-CANDLE-04",
+      "name": "K線橫盤突破確認規則",
+      "category": "K棒型態",
+      "file": "K棒型態/K線橫盤突破確認規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-30",
+      "name": "一星二陰",
+      "category": "K棒型態",
+      "file": "K棒型態/一星二陰.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（3根結構定義明確；但高低點包夾條件為程式化建議補充，非書中原文明訂，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-27",
+      "name": "一星二陽",
+      "category": "K棒型態",
+      "file": "K棒型態/一星二陽.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（3根結構定義明確；但高低點包夾條件為程式化建議補充，非書中原文明訂，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-26",
+      "name": "上升三法",
+      "category": "K棒型態",
+      "file": "K棒型態/上升三法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-28",
+      "name": "上漲連3紅",
+      "category": "K棒型態",
+      "file": "K棒型態/上漲連3紅.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-31",
+      "name": "下跌連3黑",
+      "category": "K棒型態",
+      "file": "K棒型態/下跌連3黑.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-29",
+      "name": "下降三法",
+      "category": "K棒型態",
+      "file": "K棒型態/下降三法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-20",
+      "name": "低檔晨星",
+      "category": "K棒型態",
+      "file": "K棒型態/低檔晨星.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（3根整體結構與失效條件定義明確，信心高；但中段「變盤線」的精確辨識依賴其他未完全量化的單根K線定義，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-17",
+      "name": "低檔母子懷抱（光明在望）",
+      "category": "K棒型態",
+      "file": "K棒型態/低檔母子懷抱.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-13",
+      "name": "低檔變盤線",
+      "category": "K棒型態",
+      "file": "K棒型態/低檔變盤線.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-18",
+      "name": "低檔長紅吞噬（主力進貨）",
+      "category": "K棒型態",
+      "file": "K棒型態/低檔長紅吞噬.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-16",
+      "name": "低檔長紅覆蓋（旭日東升）",
+      "category": "K棒型態",
+      "file": "K棒型態/低檔長紅覆蓋.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-19",
+      "name": "低檔長紅貫穿（一路向上）",
+      "category": "K棒型態",
+      "file": "K棒型態/低檔長紅貫穿.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-15",
+      "name": "低檔長紅遭遇（一日封口）",
+      "category": "K棒型態",
+      "file": "K棒型態/低檔長紅遭遇.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（型態方向與強度定性明確；「接近」門檻需自行量化）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-14",
+      "name": "低檔黑K紅K基本反轉型態",
+      "category": "K棒型態",
+      "file": "K棒型態/低檔黑K紅K基本反轉型態.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-01",
+      "name": "前一日高低點支撐壓力規則",
+      "category": "K棒型態",
+      "file": "K棒型態/前一日高低點支撐壓力規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-02",
+      "name": "大量長紅K的二分之一價支撐規則",
+      "category": "K棒型態",
+      "file": "K棒型態/大量長紅K的二分之一價支撐規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（3層價位定義與反應邏輯清楚明確，信心高；但「大量」與「相對高檔/低檔」門檻書中未給精確數字，需自行定義，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-23",
+      "name": "大量長紅K進場位置篩選規則",
+      "category": "K棒型態",
+      "file": "K棒型態/大量長紅K進場位置篩選規則.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（清單條件明確具體，雖依賴外部趨勢/均線/前高前低等模組作為輸入，但規則本身邏輯清晰）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-03",
+      "name": "大量長黑K的二分之一價壓力規則",
+      "category": "K棒型態",
+      "file": "K棒型態/大量長黑K的二分之一價壓力規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（3層價位定義與反應邏輯清楚明確；「大量」與「相對高檔/低檔」門檻書中未給精確數字，需自行定義）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-25",
+      "name": "槌子線與倒槌K線",
+      "category": "K棒型態",
+      "file": "K棒型態/槌子線與倒槌K線.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-32",
+      "name": "機械化多頭K線交易規則",
+      "category": "K棒型態",
+      "file": "K棒型態/機械化多頭K線交易規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-33",
+      "name": "機械化空頭K線交易規則",
+      "category": "K棒型態",
+      "file": "K棒型態/機械化空頭K線交易規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-34",
+      "name": "突破上升軌道線壓力的大量長紅K",
+      "category": "K棒型態",
+      "file": "K棒型態/突破上升軌道線壓力的大量長紅K.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（突破邏輯與加權因子明確、信心高；但依賴人工畫線/波段分段等尚未量化的前置模組，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-21",
+      "name": "紅K線（陽線）分類與位置判讀",
+      "category": "K棒型態",
+      "file": "K棒型態/紅K線.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（實體大小分類門檻精確、信心高；趨勢位置判讀屬定性描述且依賴外部趨勢模組，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-37",
+      "name": "紅黑紅與黑紅黑續勢組合",
+      "category": "K棒型態",
+      "file": "K棒型態/紅黑紅與黑紅黑續勢組合.md",
+      "programmable": "部分",
+      "programmable_note": "（三日顏色交替的形狀可程式化；「中間反向K是否構成真正夾擊、而非趨勢反轉前兆」缺乏書中原文的精確數值門檻，須依賴均線排列/趨勢格局等外部規則輔助判斷）",
+      "backtestable": "是",
+      "confidence": "低",
+      "confidence_note": "（型態存在、多空傾向與範例個股有原書財富篇口訣圖（P12-C4a第11種、P12-C4b第8種）的文字依據；但中間反向K的精確判斷邏輯與門檻在Part 03詳細K線組合章節中重新查閱後仍未找到逐字定義，屬依全書一致邏輯風格所做的工程補充推論，非書中明訂數字）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-24",
+      "name": "紡錘K線",
+      "category": "K棒型態",
+      "file": "K棒型態/紡錘K線.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-35",
+      "name": "跌破下降軌道線支撐的大量長黑K",
+      "category": "K棒型態",
+      "file": "K棒型態/跌破下降軌道線支撐的大量長黑K.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（跌破邏輯與加權因子明確、信心高；但依賴人工畫線/波段分段等尚未量化的前置模組，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-12",
+      "name": "高檔夜星",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔夜星.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（3根整體結構與失效條件定義明確，信心高；但中段「變盤線」的精確辨識依賴其他未完全量化的單根K線定義，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-09",
+      "name": "高檔母子懷抱（不懷好意）",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔母子懷抱.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-06",
+      "name": "高檔紅K黑K基本反轉型態",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔紅K黑K基本反轉型態.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-05",
+      "name": "高檔變盤線",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔變盤線.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（型態出現位置與強化條件明確；但4種未另行定義的K棒外觀需自訂操作型定義，非書中原文精確數值）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-36",
+      "name": "高檔長上影線反轉",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔長上影線反轉.md",
+      "programmable": "部分",
+      "programmable_note": "（單根K線形狀與量能條件可程式化；「連續同一壓力區」的比對需仰賴壓力位置規則，精確度中等）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（「高檔＋長上影線＋大量→反轉」的定性描述與操作SOP在原書財富篇口訣圖（P12-C4a第6、8種）有明確文字與個股範例依據；但上影線/實體的量化倍數門檻是比照Part 03槌子/倒槌定義工程補充，非本型態原文明訂數字）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-10",
+      "name": "高檔長黑吞噬（主力出貨）",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔長黑吞噬.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-08",
+      "name": "高檔長黑覆蓋（烏雲罩頂）",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔長黑覆蓋.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-11",
+      "name": "高檔長黑貫穿（一路向下）",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔長黑貫穿.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-07",
+      "name": "高檔長黑遭遇（一日封口）",
+      "category": "K棒型態",
+      "file": "K棒型態/高檔長黑遭遇.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（型態方向與強度定性明確；「接近」門檻需自行量化，書中未給精確數字）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-CANDLE-22",
+      "name": "黑K線（陰線）分類與位置判讀",
+      "category": "K棒型態",
+      "file": "K棒型態/黑K線.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（實體大小分類門檻精確、信心高；趨勢位置判讀屬定性描述且依賴外部趨勢模組，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-RISK-06",
+      "name": "3個進出場關鍵時機點",
+      "category": "停損停利資金管理",
+      "file": "停損停利資金管理/3個進出場關鍵時機點.md",
+      "programmable": "部分",
+      "programmable_note": "（時機點1的「高勝率型態過濾」與時機點3的「停損後資金再配置」可程式化為明確的規則鏈；時機點2「停利的真假訊號判斷」涉及K線轉折訊號的主觀辨識成分，需依賴K棒型態分類規則的量化輸出才能部分程式化，書中本節未給出停利的精確數字門檻，需引用其他章節如 R-TREND-14/15 的10%/20%停利數字）",
+      "backtestable": "部分（時機點1、3的規則鏈可回測；時機點2因「真假訊號判斷」的質化成分，需先將K線轉折訊號量化後才能完整回測）",
+      "confidence": "中",
+      "confidence_note": "（3個時機點的邏輯架構與方向書中明確條列＝高；但時機點2「停利真假訊號判斷」與時機點1「高勝率型態」的部分細節數字定義在其他章節/分類，本節正文本身未重複給出精確數字，屬於整合型規則，故信心評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-RISK-04",
+      "name": "3階段資金規模與獲利目標管理",
+      "category": "停損停利資金管理",
+      "file": "停損停利資金管理/3階段資金規模與獲利目標管理.md",
+      "programmable": "部分",
+      "programmable_note": "（資金規模、持股檔數區間、獲利目標百分比皆為明確數字可程式化為檢核門檻；但「熟練選股/進場/交易策略」「情緒穩定訓練」「無我境界」等質化里程碑無法量化，僅能作為人工檢核清單，不可程式化為自動判斷）",
+      "backtestable": "部分（資金規模、持股檔數、獲利目標百分比可直接回測比對；「4大關鍵」中的質化紀律項目（如「短線比長線重要」「紀律操作比選股重要」）需搭配其他量化規則的輸出才能間接驗證，本身不是可獨立回測的數值條件）",
+      "confidence": "高",
+      "confidence_note": "（資金規模、持股檔數、獲利目標百分比、複利路徑書中皆有明確數字表格與逐年試算；4大關鍵為質化原則描述，數字部分明確、質化部分無法進一步量化，但不影響整體信心評級）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-RISK-01",
+      "name": "停損5種設法總覽",
+      "category": "停損停利資金管理",
+      "file": "停損停利資金管理/停損5種設法總覽.md",
+      "programmable": "部分",
+      "programmable_note": "（5種方法各自的計算公式已在對應分類的具體規則中程式化；本規則作為總覽與方法選擇邏輯，屬於「元規則」性質，可程式化為一個依情境選用停損方法的路由函式，但「選用哪一種方法」本身仍需人工/策略層決策）",
+      "backtestable": "是（各引用規則本身可回測；本規則作為總覽索引亦可用於「跨方法比較停損效果」的回測研究）",
+      "confidence": "高",
+      "confidence_note": "（5項原則、5種設法、5種絕對停損情境，書中皆有明確條列與頁碼依據）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-RISK-03",
+      "name": "全年獲利率勝率方程式",
+      "category": "停損停利資金管理",
+      "file": "停損停利資金管理/全年獲利率勝率方程式.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是（公式本身純數學計算，可直接用歷史交易紀錄的實際勝率/停利率/停損率代入驗證年化報酬率）",
+      "confidence": "高",
+      "confidence_note": "（核心公式與5組範例數字書中皆逐字給出且有完整算式可交叉驗證；唯一例外已於上方訂正說明中列出並修正）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-RISK-05",
+      "name": "套牢分級與不套牢紀律",
+      "category": "停損停利資金管理",
+      "file": "停損停利資金管理/套牢分級與不套牢紀律.md",
+      "programmable": "是",
+      "programmable_note": "（套牢分級門檻與每日警示股門檻皆為明確百分比數字，可直接程式化為每日持股健康度掃描規則）",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（套牢分級三道門檻與每日5%警示門檻書中皆有明確數字；鴻海/大立光套牢案例為書中具體歷史佐證）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-RISK-02",
+      "name": "資金分配與部位上限管理原則",
+      "category": "停損停利資金管理",
+      "file": "停損停利資金管理/資金分配與部位上限管理原則.md",
+      "programmable": "部分",
+      "programmable_note": "（總曝險上限50%、滿倉上限90%、持股檔數2～5檔、大盤多空階段對應的資金比例區間可程式化為明確的數字門檻；但「大盤多空階段」本身的判定需依賴趨勢判定分類規則的輸出（如4線多排/空排、跌破切線等），「汰弱換強」的「弱勢」判斷也需額外定義量化的相對強弱指標，書中未給出精確公式）",
+      "backtestable": "部分（50%/90%資金上限與2～5檔持股檔數可直接回測；「隨大盤階段動態調整比例」需先有可程式化的大盤多空階段判定模組才能完整回測，書中圖表數字屬近似參考值而非精確公式）",
+      "confidence": "中",
+      "confidence_note": "（50%可運用資金上限、90%滿倉上限、2～5檔集中持股、不可借貸槓桿等原則書中皆有明確數字＝高；但「隨大盤走勢調整資金比例」的區間數字是本筆記依書中圖表示意整理的近似值，非書中逐字給出的精確公式，且「汰弱換強」與「獲利提領比例」僅為原則性描述缺乏精確門檻，綜合評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-LINE-09",
+      "name": "上升切線支撐力道遞減與角度強弱判斷",
+      "category": "切線軌道線",
+      "file": "切線軌道線/上升切線支撐力道遞減與角度強弱判斷.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（支撐遞減的3級規則與角度強弱規則皆為書中原文明確陳述，並有圖表逐步範例佐證）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-01",
+        "R-LINE-05",
+        "R-LINE-11"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-01",
+      "name": "上升切線畫法與線不蓋線判準",
+      "category": "切線軌道線",
+      "file": "切線軌道線/上升切線畫法與線不蓋線判準.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書對畫線步驟與「線不蓋線」判準有明確逐句原文與多組圖表範例）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-05",
+        "R-TREND-01",
+        "R-TREND-03"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-07",
+      "name": "上升急切線畫法與停利應用",
+      "category": "切線軌道線",
+      "file": "切線軌道線/上升急切線畫法與停利應用.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "部分（急漲區間的量化門檻書中未明確給出固定數字，需自行設定參數後才可完整回測）",
+      "confidence": "中",
+      "confidence_note": "（畫線邏輯與一般切線一致、信心高；但「急漲段」的量化判定門檻書中僅以文字描述、無具體數字，需人工設定參數）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-14"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-14",
+      "name": "上升軌道線畫法（切線平移取中間高點）",
+      "category": "切線軌道線",
+      "file": "切線軌道線/上升軌道線畫法（切線平移取中間高點）.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書明確給出「取上升切線兩低點間的最高點、過該點畫平行線」的具體構圖邏輯，並附4組實戰範例圖表核對）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-34",
+        "R-LINE-01"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-10",
+      "name": "下降切線壓力力道遞減與角度強弱判斷",
+      "category": "切線軌道線",
+      "file": "切線軌道線/下降切線壓力力道遞減與角度強弱判斷.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（壓力遞減3級規則信心高、與上升切線完全對稱；但角度強弱方向性書中文字雖前後一致，邏輯上與直覺相反，已標記待人工複核，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-09"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-02",
+      "name": "下降切線畫法與線不蓋線判準",
+      "category": "切線軌道線",
+      "file": "切線軌道線/下降切線畫法與線不蓋線判準.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書對畫線步驟與「線不蓋線」判準有明確逐句原文與多組圖表範例，與上升切線完全對稱）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-06",
+        "R-TREND-01",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-08",
+      "name": "下降急切線畫法與回補應用",
+      "category": "切線軌道線",
+      "file": "切線軌道線/下降急切線畫法與回補應用.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "部分（急跌區間的量化門檻書中僅以文字描述、無具體數字，需自行設定參數後才可完整回測）",
+      "confidence": "中",
+      "confidence_note": "（畫線邏輯與一般切線一致、信心高；但「急跌段」的量化判定門檻需人工設定參數）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-07",
+        "R-LINE-15"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-15",
+      "name": "下降軌道線畫法（切線平移取中間低點）",
+      "category": "切線軌道線",
+      "file": "切線軌道線/下降軌道線畫法（切線平移取中間低點）.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書明確給出「取下降切線兩高點間的最低點、過該點畫平行線」的具體構圖邏輯，並附4組實戰範例圖表核對，其中一例（代號2612）並提醒跌破後仍可能反轉，需搭配後續K線確認）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-35",
+        "R-LINE-02",
+        "R-LINE-14"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-13",
+      "name": "切線突破跌破後退出觀察期進場規則",
+      "category": "切線軌道線",
+      "file": "切線軌道線/切線突破跌破後退出觀察期進場規則.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "部分（狀態機邏輯明確可程式化；但「反轉確認」「盤整確認」等下游訊號本身依賴其他規則模組，需組合使用才能完整回測）",
+      "confidence": "高",
+      "confidence_note": "（原書以整節篇幅＋3種情境圖表＋p.366結論段落明確陳述「退出觀察期、等方向確認再進場」的原則，並在p.367提供完整串連範例）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-11",
+        "R-LINE-12",
+        "R-TREND-05",
+        "R-TREND-06",
+        "R-TREND-07"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-03",
+      "name": "原始上升切線與盤整反轉判定",
+      "category": "切線軌道線",
+      "file": "切線軌道線/原始上升切線與盤整反轉判定.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書對「第1次底底高」定義明確，並以4種走勢演變情境搭配圖表逐一示範）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-01",
+        "R-TREND-01",
+        "R-TREND-04",
+        "R-TREND-05"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-04",
+      "name": "原始下降切線與盤整反轉判定",
+      "category": "切線軌道線",
+      "file": "切線軌道線/原始下降切線與盤整反轉判定.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書邏輯與原始上升切線完全對稱，並附4種走勢演變情境及多組圖表範例）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-02",
+        "R-TREND-01",
+        "R-TREND-03",
+        "R-TREND-05"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-12",
+      "name": "突破下降切線分級與壓力支撐角色互換",
+      "category": "切線軌道線",
+      "file": "切線軌道線/突破下降切線分級與壓力支撐角色互換.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（突破分級＋角色互換的操作邏輯明確、與上升切線完全對稱，信心高；但「空頭轉強」用詞標籤本身有疑義待對照紙本覆核，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-11"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-11",
+      "name": "跌破上升切線分級與支撐壓力角色互換",
+      "category": "切線軌道線",
+      "file": "切線軌道線/跌破上升切線分級與支撐壓力角色互換.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中原文明確描述「跌破最後的切線→回檔修正；再跌破前面的切線→趨勢結束或反轉」及「支撐變壓力」的角色互換邏輯，並有圖表5-1-31、5-1-32逐步範例）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-05",
+        "R-LINE-09"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-05",
+      "name": "隨機上升次切線動態更新畫法",
+      "category": "切線軌道線",
+      "file": "切線軌道線/隨機上升次切線動態更新畫法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書明確定義「往後任何2個低點連接的切線都稱為隨機/次切線」，並以圖表示範多條切線隨走勢推進、角度遞增的過程）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-01",
+        "R-LINE-03",
+        "R-LINE-09",
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-LINE-06",
+      "name": "隨機下降次切線動態更新畫法",
+      "category": "切線軌道線",
+      "file": "切線軌道線/隨機下降次切線動態更新畫法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書明確定義與上升次切線對稱的「隨機下降切線」概念）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-02",
+        "R-LINE-04",
+        "R-LINE-05",
+        "R-LINE-10",
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-MA-28",
+      "name": "2條均線長線做多戰法",
+      "category": "均線",
+      "file": "均線/2條均線長線做多戰法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-29",
+      "name": "2條均線長線做空戰法",
+      "category": "均線",
+      "file": "均線/2條均線長線做空戰法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-30",
+      "name": "3條均線綜合戰法",
+      "category": "均線",
+      "file": "均線/3條均線綜合戰法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-24",
+      "name": "單一均線中線做多戰法",
+      "category": "均線",
+      "file": "均線/單一均線中線做多戰法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-25",
+      "name": "單一均線中線做空戰法",
+      "category": "均線",
+      "file": "均線/單一均線中線做空戰法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-22",
+      "name": "單一均線短線做多戰法",
+      "category": "均線",
+      "file": "均線/單一均線短線做多戰法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-23",
+      "name": "單一均線短線做空戰法",
+      "category": "均線",
+      "file": "均線/單一均線短線做空戰法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-26",
+      "name": "單一均線長線做多戰法",
+      "category": "均線",
+      "file": "均線/單一均線長線做多戰法.md",
+      "programmable": "部分",
+      "programmable_note": "（月線「大量突破下降切線」需搭配切線分類規則，其餘均線與價格條件可完全程式化）",
+      "backtestable": "部分（依賴切線突破判斷模組是否已實作；核心均線邏輯可先行回測）",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-27",
+      "name": "單一均線長線做空戰法",
+      "category": "均線",
+      "file": "均線/單一均線長線做空戰法.md",
+      "programmable": "部分",
+      "programmable_note": "（「原下降切線」需搭配切線分類規則，其餘均線與價格條件可完全程式化）",
+      "backtestable": "部分（依賴切線判斷模組是否已實作；核心均線邏輯可先行回測）",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-06",
+      "name": "均線上彎的支撐與助漲作用",
+      "category": "均線",
+      "file": "均線/均線上彎的支撐與助漲作用.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-07",
+      "name": "均線下彎的壓力與助跌作用",
+      "category": "均線",
+      "file": "均線/均線下彎的壓力與助跌作用.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-03",
+      "name": "均線反應速度與權重遞減",
+      "category": "均線",
+      "file": "均線/均線反應速度與權重遞減.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-02",
+      "name": "均線反映持有成本與獲利判斷",
+      "category": "均線",
+      "file": "均線/均線反映持有成本與獲利判斷.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-08",
+      "name": "均線多頭排列",
+      "category": "均線",
+      "file": "均線/均線多頭排列.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-04",
+      "name": "均線天期依交易策略分層選用",
+      "category": "均線",
+      "file": "均線/均線天期依交易策略分層選用.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "否（本身是參數選擇規則，非可獨立產生買賣訊號的規則，但可作為其他規則的參數輸入用於回測）",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-21",
+      "name": "均線戰法停損點設定邏輯（5%分界法）",
+      "category": "均線",
+      "file": "均線/均線戰法停損點設定邏輯（5%分界法）.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-09",
+      "name": "均線空頭排列",
+      "category": "均線",
+      "file": "均線/均線空頭排列.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-17",
+      "name": "均線糾結向上突破做多SOP",
+      "category": "均線",
+      "file": "均線/均線糾結向上突破做多SOP.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-18",
+      "name": "均線糾結向下跌破做空SOP",
+      "category": "均線",
+      "file": "均線/均線糾結向下跌破做空SOP.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-16",
+      "name": "均線糾結辨識",
+      "category": "均線",
+      "file": "均線/均線糾結辨識.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-01",
+      "name": "均線計算公式",
+      "category": "均線",
+      "file": "均線/均線計算公式.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-14",
+      "name": "死亡交叉",
+      "category": "均線",
+      "file": "均線/死亡交叉.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-12",
+      "name": "盤整均線交錯不進場",
+      "category": "均線",
+      "file": "均線/盤整均線交錯不進場.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-10",
+      "name": "短多做多成功條件（3線多頭排列）",
+      "category": "均線",
+      "file": "均線/短多做多成功條件（3線多頭排列）.md",
+      "programmable": "部分",
+      "programmable_note": "（波浪型態「頭頭高、底底高」需先有波段高低點辨識演算法支援，屬於另一分類「趨勢判定」的規則；均線與收盤價條件可完全程式化）",
+      "backtestable": "部分（依賴波浪型態辨識模組是否已實作；若暫不含波浪型態條件，可先用均線＋站上MA20兩項條件做簡化版回測）",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-11",
+      "name": "短空做空成功條件（3線空頭排列）",
+      "category": "均線",
+      "file": "均線/短空做空成功條件（3線空頭排列）.md",
+      "programmable": "部分",
+      "programmable_note": "（波浪型態「頭頭低、底底低」需先有波段高低點辨識演算法支援，屬於另一分類「趨勢判定」的規則；均線與收盤價條件可完全程式化）",
+      "backtestable": "部分（依賴波浪型態辨識模組是否已實作；若暫不含波浪型態條件，可先用均線＋跌破MA20兩項條件做簡化版回測）",
+      "confidence": "中",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-05",
+      "name": "移動扣抵預判均線轉向與交叉時點",
+      "category": "均線",
+      "file": "均線/移動扣抵預判均線轉向與交叉時點.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-19",
+      "name": "葛蘭碧買點四大法則",
+      "category": "均線",
+      "file": "均線/葛蘭碧買點四大法則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-20",
+      "name": "葛蘭碧賣點四大法則",
+      "category": "均線",
+      "file": "均線/葛蘭碧賣點四大法則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-13",
+      "name": "黃金交叉",
+      "category": "均線",
+      "file": "均線/黃金交叉.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-MA-15",
+      "name": "黃金死亡交叉配合主趨勢判讀",
+      "category": "均線",
+      "file": "均線/黃金死亡交叉配合主趨勢判讀.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-INDICATOR-10",
+      "name": "KD不同週期依交易期程選用",
+      "category": "技術指標",
+      "file": "技術指標/KD不同週期依交易期程選用.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中原文明確條列日/週/月線對應短/中/長期的選用原則，並附週線KD實例圖表）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-08"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-12",
+      "name": "KD背離判斷（峰背離、底背離）",
+      "category": "技術指標",
+      "file": "技術指標/KD背離判斷（峰背離、底背離）.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中以「KD指標背離重點」獨立條列4條核心規則，且明確給出「20～80之間才正常有效」的量化門檻，並附多組範例圖表佐證）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-11",
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-08",
+      "name": "KD計算公式（RSV、K、D）",
+      "category": "技術指標",
+      "file": "技術指標/KD計算公式（RSV、K、D）.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（K值/RSV定義與常用參數9日、5日書中明確；但D值公式書中僅給出5日範例的3日加總簡化式，與業界標準平滑移動平均算法不同，程式化時須明確選定其一，此差異書中未討論，故信心評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-INDICATOR-11",
+      "name": "KD高低檔鈍化定義與因應",
+      "category": "技術指標",
+      "file": "技術指標/KD高低檔鈍化定義與因應.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "部分（80/20門檻可直接回測；鈍化「連續天數」門檻需自訂後才能完整程式化與回測）",
+      "confidence": "中",
+      "confidence_note": "（80/20門檻與鈍化現象定義明確＝高；但鈍化判定缺乏量化連續天數標準，程式化實作需自行補充，故整體信心評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-INDICATOR-09",
+      "name": "KD黃金死亡交叉依趨勢判讀",
+      "category": "技術指標",
+      "file": "技術指標/KD黃金死亡交叉依趨勢判讀.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中明確列出三種趨勢下交叉訊號的對應意義，並以2張範例圖表分別驗證多頭黃金交叉買進、多頭死亡交叉賣出的實例）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-08",
+        "R-TREND-03",
+        "R-TREND-04",
+        "R-TREND-05"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-06",
+      "name": "MACD波段背離",
+      "category": "技術指標",
+      "file": "技術指標/MACD波段背離.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（背離方向判定邏輯明確；波段起訖點的自動切分需額外引入轉折波演算法才能完整程式化）",
+      "confidence": "中",
+      "confidence_note": "（背離定義與方向明確；波段切分依賴外部轉折波規則，屬工程整合細節）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-04",
+        "R-INDICATOR-05",
+        "R-INDICATOR-07"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-04",
+      "name": "MACD紅柱多頭動能7要點",
+      "category": "技術指標",
+      "file": "技術指標/MACD紅柱多頭動能7要點.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（①②④⑤⑥條件明確可回測；③⑦涉及「創新高次數」「峰值比較窗口」等經驗性描述，需自訂量化門檻後方可完整回測）",
+      "confidence": "中",
+      "confidence_note": "（規則邏輯與方向書中明確列出7條，但部分規則如「創新高1~3次」缺乏精確數字定義，回測時需自行補充參數）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-03"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-05",
+      "name": "MACD綠柱空頭動能7要點",
+      "category": "技術指標",
+      "file": "技術指標/MACD綠柱空頭動能7要點.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（①②④⑤⑥條件明確可回測；③⑦涉及經驗性描述，需自訂量化門檻後方可完整回測）",
+      "confidence": "中",
+      "confidence_note": "（規則邏輯與方向書中明確列出7條，惟部分規則缺乏精確數字定義）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-04",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-01",
+      "name": "MACD計算公式（DIF、MACD、OSC）",
+      "category": "技術指標",
+      "file": "技術指標/MACD計算公式（DIF、MACD、OSC）.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（三個數值定義與參數天期書中明確標註；EMA/SMA計算方式為工程慣例補充，非書中明文，故此細節信心中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-INDICATOR-07",
+      "name": "MACD趨勢級背離",
+      "category": "技術指標",
+      "file": "技術指標/MACD趨勢級背離.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中明確以「兩波段頭頭高/底底低對比OSC柱峰谷頭頭低/底底高」定義趨勢級背離，並附綜合應用範例圖表說明可與波段背離先後出現）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-06",
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-02",
+      "name": "MACD零軸上黃金死亡交叉多頭格局判讀",
+      "category": "技術指標",
+      "file": "技術指標/MACD零軸上黃金死亡交叉多頭格局判讀.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中原文明確區分「0軸上黃金交叉＝買進」與「0軸上死亡交叉但未破0軸＝回檔非反轉」，並附範例圖表佐證）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-13",
+        "R-MA-14"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-03",
+      "name": "MACD零軸下黃金死亡交叉空頭格局判讀",
+      "category": "技術指標",
+      "file": "技術指標/MACD零軸下黃金死亡交叉空頭格局判讀.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中原文明確區分「0軸下黃金交叉但未站上0軸＝反彈非轉多」與「0軸下死亡交叉＝賣出訊號」，並附範例圖表佐證）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-02"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-18",
+      "name": "MA通道正負乖離軌道與突破訊號",
+      "category": "技術指標",
+      "file": "技術指標/MA通道正負乖離軌道與突破訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（MA20中心線與12%~15%乖離率為書中正文明確給出的具體參數，範例圖表亦標示UB/LB 15%的實際設定值，並附6檔個股實例驗證軌道壓力/支撐與突破轉強的判讀邏輯）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-INDICATOR-15",
+      "name": "RSI短週期長週期黃金死亡交叉",
+      "category": "技術指標",
+      "file": "技術指標/RSI短週期長週期黃金死亡交叉.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中「判讀」與「應用」兩段落一致明確給出6日、12日參數與黃金/死亡交叉之買賣意義）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-13",
+        "R-MA-14"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-16",
+      "name": "RSI背離判斷（頭部底部背離）",
+      "category": "技術指標",
+      "file": "技術指標/RSI背離判斷（頭部底部背離）.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（背離方向與次數計數可程式化；「訊號隨次數增強」及「需搭配多頭/空頭確認才進場」屬定性描述，須自訂量化規則（如結合突破前高/跌破前低的價格確認條件）才能完整回測）",
+      "confidence": "中",
+      "confidence_note": "（背離定義本身明確且與KD背離框架一致＝高；但「訊號增強程度」與「確認條件」缺乏量化標準，故整體信心評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-12",
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-13",
+      "name": "RSI計算公式",
+      "category": "技術指標",
+      "file": "技術指標/RSI計算公式.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中以完整例題逐步演算，明確驗證「除以週期天數N而非漲跌天數」此一關鍵細節）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-INDICATOR-14",
+      "name": "RSI超買超賣逆勢思維",
+      "category": "技術指標",
+      "file": "技術指標/RSI超買超賣逆勢思維.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（80/20門檻本身可完整回測；「連續強勢上漲/急跌」「盤整區」的判定需依賴趨勢判定分類規則或另訂量化定義）",
+      "confidence": "高",
+      "confidence_note": "（80/20門檻書中在判讀與應用兩段落重複明確標註，且特別注意本書採用80/20而非坊間常見70/30）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-13"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-19",
+      "name": "乖離率應用原則",
+      "category": "技術指標",
+      "file": "技術指標/乖離率應用原則.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "部分（①②的操作邏輯可在有「乖離過大」量化門檻（借用MA通道12%~15%）後程式化回測；③「個股是否適合用乖離率」屬選股前置篩選，需自訂波動度量化標準才能程式化）",
+      "confidence": "中",
+      "confidence_note": "（原則方向書中三點明確列出；但均為定性描述，缺乏獨立於MA通道之外的量化數字，程式化須依賴其他規則的參數或自行補充門檻）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-17",
+        "R-INDICATOR-18",
+        "R-MA-19",
+        "R-MA-20"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-17",
+      "name": "乖離率計算公式與正負乖離定義",
+      "category": "技術指標",
+      "file": "技術指標/乖離率計算公式與正負乖離定義.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（乖離率數值本身可完整計算與回測；但「乖離過大」的買賣判定門檻書中未給固定數字，需另訂或搭配MA通道規則）",
+      "confidence": "中",
+      "confidence_note": "（計算公式與正負乖離定義明確＝高；但乖離過大之門檻書中明言「沒有統一的原則」，此部分無法直接程式化為精確買賣訊號，故整體信心評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-18",
+        "R-MA-19",
+        "R-MA-20"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-23",
+      "name": "布林通道4大做空訊號",
+      "category": "技術指標",
+      "file": "技術指標/布林通道4大做空訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（①②③條件明確可回測；④「三軌平行/走平」與「盤整區」邊界需自訂量化斜率門檻，可參照趨勢判定分類的盤整規則）",
+      "confidence": "高",
+      "confidence_note": "（4條做空訊號書中逐條明確列出，僅④的「走平」與「盤整區跌破」邊界需搭配盤整判定規則量化）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-20",
+        "R-INDICATOR-22"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-22",
+      "name": "布林通道4大買進訊號",
+      "category": "技術指標",
+      "file": "技術指標/布林通道4大買進訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（①②③條件明確可回測；④「三軌平行/走平」與「盤整區」邊界需自訂量化斜率門檻，可參照趨勢判定分類的盤整規則）",
+      "confidence": "高",
+      "confidence_note": "（4條買進訊號書中逐條明確列出，僅④的「走平」與「盤整區突破」邊界需搭配盤整判定規則量化）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-20",
+        "R-INDICATOR-21",
+        "R-INDICATOR-23"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-21",
+      "name": "布林通道觸及上下軌出場回補訊號",
+      "category": "技術指標",
+      "file": "技術指標/布林通道觸及上下軌出場回補訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中原文以清楚的做多出場、做空回補兩條規則明確條列）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-20",
+        "R-INDICATOR-22",
+        "R-INDICATOR-23"
+      ]
+    },
+    {
+      "rule_id": "R-INDICATOR-20",
+      "name": "布林通道計算公式",
+      "category": "技術指標",
+      "file": "技術指標/布林通道計算公式.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（三線定義、參數天期、標準差倍數與統計依據書中皆明確標註）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-INDICATOR-24",
+      "name": "布林通道進階應用11要點",
+      "category": "技術指標",
+      "file": "技術指標/布林通道進階應用11要點.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "部分（④⑥⑦⑨⑩之三軌方向與通道收斂/開口條件明確可程式化；①③涉及「沿上軌上漲」「開始走平或下彎」等定性描述需自訂精確判斷邏輯；⑧⑪為補充說明/原則性提醒，非可直接回測之交易訊號）",
+      "confidence": "中",
+      "confidence_note": "（各要點方向與邏輯書中明確列出11條並附範例圖表；但多處「走平/揚升/下彎」「沿上軌上漲」等斜率轉折缺乏精確數字門檻，程式化時需自訂容許誤差，故整體信心評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-INDICATOR-20",
+        "R-INDICATOR-22",
+        "R-INDICATOR-23"
+      ]
+    },
+    {
+      "rule_id": "R-SR-06",
+      "name": "上升切線支撐與力道遞減規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/上升切線支撐與力道遞減規則.md",
+      "programmable": "部分",
+      "programmable_note": "（切線本身的擬合演算法歸屬切線/軌道線分類；本規則只處理切線價位轉為支撐/壓力訊號與遞減強度的邏輯）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（力道遞減規律清楚但為定性描述；切線擬合本身依賴切線/軌道線分類的實作品質）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-01",
+        "R-SR-14"
+      ]
+    },
+    {
+      "rule_id": "R-SR-07",
+      "name": "下降切線壓力與力道遞減規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/下降切線壓力與力道遞減規則.md",
+      "programmable": "部分",
+      "programmable_note": "（切線本身的擬合演算法歸屬切線/軌道線分類；本規則只處理切線價位轉為壓力/支撐訊號與遞減強度的邏輯）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（力道遞減規律清楚但為定性描述；切線擬合本身依賴切線/軌道線分類的實作品質）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-02",
+        "R-SR-06",
+        "R-SR-14"
+      ]
+    },
+    {
+      "rule_id": "R-SR-09",
+      "name": "向上跳空缺口支撐規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/向上跳空缺口支撐規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（缺口區間定義與永久失效規則明確；力道強度的量化權重書中未給，需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-SR-10",
+      "name": "向下跳空缺口壓力規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/向下跳空缺口壓力規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（缺口區間定義與永久失效規則明確；力道強度的量化權重書中未給，需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-09"
+      ]
+    },
+    {
+      "rule_id": "R-SR-12",
+      "name": "型態頸線量測目標價支撐壓力規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/型態頸線量測目標價支撐壓力規則.md",
+      "programmable": "部分",
+      "programmable_note": "（頸線價位、型態最高/最低點需先由型態辨識模組給出；本規則庫目前未見獨立的頭肩頂/底、圓弧頂/底、N字、三重頂/底型態辨識規則，須另行建置型態辨識前置模組後才能完整程式化）",
+      "backtestable": "部分（目標價公式明確可回測，但前提的型態自動辨識書中未給演算法，屬推斷公式，需先驗證型態辨識邏輯的正確性）",
+      "confidence": "中",
+      "confidence_note": "（公式為書中示意圖比例推斷而非書中文字明載算式，且依賴型態辨識前置模組）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-SR-15",
+      "name": "多頭回檔四大關鍵支撐買進訊號規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/多頭回檔四大關鍵支撐買進訊號規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中4種來源與共同判斷條件描述明確一致）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-06",
+        "R-SR-02",
+        "R-SR-06",
+        "R-SR-08",
+        "R-SR-09",
+        "R-SR-14",
+        "R-TREND-03"
+      ]
+    },
+    {
+      "rule_id": "R-SR-03",
+      "name": "密集盤整區區間支撐壓力規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/密集盤整區區間支撐壓力規則.md",
+      "programmable": "部分",
+      "programmable_note": "（盤整區的自動框定需先定義偵測邏輯，書中未給精確門檻，須自行設定區間收斂條件）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（區塊內力道遞減與整體轉換邏輯清楚，但盤整區的自動判定門檻書中未量化，需自訂）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-SR-17",
+      "name": "支撐壓力測試結果回推多空趨勢強弱規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/支撐壓力測試結果回推多空趨勢強弱規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中多空各5條規則對稱清楚，可直接轉為狀態機邏輯）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-01",
+        "R-SR-02",
+        "R-SR-08",
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-SR-13",
+      "name": "整數心理關卡支撐壓力規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/整數心理關卡支撐壓力規則.md",
+      "programmable": "部分",
+      "programmable_note": "（整數關卡本身容易定義，但「震盪」的判定門檻與觸發距離書中未量化，需自訂）",
+      "backtestable": "是（但因門檻需自訂，回測結果對參數敏感）",
+      "confidence": "低",
+      "confidence_note": "（書中僅為定性描述，無明確倍數或距離量化門檻）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-SR-20",
+      "name": "洗盤假跌破誘空進貨規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/洗盤假跌破誘空進貨規則.md",
+      "programmable": "部分",
+      "programmable_note": "（打底架構的自動辨識、草叢量的量化門檻依賴 [[空轉多打底量價與均線排列鎖股訊號]] 與 [[成交量分類與倍數門檻定義]] 前置模組是否準確；跌破/拉回本身的價量條件可完全程式化）",
+      "backtestable": "是",
+      "confidence": "低",
+      "confidence_note": "（核心「主力打底進貨、跳空跌破誘空洗盤」的概念在書中打底章節與草叢量描述中有明確文字支持，方向可信；但「洗盤」本身作為一個獨立判定規則的量化門檻——跌破當根量能上限、拉回天數窗口、後續攻擊確認的量能倍數——書中並未給出，皆屬工程補充，且洗盤與真跌破在事前difficult以量價特徵完全區分，實務上仍常須靠事後反彈速度與後續是否攻擊突破回溯確認，事前預測把握度較低）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CLASSIC-10",
+        "R-CLASSIC-21",
+        "R-SR-02",
+        "R-SR-03",
+        "R-SR-18",
+        "R-TREND-10",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SR-04",
+      "name": "盤整區上下頸線支撐壓力規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/盤整區上下頸線支撐壓力規則.md",
+      "programmable": "部分",
+      "programmable_note": "（頸線的連線演算法需自訂，書中僅描述概念未給精確連線方法）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（概念明確，但連線演算法細節書中未給，屬合理推斷實作）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-03"
+      ]
+    },
+    {
+      "rule_id": "R-SR-08",
+      "name": "移動平均線支撐壓力與3日站回觀察窗規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/移動平均線支撐壓力與3日站回觀察窗規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（力道排序與3日觀察窗皆為書中明確給出的具體規則）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-06",
+        "R-MA-07"
+      ]
+    },
+    {
+      "rule_id": "R-SR-16",
+      "name": "空頭反彈四大關鍵壓力放空訊號規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/空頭反彈四大關鍵壓力放空訊號規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中4種來源與共同判斷條件描述明確一致）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-07",
+        "R-SR-01",
+        "R-SR-07",
+        "R-SR-08",
+        "R-SR-10",
+        "R-SR-14",
+        "R-SR-15",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-SR-18",
+      "name": "突破跌破未站穩假突破假跌破通用判定規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/突破跌破未站穩假突破假跌破通用判定規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（核心邏輯——「突破/跌破後應轉支撐/壓力，若未站穩則角色不變」——直接由書中 R-SR-01/R-SR-02 的轉換條件與「遇壓遇撐4法則」第4款的假突破/假跌破提示推導而來，方向可信；但「短期內」「未站穩」的具體天數窗口與量能門檻是工程補充，非書中逐字明訂數字）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CLASSIC-10",
+        "R-CLASSIC-14",
+        "R-CLASSIC-21",
+        "R-CLASSIC-31",
+        "R-GAP-19",
+        "R-GAP-20",
+        "R-SR-01",
+        "R-SR-02",
+        "R-SR-08",
+        "R-SR-14",
+        "R-TREND-01",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SR-19",
+      "name": "等幅測量法D值量測目標價通用規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/等幅測量法D值量測目標價通用規則.md",
+      "programmable": "部分",
+      "programmable_note": "（公式本身可完全程式化；但A、B、C三點在「情境1」「情境2」的具體取點依賴 [[轉折波定義與取點演算法]] 的ABC修正偵測或切線偵測模組是否準確，取點誤差會直接放大到目標價誤差）",
+      "backtestable": "是（公式本身簡單可回測；準確度高度依賴A/B/C取點模組，故實際勝率需靠回測校準，不宜假設書中已驗證此通用形式的成功率）",
+      "confidence": "中",
+      "confidence_note": "（`目標價=頸線±型態高度`這個「等出一段既有幅度」的量出法核心技巧在書中 6-3 節有明確文字與圖表依據，可信；但把它抽象成「任意前一波段A→B」的通用D值量測版本，屬工程延伸類推，書中未見以此抽象形式獨立展開或命名，A/B/C的取點規則也非書中逐字明訂，故整體評為中，而非高）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CLASSIC-14",
+        "R-CLASSIC-31",
+        "R-LINE-11",
+        "R-LINE-12",
+        "R-SR-12",
+        "R-SR-18",
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-SR-02",
+      "name": "轉折低點支撐與跌破後轉壓力規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/轉折低點支撐與跌破後轉壓力規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-14",
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-SR-01",
+      "name": "轉折高點壓力與突破後轉支撐規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/轉折高點壓力與突破後轉支撐規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-14",
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-SR-14",
+      "name": "遇壓遇撐4法則支撐壓力有效性確認規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/遇壓遇撐4法則支撐壓力有效性確認規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中8條情境描述具體、邏輯對稱清楚，是全書支撐壓力判讀的核心方法論）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-SR-05",
+      "name": "頭部底部大量關卡支撐壓力轉換規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/頭部底部大量關卡支撐壓力轉換規則.md",
+      "programmable": "部分",
+      "programmable_note": "（需先由趨勢反轉確認模組界定「頭部區間」「底部區間」的起訖範圍，本規則庫的[[頭頭高底底高多頭趨勢判定]]／[[頭頭低底底低空頭趨勢判定]]可作為前置輸入）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（關卡取點邏輯明確，但「頭部/底部區間」邊界的自動框定需搭配趨勢判定模組，書中未給精確演算法）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-SR-11",
+      "name": "黃金分割率回檔支撐與反彈壓力規則",
+      "category": "支撐壓力",
+      "file": "支撐壓力/黃金分割率回檔支撐與反彈壓力規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（分割公式為依書中範例圖表數字倒推所得，非書中逐字給出算式；哪個分割點會實際生效需個案驗證，非固定規律）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-26",
+      "name": "低檔大量長下影線圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/低檔大量長下影線圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-20",
+        "R-CANDLE-25",
+        "R-TREND-04",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-16",
+      "name": "低檔大量長紅K圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/低檔大量長紅K圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-14",
+        "R-TREND-10",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-25",
+      "name": "低檔連2日大量被突破圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/低檔連2日大量被突破圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-08",
+        "R-VOLPRICE-09"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-09",
+      "name": "反彈大量紅K跌破追空圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/反彈大量紅K跌破追空圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-01",
+        "R-SR-16",
+        "R-TREND-04",
+        "R-TREND-13"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-30",
+      "name": "均線糾結紅K突破圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/均線糾結紅K突破圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-16",
+        "R-MA-17"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-13",
+      "name": "多轉空破多底大跌圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/多轉空破多底大跌圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-03",
+        "R-TREND-04",
+        "R-TREND-07",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-02",
+      "name": "大量長黑破切反轉圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/大量長黑破切反轉圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-01",
+        "R-LINE-11",
+        "R-TREND-04",
+        "R-TREND-07",
+        "R-TREND-13"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-18",
+      "name": "大量雙腳反轉圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/大量雙腳反轉圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-03",
+        "R-SR-12",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-03",
+      "name": "大量雙頭反轉圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/大量雙頭反轉圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-10",
+        "R-SR-04",
+        "R-SR-05",
+        "R-SR-12",
+        "R-TREND-04",
+        "R-TREND-07",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-32",
+      "name": "島型反轉圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/島型反轉圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-07"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-21",
+      "name": "底部洗盤上攻大漲圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/底部洗盤上攻大漲圖.md",
+      "programmable": "部分",
+      "programmable_note": "（突破買點的偵測可程式化，但「假跌破洗盤」與「真跌破」的事前區分缺乏獨立底層規則，通常須靠事後反彈速度回溯判定）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（型態邏輯明確，但「洗盤」缺乏獨立底層規則庫定義，事前無法完全排除真跌破的可能）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-02",
+        "R-TREND-06",
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-02"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-17",
+      "name": "破切反彈過高大漲圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/破切反彈過高大漲圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-02",
+        "R-LINE-12",
+        "R-TREND-06",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-20",
+      "name": "碎步上漲攻擊圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/碎步上漲攻擊圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-23",
+        "R-MA-06",
+        "R-TREND-01",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-22",
+      "name": "空轉多過空高大漲圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/空轉多過空高大漲圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-01",
+        "R-TREND-03",
+        "R-TREND-06",
+        "R-TREND-09",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-27",
+      "name": "空頭反彈在月線上盤整圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/空頭反彈在月線上盤整圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-06",
+        "R-TREND-05",
+        "R-TREND-06",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-31",
+      "name": "突破ABC上漲圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/突破ABC上漲圖.md",
+      "programmable": "部分",
+      "programmable_note": "（ABC轉折點與突破切線的偵測可程式化，但等幅測量目標價缺乏獨立底層規則，精確度中等）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（ABC修正與切線突破邏輯清楚，但等幅測量法本身未在切線章節找到逐字對應規則，屬推論延伸）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-02",
+        "R-SR-12",
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-33",
+      "name": "突破上升軌道線大漲圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/突破上升軌道線大漲圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原文逐字對應，非推論）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-34",
+        "R-LINE-01",
+        "R-LINE-14",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-24",
+      "name": "突破大量黑K買進",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/突破大量黑K買進.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-01",
+        "R-MA-08",
+        "R-TREND-06",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-10",
+      "name": "突破高檔前高黑K出現大量要下跌圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/突破高檔前高黑K出現大量要下跌圖.md",
+      "programmable": "部分",
+      "programmable_note": "（K線與量能條件可程式化，但「假突破」作為獨立型態缺乏底層規則庫的通用定義，需以支撐壓力角色互換規則反向推論）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（型態邏輯清楚，但「假突破」缺乏獨立底層規則支撐，屬跨規則組合推論）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-10",
+        "R-GAP-20",
+        "R-SR-01",
+        "R-TREND-13",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-23",
+      "name": "紅黑紅上漲圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/紅黑紅上漲圖.md",
+      "programmable": "部分",
+      "programmable_note": "（三日組合形狀可程式化，但「紅黑紅續勢」缺乏獨立底層K線組合規則）",
+      "backtestable": "是",
+      "confidence": "低",
+      "confidence_note": "（本次比對未在既有K棒型態筆記中找到「紅黑紅」逐字命名段落，屬推論對應，與型態11同屬財富篇新增口訣）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-08"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-19",
+      "name": "缺口之上續漲圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/缺口之上續漲圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-03",
+        "R-GAP-17",
+        "R-SR-09",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-12",
+      "name": "缺口之下續空圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/缺口之下續空圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-04",
+        "R-GAP-13",
+        "R-GAP-19",
+        "R-MA-07",
+        "R-SR-03",
+        "R-SR-10"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-14",
+      "name": "跌破ABC下跌圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/跌破ABC下跌圖.md",
+      "programmable": "部分",
+      "programmable_note": "（ABC轉折點與跌破切線的偵測可程式化，但等幅測量目標價缺乏獨立底層規則，精確度中等）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（ABC修正與切線跌破邏輯高，但等幅測量法本身未在切線章節找到逐字對應規則，屬推論延伸）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-01",
+        "R-LINE-11",
+        "R-SR-12",
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-15",
+      "name": "跌破下降軌道線大跌圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/跌破下降軌道線大跌圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原文逐字對應，非推論）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-35",
+        "R-LINE-15",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-08",
+      "name": "連3天上漲長上影線 大敵當前主力出貨圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/連3天上漲長上影線大敵當前主力出貨圖.md",
+      "programmable": "部分",
+      "programmable_note": "（連續3日長上影線的形狀偵測可程式化，但「連續受挫於同一壓力區」須仰賴壓力位置規則的模糊比對，精確度中等）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（三日組合的壓力測試邏輯明確，但底層「長上影線」型態未在K棒型態分類找到獨立逐字對應規則）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-01",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-04",
+      "name": "遇壓爆量黑K快跑圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/遇壓爆量黑K快跑圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（原書未另附獨立示意圖，僅以單一真實範例說明，型態本身邏輯與型態1、13高度共通）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-10",
+        "R-SR-01",
+        "R-SR-05",
+        "R-TREND-04",
+        "R-TREND-12",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-29",
+      "name": "雙弧底大量紅K突破圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/雙弧底大量紅K突破圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（底部打底核心邏輯與型態28、18共通，但「圓弧底」形狀偵測本身未在既有規則庫找到獨立定義，屬形狀參數化推論）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SCREEN-13",
+        "R-SR-03",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-28",
+      "name": "雙盤底大量紅K突破圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/雙盤底大量紅K突破圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SCREEN-13",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-06",
+      "name": "高檔大量長上影線反轉圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/高檔大量長上影線反轉圖.md",
+      "programmable": "部分",
+      "programmable_note": "（K線形狀與量能條件可程式化，但「高檔情境下長上影線反轉機率」缺乏底層規則庫的量化基準，需依賴 [[高檔變盤線]] 的既有判準推估）",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（K線形狀與停利SOP可回測，但「高檔長上影線」作為獨立命名型態未在既有K棒型態筆記中找到逐字對應段落，屬推論組合）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-05",
+        "R-CANDLE-10",
+        "R-CANDLE-25",
+        "R-TREND-03",
+        "R-TREND-12",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-01",
+      "name": "高檔大量長黑一日反轉圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/高檔大量長黑一日反轉圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-01",
+        "R-CANDLE-10",
+        "R-TREND-03",
+        "R-TREND-04",
+        "R-TREND-12",
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-03"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-07",
+      "name": "高檔跳空黑K回檔反轉圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/高檔跳空黑K回檔反轉圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-12",
+        "R-INDICATOR-09",
+        "R-MA-07",
+        "R-SR-10",
+        "R-TREND-04",
+        "R-TREND-07",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-05",
+      "name": "高檔連2日大量被黑K跌破圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/高檔連2日大量被黑K跌破圖.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-12",
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-03",
+        "R-VOLPRICE-08"
+      ]
+    },
+    {
+      "rule_id": "R-CLASSIC-11",
+      "name": "黑紅黑續跌圖",
+      "category": "經典型態總覽",
+      "file": "經典型態總覽/黑紅黑續跌圖.md",
+      "programmable": "部分",
+      "programmable_note": "（三日組合形狀可程式化，但「黑紅黑續勢」缺乏獨立底層K線組合規則，屬形狀層次的自訂偵測）",
+      "backtestable": "是",
+      "confidence": "低",
+      "confidence_note": "（本次比對未在既有K棒型態筆記中找到「黑紅黑」逐字命名段落，可能是財富篇新增的口訣總結，屬推論對應）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-21",
+        "R-CANDLE-22",
+        "R-CANDLE-26",
+        "R-CANDLE-27",
+        "R-CANDLE-29",
+        "R-CANDLE-30",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-05",
+      "name": "利多不漲主力出貨與利空不跌主力進場口訣（12口訣之3、4）",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/利多不漲主力出貨與利空不跌主力進場口訣.md",
+      "programmable": "部分",
+      "programmable_note": "（「股價未同步上漲/下跌」的技術面判定可程式化；但「利多/利空消息」的判定與時間戳屬於基本面/消息面資料，不在本規則庫的量價技術指標範圍內，需額外接入新聞或公告資料源作為外部輸入才能完整程式化）",
+      "backtestable": "否（需要外部消息面時間戳資料，書中未提供量化判斷公式，回測前須自行接入新聞/公告資料庫並定義「利多/利空」的判定標準）",
+      "confidence": "低",
+      "confidence_note": "（口訣3有2個圖例佐證但仍只是純文字定性描述，無精確數字；口訣4完全無獨立圖例、屬鏡射推論；且兩者皆依賴書中未涵蓋的外部消息面資料，是全書12口訣中程式化難度最高、信心最低的一組，來源筆記亦將其列為次優先開發項目）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-07",
+      "name": "多空完成反轉後續強力走勢口訣（12口訣之7、8）",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/多空完成反轉後續強力走勢口訣.md",
+      "programmable": "部分",
+      "programmable_note": "（趨勢反轉確認本身完全可程式化，直接複用 [[頭頭高底底高多頭趨勢判定]] 與 [[頭頭低底底低空頭趨勢判定]] 的架構切換判斷；但反轉後「大跌/大漲」的量化幅度與觀察天數書中未給精確數字，需自訂）",
+      "backtestable": "是（趨勢反轉確認事件明確可程式化，搭配「反轉後N日報酬率」統計即可直接回測驗證此口訣的統計顯著性，不需額外自訂型態辨識模組）",
+      "confidence": "高",
+      "confidence_note": "（核心邏輯＝直接複用已高信心的趨勢判定規則作為狀態切換觸發點，僅在「反轉初期動能通常強」這一經驗描述上未給精確數字，整體判讀邏輯清晰、可回測性最佳）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-01",
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-04",
+      "name": "多頭大量不漲與空頭大量不跌回檔反彈口訣（12口訣之1、2）",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/多頭大量不漲與空頭大量不跌回檔反彈口訣.md",
+      "programmable": "部分",
+      "programmable_note": "（趨勢前提、成交量放大皆可程式化；「不漲/不跌」與「回檔/反彈」的精確幅度、以及是否演變為趨勢反轉頭部/底部訊號，書中僅定性描述、未給精確數字門檻，需自訂）",
+      "backtestable": "部分（量能放大條件可回測；不漲/不跌與回檔/反彈的精確幅度需先自訂門檻才能精確回測）",
+      "confidence": "中",
+      "confidence_note": "（多空鏡射邏輯與趨勢前提描述清楚，範例合計10例、為書中12口訣中範例數量較多的一組，顯示實務可靠度不低；但精確量能倍數與「不漲/不跌」判定閾值書中未明文給出數字，需自訂參數，故評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-STRATEGY-01",
+        "R-STRATEGY-03",
+        "R-TREND-03",
+        "R-TREND-04",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-08",
+      "name": "晨星夜星與一星二陽二陰騙線辨識口訣（12口訣之9、10）",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/晨星夜星與一星二陽二陰騙線辨識口訣.md",
+      "programmable": "部分",
+      "programmable_note": "（晨星/夜星/一星二陽/一星二陰的K線型態辨識本身已由 [[低檔晨星]]、[[高檔夜星]]、[[一星二陽]]、[[一星二陰]] 完整定義並可程式化；本口訣新增的「多空主控力道對照」與「表面顏色與實際突破方向相反＝騙線」判讀邏輯可程式化，但「近日」時間窗與「力道強弱對照」的量化標準書中未給精確數字）",
+      "backtestable": "部分（K線型態辨識與支撐壓力突破/跌破判定可回測；力道對照與近日窗口需先自訂參數）",
+      "confidence": "中高",
+      "confidence_note": "（K線型態本身已由既有規則庫高信心定義；顏色與突破方向相反即騙線的判讀邏輯清楚、範例合計7例可佐證；但多空力道對照與觀察天數缺乏精確數字，故整體評為中高）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-12",
+        "R-CANDLE-20",
+        "R-CANDLE-27",
+        "R-CANDLE-30",
+        "R-SR-01",
+        "R-SR-02"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-01",
+      "name": "短線波段進出場20條守則",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/短線波段進出場20條守則.md",
+      "programmable": "部分",
+      "programmable_note": "（進場價量條件、停損停利百分比、K棒上影線比例、強覆蓋比例、加碼與週線配合的數字條件皆可程式化；KD的K值方向、週線壓力位置判讀需搭配技術指標與支撐壓力分類規則庫共同運作）",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（20條中多數皆有明確百分比、根數或天數條件，可直接轉換為量化規則；僅KD的K值方向與週線壓力位置屬於需搭配指標/支撐壓力模組的定性判斷，故「可程式化」評為部分而非全部，但不影響整體信心）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-08",
+        "R-MA-08",
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-06",
+      "name": "該回不回該彈不彈趨勢延續強度口訣（12口訣之5、6）",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/該回不回該彈不彈趨勢延續強度口訣.md",
+      "programmable": "部分",
+      "programmable_note": "（趨勢前提與「過高大漲/破低大跌」結果的方向判斷可程式化；但「該回」的觸發時機（理應回檔的判斷基準，例如上漲天數、接近壓力的距離）與「不回/不彈」的容忍觀察期間，書中僅定性描述、未給精確數字，需自訂）",
+      "backtestable": "部分（方向與結果驗證可回測；「該回/該彈」觸發時機與容忍期間需先自訂參數）",
+      "confidence": "中",
+      "confidence_note": "（多空鏡射邏輯清楚、範例合計8例、可與口訣1/2構成同一走勢不同階段的判讀順序，實務脈絡完整；但核心觸發時機與容忍期間書中未給精確數字，需自訂參數，故評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-06",
+        "R-SR-07",
+        "R-TREND-01",
+        "R-TREND-03",
+        "R-TREND-04",
+        "R-TREND-16"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-02",
+      "name": "長線波段選股與操作SOP",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/長線波段選股與操作SOP.md",
+      "programmable": "部分",
+      "programmable_note": "（進場、停損、停利百分比與MA20停利切換條件皆可程式化；「底部經多頭確認」「反彈站上MA20」等定性條件需依賴 [[頭頭高底底高多頭趨勢判定]]、[[均線多頭排列]] 等既有規則模組的輸出）",
+      "backtestable": "是",
+      "confidence": "中高",
+      "confidence_note": "（進場停損停利數字明確、可直接複用短線波段架構＝高；但選股條件中「底部經多頭確認」「反彈站上月線」等定性描述需組合多個既有規則模組共同判定，且第2波重新進場與1倍上限屬於較粗略的經驗法則，故整體評為中高）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-12",
+        "R-MA-08",
+        "R-STRATEGY-01",
+        "R-TREND-03"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-09",
+      "name": "關前爆量與高低檔久盤突破跌破口訣（12口訣之11、12）",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/關前爆量與高低檔久盤突破跌破口訣.md",
+      "programmable": "部分",
+      "programmable_note": "（前高關卡位置、成交量放大條件、久盤區間可分別引用既有支撐壓力與盤整判定規則程式化；「不漲」與「久盤」的精確幅度與天數門檻，書中未給精確數字，需自訂）",
+      "backtestable": "部分（前高關卡、成交量放大、盤整區間突破/跌破皆可回測；「關前」距離門檻與「久盤」天數門檻需先自訂才能精確回測）",
+      "confidence": "中",
+      "confidence_note": "（方向邏輯明確、範例數量在12口訣中並列最多（口訣11共6例）顯示實務出現頻率最高、可靠度不低；但「關前」距離與「久盤」天數缺乏書中精確數字，需自訂並搭配既有支撐壓力/盤整規則，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-01",
+        "R-SR-03",
+        "R-SR-04",
+        "R-TREND-05",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-STRATEGY-03",
+      "name": "飆股選股與技術面操作守則",
+      "category": "綜合操作SOP",
+      "file": "綜合操作SOP/飆股選股與技術面操作守則.md",
+      "programmable": "部分",
+      "programmable_note": "（續抱四要件、量能5級距、成交量同步放大條件皆可程式化；「左低右高2支腳」「長期盤整2個月」等型態辨識需搭配型態辨識模組；飆股波段機率分布（2波80%/3波10%/1波10%）為統計參考值，非個股層級可直接判斷的條件；第2波停利30%～60%為案例觀察區間，非固定公式）",
+      "backtestable": "部分（續抱四要件與量能5級距可直接回測；型態選股條件與波段機率統計屬於統計/型態層級參考，需另建型態辨識模組才能精確回測）",
+      "confidence": "中",
+      "confidence_note": "（續抱四要件與量能5級距條件明確、可程式化程度最高＝高；但選股型態條件、飆股波段機率與停利區間值皆屬經驗參考而非精確公式，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-LINE-12",
+        "R-LINE-14",
+        "R-MA-08",
+        "R-MA-16",
+        "R-SR-06",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-10",
+      "name": "上漲行進缺口與逃逸缺口量測規則",
+      "category": "缺口",
+      "file": "缺口/上漲行進缺口與逃逸缺口量測規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（「是否回補決定強弱」與量測法則的方向性書中明確；但「幾天內」「關鍵位置」等用詞模糊，且量測法則書中明言僅為經驗值非精確公式，量化時需自行補上判斷門檻）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-03",
+        "R-GAP-09",
+        "R-TREND-03"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-15",
+      "name": "下跌行進缺口與逃逸缺口量測規則",
+      "category": "缺口",
+      "file": "缺口/下跌行進缺口與逃逸缺口量測規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（與上漲行進版完全對稱，方向性明確；「幾天內」「關鍵位置」等用詞模糊，量測法則書中明言僅為經驗值）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-04",
+        "R-GAP-10",
+        "R-GAP-14",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-07",
+      "name": "低檔島型反轉規則",
+      "category": "缺口",
+      "file": "缺口/低檔島型反轉規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中高",
+      "confidence_note": "（三要素結構、不常出現、盤整天數與漲幅正相關、支撐位置皆有明確文字與圖例佐證；三種子型態的細部觸發條件〔如「測試底部高」「碎步上漲」的精確判斷式〕書中僅定性描述，需自行量化）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-03"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-16",
+      "name": "低檔末跌段向下竭盡缺口規則",
+      "category": "缺口",
+      "file": "缺口/低檔末跌段向下竭盡缺口規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（三項條件書中明確條列，且與[[高檔末升段向上竭盡缺口規則]]逐字對稱可交叉驗證；精確量化門檻需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-11"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-14",
+      "name": "做頭完成向下跌破缺口規則",
+      "category": "缺口",
+      "file": "缺口/做頭完成向下跌破缺口規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（判斷條件明確，且「不需大量配合」為書中明確強調的特殊條件，與突破缺口版本形成清楚對照，降低誤讀風險）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-09",
+        "R-GAP-19",
+        "R-GAP-20",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-22",
+      "name": "向上3日2缺口要大漲規則",
+      "category": "缺口",
+      "file": "缺口/向上3日2缺口要大漲規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中高",
+      "confidence_note": "（3日2缺口的精確結構定義明確；四種位置的多空意涵書中皆有清楚文字與圖例對照，尤其高檔警訊有具體案例〔次日大量吊人線〕佐證；但「打底/起漲/行進/高檔」位置分類本身需依賴其他上游規則的判定準確度）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-11",
+        "R-GAP-19"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-03",
+      "name": "向上跳空缺口四層價位分級支撐規則",
+      "category": "缺口",
+      "file": "缺口/向上跳空缺口四層價位分級支撐規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（四層價位定義、支撐強度排序、階梯式衰減與「回補是降級不是失效」的判讀邏輯，書中以完整圖例（圖表9-4-6～9-4-8）逐階段示範，條理明確；僅放量門檻的精確倍數未給，需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-02",
+        "R-GAP-01",
+        "R-GAP-05",
+        "R-GAP-19",
+        "R-SR-09"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-23",
+      "name": "向下3日2缺口要大跌規則",
+      "category": "缺口",
+      "file": "缺口/向下3日2缺口要大跌規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中高",
+      "confidence_note": "（與向上版完全鏡射對稱，四種位置的多空意涵書中皆有清楚文字與圖例對照；位置分類需依賴上游規則判定準確度）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-16",
+        "R-GAP-19",
+        "R-GAP-22"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-04",
+      "name": "向下跳空缺口四層價位分級壓力規則",
+      "category": "缺口",
+      "file": "缺口/向下跳空缺口四層價位分級壓力規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（四層價位定義、壓力強度排序、階梯式衰減邏輯與向上版完全鏡射對稱，書中圖例完整；僅放量門檻精確倍數未給，需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-01",
+        "R-GAP-03",
+        "R-GAP-19",
+        "R-SR-10"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-08",
+      "name": "底部盤整區普通缺口規則",
+      "category": "缺口",
+      "file": "缺口/底部盤整區普通缺口規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（「盤整區內部缺口＝普通缺口」的判斷原則與「1-2天內封閉」特徵書中明確描述；但屬於單一對照圖例，樣本較少，且依賴上游盤整區間界定的準確度）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-02",
+        "R-GAP-09",
+        "R-SR-03",
+        "R-SR-04"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-09",
+      "name": "打底完成向上突破缺口規則",
+      "category": "缺口",
+      "file": "缺口/打底完成向上突破缺口規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（三項條件、支撐位置與操作原則書中皆有明確文字與多張圖例佐證，是6型態中描述最完整的一類；僅大量的精確倍數需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-19",
+        "R-GAP-20",
+        "R-SR-03",
+        "R-SR-04"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-12",
+      "name": "漲多回檔向下跳空缺口規則",
+      "category": "缺口",
+      "file": "缺口/漲多回檔向下跳空缺口規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（與[[跌深反彈向上跳空缺口規則]]完全對稱，判斷條件明確；爆量門檻等細節書中未給精確數值）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-06",
+        "R-GAP-13",
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-17",
+      "name": "缺口之上見長紅K強勢整理規則",
+      "category": "缺口",
+      "file": "缺口/缺口之上見長紅K強勢整理規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中高",
+      "confidence_note": "（持有條件、二分之一價分級、費波那契時間規律皆有明確文字與圖例；橫盤區間的精確波動容許度未給精確數值）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-02",
+        "R-GAP-01"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-18",
+      "name": "缺口之下見長黑K弱勢整理規則",
+      "category": "缺口",
+      "file": "缺口/缺口之下見長黑K弱勢整理規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中高",
+      "confidence_note": "（與長紅K版完全對稱，書中並以兩段對照範例驗證「橫盤天數不影響跌破後續跌有效性」；橫盤區間的精確波動容許度未給）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-03",
+        "R-GAP-17"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-20",
+      "name": "缺口假封口判定規則",
+      "category": "缺口",
+      "file": "缺口/缺口假封口判定規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（三項假封口特徵〔長影線／反向大量K／量縮〕書中以條列方式明確給出，且與真封口互為對照，邏輯自洽；僅長影線與大量的精確門檻需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-19"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-01",
+      "name": "缺口基本定義與偵測規則",
+      "category": "缺口",
+      "file": "缺口/缺口基本定義與偵測規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中原文明確給出兩個方向的判斷式與數值範例，定義無歧義）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-03",
+        "R-GAP-04",
+        "R-GAP-24",
+        "R-SR-09",
+        "R-SR-10"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-21",
+      "name": "缺口多空交鋒雙缺口區間規則",
+      "category": "缺口",
+      "file": "缺口/缺口多空交鋒雙缺口區間規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（雙缺口夾擊震盪的結構與突破條件書中明確描述並有示意圖佐證；區間內部震盪的具體操作規則〔如是否可低買高賣〕書中未展開，僅給出方向判定邏輯）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-10",
+        "R-GAP-15",
+        "R-GAP-19"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-05",
+      "name": "缺口成交量強弱與支撐壓力角色互換規則",
+      "category": "缺口",
+      "file": "缺口/缺口成交量強弱與支撐壓力角色互換規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（量能強弱、角色互換、多空交戰三項原則書中皆有明確文字敘述與對照圖例；僅量能門檻的精確倍數需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-03",
+        "R-GAP-04",
+        "R-SR-09",
+        "R-SR-10"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-02",
+      "name": "缺口成因三分類規則",
+      "category": "缺口",
+      "file": "缺口/缺口成因三分類規則.md",
+      "programmable": "部分",
+      "programmable_note": "",
+      "backtestable": "是（僅除權息子類可完全客觀回測；主力/消息面子類的分類準確度取決於量能門檻與新聞資料完整度）",
+      "confidence": "中",
+      "confidence_note": "（三分類的定性描述與權重排序在書中明確；但「消息面」與「主力發動」兩者在缺乏新聞資料時難以純用價量客觀區分，僅能用成交量放大程度做代理近似）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-01"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-19",
+      "name": "缺口真封口判定規則",
+      "category": "缺口",
+      "file": "缺口/缺口真封口判定規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（三要素「大量＋實體反向K＋收盤價越界」書中以條列「重點說明」明確給出，且明確提醒真封口不必然等於反轉方向、須配合整體架構判斷；僅大量倍數與長影線門檻的精確數值需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-03",
+        "R-GAP-04",
+        "R-GAP-20"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-06",
+      "name": "跌深反彈向上跳空缺口規則",
+      "category": "缺口",
+      "file": "缺口/跌深反彈向上跳空缺口規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（型態結構與3項判斷條件書中敘述明確；但「爆大量」門檻與「打底觀察股」的後續量化追蹤方式未給精確數值，屬短線搶反彈的風險提示條款也非嚴格量化）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-01",
+        "R-GAP-09",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-24",
+      "name": "隱形缺口規則",
+      "category": "缺口",
+      "file": "缺口/隱形缺口規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（「開盤價 vs 前一日收盤價、且收盤未回補」的核心概念書中文字定義清楚，並有多張圖例佐證其支撐/壓力/轉強/轉弱功能；但精確判斷式〔尤其「收盤未回補」的邊界是否含等號〕為依原文推論所得，書中未給出逐字數學式，故信心評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-01"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-13",
+      "name": "高檔島型反轉規則",
+      "category": "缺口",
+      "file": "缺口/高檔島型反轉規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中高",
+      "confidence_note": "（三段式結構、罕見性、盤整天數與跌幅正相關、壓力位置皆有明確文字與圖例佐證，與低檔版完全鏡射對稱可交叉驗證；精確跌幅函數未給）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-07"
+      ]
+    },
+    {
+      "rule_id": "R-GAP-11",
+      "name": "高檔末升段向上竭盡缺口規則",
+      "category": "缺口",
+      "file": "缺口/高檔末升段向上竭盡缺口規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（三項條件〔位置／爆量／回補〕書中以條列方式明確給出，且與9-3章末跌段竭盡缺口逐字對稱可交叉驗證；僅各項的精確量化門檻〔爆量倍數、小幅上漲定義〕未給，需自行校準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-GAP-09",
+        "R-GAP-13",
+        "R-GAP-14"
+      ]
+    },
+    {
+      "rule_id": "R-TREND-16",
+      "name": "做多進場10大戒律",
+      "category": "趨勢判定",
+      "file": "趨勢判定/做多進場10大戒律.md",
+      "programmable": "部分",
+      "programmable_note": "（多數條件可轉換為可程式化的量化過濾條件，但部分條件（如「量價背離」「均線開口大」「乖離過大」）需要額外定義量化門檻，書中本節未逐一給出精確數字）",
+      "backtestable": "部分（多數條件可回測；「量價背離」「乖離過大」「均線開口大」需先自訂量化門檻才能精確回測）",
+      "confidence": "中",
+      "confidence_note": "（10條戒律的方向與邏輯描述清楚＝高；但其中3～4條涉及「背離」「乖離過大」「均線開口大」等模糊描述，書中未給明確數字門檻＝拉低信心，綜合評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-17",
+      "name": "做空進場10大戒律",
+      "category": "趨勢判定",
+      "file": "趨勢判定/做空進場10大戒律.md",
+      "programmable": "部分",
+      "programmable_note": "（多數條件可轉換為可程式化的量化過濾條件，但「量價背離」「乖離過大」「均線開口大」等條件書中本節未逐一給出精確數字）",
+      "backtestable": "部分（多數條件可回測；「量價背離」「乖離過大」「均線開口大」需先自訂量化門檻才能精確回測）",
+      "confidence": "中",
+      "confidence_note": "（10條戒律的方向與邏輯描述清楚＝高；部分條件涉及模糊描述、書中未給明確數字門檻＝拉低信心，綜合評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-11",
+      "name": "多轉空做頭量價與均線排列鎖股訊號（含一日反轉）",
+      "category": "趨勢判定",
+      "file": "趨勢判定/多轉空做頭量價與均線排列鎖股訊號.md",
+      "programmable": "部分",
+      "programmable_note": "（均線排列與MA60跌破條件可完全程式化；一日反轉的觸發邏輯明確可程式化；「爆量」的精確倍數門檻本節未給出具體數字，需自訂）",
+      "backtestable": "部分（爆量門檻需自訂數字才能精確回測；均線排列、MA60跌破、一日反轉條件皆可直接回測）",
+      "confidence": "中",
+      "confidence_note": "（整體流程方向、均線排列條件、一日反轉觸發邏輯描述清楚＝高；「爆量」量化倍數本節未給具體數字＝拉低信心，綜合評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-14",
+      "name": "多頭短線選股與停損停利SOP",
+      "category": "趨勢判定",
+      "file": "趨勢判定/多頭短線選股與停損停利SOP.md",
+      "programmable": "部分",
+      "programmable_note": "（趨勢、均線排列、股價位置、量能倍數、K線實體%、停損停利%數皆可程式化；MACD/KD指標訊號本身屬於指標分類，此處僅整合引用，實際判斷邏輯需參照指標分類規則庫）",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中對進場、停損、停利各環節皆給出具體數字：1.3倍/2倍量、2%實體漲幅、5%～7%停損、10%/20%停利門檻、3天急漲）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-08",
+      "name": "多頭趨勢改變先知先覺訊號",
+      "category": "趨勢判定",
+      "file": "趨勢判定/多頭趨勢改變先知先覺訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中明確列出2種先知先覺情況，並在短線做多獲利方程式中直接寫明「收盤出現頭頭低，出場」為具體可執行規則）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-06",
+      "name": "多頭趨勢進場訊號（回後買上漲與盤整突破）",
+      "category": "趨勢判定",
+      "file": "趨勢判定/多頭趨勢進場訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（訊號名稱、方向與觸發條件描述明確＝高；但「帶量」「中長紅K」的精確量化門檻本節未直接給出，需借用書中後段短線做多SOP的數字作為代理門檻，故綜合信心中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-12",
+      "name": "多頭高檔爆量停利訊號",
+      "category": "趨勢判定",
+      "file": "趨勢判定/多頭高檔爆量停利訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中直接給出「前一日量3～5倍以上」「5日均線量2倍以上」等具體數字門檻，且分別對應長黑K與連續不漲兩種明確觸發條件）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-05",
+      "name": "盤整趨勢判定與型態",
+      "category": "趨勢判定",
+      "file": "趨勢判定/盤整趨勢判定與型態.md",
+      "programmable": "部分",
+      "programmable_note": "（核心判定「非多頭且非空頭＝盤整」與15%寬度門檻可完全程式化；4種型態的細分類需要對上頸線、下頸線做斜率估計，書中僅用示意圖呈現，無量化標準，屬工程判斷）",
+      "backtestable": "是（核心判定與15%門檻可回測；4種型態細分類可回測但精確度依頸線擬合演算法而定）",
+      "confidence": "中",
+      "confidence_note": "（盤整核心定義與15%寬度門檻明確＝高；但4種盤整型態僅以示意圖呈現、無量化斜率標準＝中，綜合評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-10",
+      "name": "空轉多打底量價與均線排列鎖股訊號",
+      "category": "趨勢判定",
+      "file": "趨勢判定/空轉多打底量價與均線排列鎖股訊號.md",
+      "programmable": "部分",
+      "programmable_note": "（均線排列與60日均突破條件可完全程式化；「爆量」「異常大量」的精確倍數門檻本節未給出具體數字，需自訂）",
+      "backtestable": "部分（爆量門檻需自訂數字才能精確回測；均線排列與MA60突破條件可直接回測）",
+      "confidence": "中",
+      "confidence_note": "（整體流程方向與均線排列條件描述清楚＝高；「爆量」量化倍數本節未給具體數字＝拉低信心，綜合評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-15",
+      "name": "空頭短線選股與停損停利SOP",
+      "category": "趨勢判定",
+      "file": "趨勢判定/空頭短線選股與停損停利SOP.md",
+      "programmable": "部分",
+      "programmable_note": "（趨勢、均線排列、股價位置、量能倍數、K線實體%、停損停利%數皆可程式化；MACD/KD指標訊號屬於指標分類，此處僅整合引用）",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中對進場、停損、停利各環節皆給出具體數字，與多頭SOP對稱且同樣明確）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-13",
+      "name": "空頭確認爆大量與做空時機判斷",
+      "category": "趨勢判定",
+      "file": "趨勢判定/空頭確認爆大量與做空時機判斷.md",
+      "programmable": "部分",
+      "programmable_note": "（月線/季線相對位置與方向的判斷邏輯明確可程式化；「大量」的精確倍數門檻本節未給出具體數字，需自訂）",
+      "backtestable": "部分（月線/季線相對位置判斷可直接回測；「大量」門檻需自訂數字才能精確回測）",
+      "confidence": "中",
+      "confidence_note": "（月線/季線相對位置的操作決策邏輯描述清楚＝高；「大量」的量化定義本節未給出精確倍數＝拉低整體信心，綜合評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-09",
+      "name": "空頭趨勢改變先知先覺訊號",
+      "category": "趨勢判定",
+      "file": "趨勢判定/空頭趨勢改變先知先覺訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中明確列出2種先知先覺情況，並在短線做空獲利方程式中直接寫明「收盤出現底底高，回補」為具體可執行規則）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-07",
+      "name": "空頭趨勢進場訊號（彈後空下跌與盤整跌破）",
+      "category": "趨勢判定",
+      "file": "趨勢判定/空頭趨勢進場訊號.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "中",
+      "confidence_note": "（訊號方向與觸發條件明確＝高；「帶量」「長黑K」精確門檻本節未直接給出，需借用短線做空SOP的代理數字，綜合信心中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-18",
+      "name": "趨勢多空循環7步驟",
+      "category": "趨勢判定",
+      "file": "趨勢判定/趨勢多空循環7步驟.md",
+      "programmable": "部分",
+      "programmable_note": "（各階段觸發條件多數可程式化，但完整7步驟的「循環狀態機」需要整合R-TREND-01～13多條子規則作為輸入，工程實作複雜度較高；10%～15%修正幅度門檻書中有明確數字）",
+      "backtestable": "部分（各子條件可回測，但完整狀態機需整合多條規則，實作與驗證成本較高）",
+      "confidence": "中",
+      "confidence_note": "（整體流程框架描述清楚，且10%～15%、二分之一等關鍵數字明確＝高；但作為連續性「循環」的完整狀態機判斷，需要組合大量子規則且部分轉換時機書中僅用示意圖呈現，工程化時仍需補充邊界判斷，綜合評為中）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-01",
+      "name": "轉折波定義與取點演算法（5日/10日/20日短中長線）",
+      "category": "趨勢判定",
+      "file": "趨勢判定/轉折波定義與取點演算法.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（原書逐步拆解取點步驟，並附口訣與圖表交替範例，5/10/20日三種版本邏輯完全一致，僅均線週期不同）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-02",
+      "name": "轉折波簡化降噪畫法（中波／K線橫盤／趨勢波）",
+      "category": "趨勢判定",
+      "file": "趨勢判定/轉折波簡化降噪畫法.md",
+      "programmable": "部分",
+      "programmable_note": "（中波與K線橫盤所依賴的「盤整區間」「橫盤區間」邊界，書中僅用圖例示意，未給出量化門檻，需自行定義例如天數、幅度百分比或穿越次數；趨勢波邏輯本身明確可完全程式化）",
+      "backtestable": "部分（趨勢波規則明確可直接回測；中波與K線橫盤需先自訂盤整/橫盤邊界參數才能回測）",
+      "confidence": "中",
+      "confidence_note": "（取到區間後的高低點運算邏輯清楚，但「什麼樣的走勢算盤整區間」「什麼算橫盤」書中用圖例示意而非量化門檻，需工程判斷補完）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-04",
+      "name": "頭頭低底底低空頭趨勢判定",
+      "category": "趨勢判定",
+      "file": "趨勢判定/頭頭低底底低空頭趨勢判定.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中原文明確標註「2個條件要同時成立，缺一不可」，判定方式描述清楚，與多頭判定完全對稱）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-TREND-03",
+      "name": "頭頭高底底高多頭趨勢判定",
+      "category": "趨勢判定",
+      "file": "趨勢判定/頭頭高底底高多頭趨勢判定.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中原文明確標註「2個條件要同時成立，缺一不可」，且清楚說明判定方式為「由最後一天收盤K線往左，和最近的頭及底比較」）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-SCREEN-05",
+      "name": "4基10技選股法",
+      "category": "選股策略",
+      "file": "選股策略/4基10技選股法.md",
+      "programmable": "部分",
+      "programmable_note": "（4項基本面條件與10項技術面條件中的均線多排、支撐壓力突破、MACD/KD方向、成交量分類均可程式化；但「位置」「型態」「獲利目標與操作定法」等項目多屬定性研判，需人工介入或搭配其他規則量化）",
+      "backtestable": "部分（股本、營收年增率、均線多排、法人買超等可回測；「位置」「型態」「獲利目標」等定性項目需先量化才能納入回測）",
+      "confidence": "高",
+      "confidence_note": "（4項基本面條件與部分技術面條件書中給出明確數字門檻如「50億元以下」；10項技術面條件多數需搭配其他章節規則量化，但條列清楚，安國實例完整佐證整體流程）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-08",
+        "R-MA-09",
+        "R-SCREEN-04",
+        "R-SR-17",
+        "R-TREND-03",
+        "R-TREND-04",
+        "R-TREND-05",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-17",
+      "name": "做多環境四大前提規則",
+      "category": "選股策略",
+      "file": "選股策略/做多環境四大前提規則.md",
+      "programmable": "是",
+      "programmable_note": "（前3項可完全量化；第4項題材屬性需仰賴題材資料庫或新聞NLP標記，屬加分項而非必要條件）",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（四項條件書中逐一明確列出，且第1-3項均給出具體排名數字「前3類股」「前1~3檔個股」）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SCREEN-04",
+        "R-SCREEN-05",
+        "R-SCREEN-18"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-18",
+      "name": "做空環境四大前提規則",
+      "category": "選股策略",
+      "file": "選股策略/做空環境四大前提規則.md",
+      "programmable": "是",
+      "programmable_note": "（前3項可完全量化；第4項需結合「前波漲幅排名」與「率先轉弱」的相對時間判斷，或基本面資料判斷是否為炒作性超漲）",
+      "backtestable": "是（前3項可回測；第4項「前波漲幅大」門檻需自訂後才可完整回測）",
+      "confidence": "高",
+      "confidence_note": "（四項條件與做多前提對稱，書中明確列出具體排名數字「最弱前3類股」「最弱1~3檔個股」；僅第4項的「漲多」程度未量化）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SCREEN-17",
+        "R-TREND-07"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-02",
+      "name": "公司沒有好壞只有多空操作心法",
+      "category": "選股策略",
+      "file": "選股策略/公司沒有好壞只有多空操作心法.md",
+      "programmable": "部分",
+      "programmable_note": "（心法本身是「不應排除」的負面表列，不直接產生買賣訊號；可程式化為「候選股篩選流程中不得使用基本面優劣分數與價位絕對高低作為過濾條件」的流程約束，實際多空判斷仍需交給趨勢判定類規則）",
+      "backtestable": "否（本規則不直接產生訊號，是對其他規則的使用限制與心態指引）",
+      "confidence": "中",
+      "confidence_note": "（心法本身書中明確主張並有金麗科實例佐證，但性質是定性的操作紀律而非可獨立回測的訊號規則）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-03",
+        "R-TREND-04",
+        "R-TREND-05"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-04",
+      "name": "六六大順選股法",
+      "category": "選股策略",
+      "file": "選股策略/六六大順選股法.md",
+      "programmable": "是",
+      "programmable_note": "（六大構面本身可各自轉為布林條件並組合成綜合評分，但「位置」細分類別多屬定性描述，實作時需簡化為有限狀態集合）",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（六大構面與研判順序書中明確條列，關鍵量化門檻如1.3倍量能、3線多排均有明確數字；「位置」細分類別為定性描述，需自行離散化）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-08",
+        "R-MA-09",
+        "R-MA-10",
+        "R-MA-11",
+        "R-MA-13",
+        "R-MA-14",
+        "R-TREND-03",
+        "R-TREND-04",
+        "R-TREND-05",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-03",
+      "name": "基本面選股六大類查核清單",
+      "category": "選股策略",
+      "file": "選股策略/基本面選股六大類查核清單.md",
+      "programmable": "部分",
+      "programmable_note": "（6大類可轉為「資料完整性檢查」的必查欄位清單，屬ETL/資料模型層面；但因書中未提供各欄位的合格區間數字，無法直接產生布林篩選條件，需另外取得門檻來源才能程式化為真正的篩選規則）",
+      "backtestable": "否（無篩選門檻可回測，僅為欄位盤點清單）",
+      "confidence": "低",
+      "confidence_note": "（書中明確僅列出「該查哪些欄位」的分類框架，未提供任何數字及格線；鴻海案例數字為個股實際值而非標準，強行套用會誤導規則庫）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-21",
+        "R-SCREEN-05",
+        "R-VOLPRICE-02"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-11",
+      "name": "底部狹幅盤整大量紅K突破鎖股",
+      "category": "選股策略",
+      "file": "選股策略/底部狹幅盤整大量紅K突破鎖股.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（盤整時長門檻與進場觸發邏輯書中文字明確描述，並有4個具體範例的整理月數與盤整區低點價位佐證）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SR-03",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-10",
+      "name": "強勢飆股第2波選股法",
+      "category": "選股策略",
+      "file": "選股策略/強勢飆股第2波選股法.md",
+      "programmable": "部分",
+      "programmable_note": "（第1波多頭確認、回檔修正、第2波攻擊量進場的邏輯骨架可轉為條件式流程；但「回檔修正」的幅度／天數門檻、「攻擊量」的具體倍數，書中未給數字，需借用其他規則（如 [[成交量分類與倍數門檻定義]] 的攻擊量1.2-1.3倍MA5）或自行以歷史資料校準）",
+      "backtestable": "部分（骨架可回測，但因回檔幅度/天數門檻未量化，回測結果高度依賴自訂參數，穩健性待驗證）",
+      "confidence": "低",
+      "confidence_note": "（書中僅提供定性描述與2檔股票代號範例（因OCR辨識限制，個股中文名稱未能確認），無任何回檔幅度、天數或攻擊量倍數的量化門檻）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-19",
+      "name": "技術線圖17項看圖重點與每日收盤SOP規則",
+      "category": "選股策略",
+      "file": "選股策略/技術線圖17項看圖重點與每日收盤SOP規則.md",
+      "programmable": "部分",
+      "programmable_note": "（項目2的漲停時間分級、項目1/6/8/9的架構一致性檢查、項目12-17的流程性收尾工作可程式化；項目3的「洗盤後再漲」判斷、項目10的獲利空間估算、項目11的逆勢交易時機屬於較主觀的研判，需搭配其他規則的量化輸出作為代理）",
+      "backtestable": "部分（漲停時間分級、候選收斂數量可回測；架構一致性、逆勢機會判斷等需先量化為具體規則輸出才能完整回測）",
+      "confidence": "中高",
+      "confidence_note": "（17項檢視重點書中逐一列出，其中漲停時間分級與收尾候選數量有明確數字；多數項目屬於「看圖時應檢查什麼」的定性SOP，需結合本規則庫其他章節的量化規則才能完全程式化）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-08",
+        "R-MA-09",
+        "R-SCREEN-17",
+        "R-SCREEN-18"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-01",
+      "name": "投資與投機選股標的池區分原則",
+      "category": "選股策略",
+      "file": "選股策略/投資與投機選股標的池區分原則.md",
+      "programmable": "部分",
+      "programmable_note": "（母體篩選條件本身可程式化，如「是否為台灣50/中型100成分股」「股本規模區分大型股/中小型股」；但「基本面佳」「線形強勢」等具體判準需依賴其他規則，本規則僅提供分流架構）",
+      "backtestable": "否（本規則僅為母體分流架構，非可直接產生買賣訊號的規則，需搭配後續章節規則才可回測）",
+      "confidence": "中",
+      "confidence_note": "（分流原則書中明確主張，但「投資母體=台灣50/中型100」「投機母體=中小型股」為定性描述，未給出精確的市值/股本切分數字）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SCREEN-03",
+        "R-SCREEN-05"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-09",
+      "name": "未卜先知選股法",
+      "category": "選股策略",
+      "file": "選股策略/未卜先知選股法.md",
+      "programmable": "部分",
+      "programmable_note": "（各觀察的「進場觸發」條件（大量紅K突破關鍵價位、均線多排分級）可程式化；「鎖股」階段的底部型態辨識（如頭肩底、圓弧底、均線糾結時長）需依賴其他型態辨識規則或人工複核輔助）",
+      "backtestable": "部分（有明確門檻的觀察一、二可回測；觀察三、四、五依賴型態辨識與相對位置判斷，量化後可回測，但實作複雜度較高）",
+      "confidence": "中",
+      "confidence_note": "（5種觀察各有清楚的兩階段邏輯與個股範例佐證，但「大量」「強力反彈」等量能強度多數未給精確倍數，需借用其他規則的量能分類補齊）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-MA-16",
+        "R-SR-12",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-16",
+      "name": "每日選股掃描起手流程與初步排除規則",
+      "category": "選股策略",
+      "file": "選股策略/每日選股掃描起手流程與初步排除規則.md",
+      "programmable": "部分",
+      "programmable_note": "（漲跌幅門檻、排行檢視範圍可完全程式化；「線形不好看不出方向」屬定性判斷，可用趨勢判定分類規則的「盤整」狀態作為代理；「成交量太小」「股價太低」書中未給精確數字，需自訂或沿用 [[特別報價選股法]] 的1,000張／5元門檻作為參考）",
+      "backtestable": "部分（漲跌幅與排行門檻可回測；三項排除條件中僅「線形不明確」需借用趨勢判定規則量化，成交量/股價門檻需自訂）",
+      "confidence": "中高",
+      "confidence_note": "（起手篩選的3.5%門檻與前50檔範圍書中明確；三項排除條件為定性描述，精確數字需借用書中其他章節或自訂）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SCREEN-07"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-06",
+      "name": "淘汰法選股排除規則",
+      "category": "選股策略",
+      "file": "選股策略/淘汰法選股排除規則.md",
+      "programmable": "部分",
+      "programmable_note": "（第2、4、5、8、9項可具體量化為布林條件；第1、3、6、7項需搭配其他規則的中間產出（均線多排狀態、指標背離判定）；第10、11項屬於「訊號不明確／人工判讀」性質，難以完全程式化，實作上可用「條件同時滿足度過低」代理判斷）",
+      "backtestable": "部分（第2、4、5、8、9項可回測；第10項依賴主觀判讀代理指標，回測結果穩健性較低）",
+      "confidence": "中高",
+      "confidence_note": "（11條排除條件書中逐一明確條列並各附反面案例；其中第5項的「100%漲幅」為書中明確數字，其餘多數項目為條件式定性描述，量化門檻需部分自訂，故整體評為中高）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-03",
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-04"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-07",
+      "name": "特別報價選股法",
+      "category": "選股策略",
+      "file": "選股策略/特別報價選股法.md",
+      "programmable": "部分",
+      "programmable_note": "（步驟1-3的量價門檻可完全程式化；步驟4-9涉及「符合做多條件」「仔細研判」「強弱優先順序」等定性判斷，需串接其他技術面規則如 [[六六大順選股法]] 或趨勢判定分類規則才能量化）",
+      "backtestable": "部分（量價門檻可回測；日線/週線「符合做多條件」需先定義具體規則才可回測）",
+      "confidence": "中",
+      "confidence_note": "（步驟1-3有明確數字門檻；步驟4-9為流程性定性描述，未附個股案例佐證判讀標準）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SCREEN-04"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-08",
+      "name": "盤中選股設定法",
+      "category": "選股策略",
+      "file": "選股策略/盤中選股設定法.md",
+      "programmable": "部分",
+      "programmable_note": "（第7、8項有明確數字可程式化；其餘7項條件名稱明確但「爆量」「開高強勢」「即將漲停」「精選次日續漲」等判定門檻書中未給出具體數字，需自訂或依看盤軟體既有邏輯實作）",
+      "backtestable": "部分（第7、8項可回測；其餘條件需先自訂門檻才能回測，回測結果對自訂參數敏感）",
+      "confidence": "低",
+      "confidence_note": "（僅第7、8項有明確數字；其餘7種條件書中僅列名稱，無文字說明判定標準，也無圖表案例佐證）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-SCREEN-07"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-12",
+      "name": "空頭強勢反彈月線上橫盤大量紅K突破鎖股",
+      "category": "選股策略",
+      "file": "選股策略/空頭強勢反彈月線上橫盤大量紅K突破鎖股.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是（核心邏輯可回測，橫盤整理時長門檻需自訂）",
+      "confidence": "中高",
+      "confidence_note": "（辨識邏輯與進場觸發書中文字明確，2個範例佐證型態；但橫盤整理所需最短時長、大量的精確倍數書中未給出）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-04",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-14",
+      "name": "緩步上漲後大量長紅K攻擊位置",
+      "category": "選股策略",
+      "file": "選股策略/緩步上漲後大量長紅K攻擊位置.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是（核心「大量長紅K攻擊訊號」可回測；「緩步上漲階段」的判定需先量化斜率/時長門檻）",
+      "confidence": "中高",
+      "confidence_note": "（進場觸發邏輯與文字定義明確，2個範例佐證；但「爆天量」與「緩步上漲」的精確量化門檻書中未給數字，需自訂代理參數）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-SCREEN-15",
+      "name": "緩漲上升軌道線突破大量長紅K做多",
+      "category": "選股策略",
+      "file": "選股策略/緩漲上升軌道線突破大量長紅K做多.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（辨識條件、取點方式與進場觸發邏輯書中文字明確描述，2個範例附具體低點價位佐證；量能倍數雖未精確量化，但可穩定沿用既有的成交量分類規則）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-CANDLE-34",
+        "R-LINE-14",
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-SCREEN-13",
+      "name": "雙盤底大量紅K突破進場",
+      "category": "選股策略",
+      "file": "選股策略/雙盤底大量紅K突破進場.md",
+      "programmable": "部分",
+      "programmable_note": "（雙底不創新低、突破壓力區、爆量紅K三要素可程式化；但因書中無文字定義，兩次底部之間的時間間隔、箱型區間寬窄等辨識細節缺乏明確依據，實作時需自行假設參數並以歷史案例校準）",
+      "backtestable": "部分（核心「不創新低＋突破＋爆量」邏輯可回測，但雙底偵測演算法本身為歸納推論，需先以歷史案例驗證偵測邏輯的穩健性再回測績效）",
+      "confidence": "低",
+      "confidence_note": "（此規則的辨識條件並非書中文字直接定義，而是根據圖表標註與型態邏輯歸納整理而得，與本分類其他4種底部反轉圖形規則相比，來源可靠度較低，使用時應標註為推論規則）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-11",
+      "name": "壓力支撐區大量K線隔日應對規則",
+      "category": "量價",
+      "file": "量價/壓力支撐區大量K線隔日應對規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（4條規則的觸發條件（K線顏色、上下影線、次日漲跌方向）在原文中皆有明確文字描述）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-08"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-04",
+      "name": "多頭上漲量價背離三型態（價漲量縮／價平量增／價漲量平）",
+      "category": "量價",
+      "file": "量價/多頭上漲量價背離三型態.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "部分（型態辨識邏輯可程式化並回測；「量縮/量增/量平」的相對比較窗口與容許區間需自訂數值才能精確回測）",
+      "confidence": "中",
+      "confidence_note": "（三型態的判定邏輯與「位置決定價平量增方向」的規則描述清楚＝高；但缺乏具體倍數/百分比門檻，需自訂比較基準，拉低整體信心）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-01"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-05",
+      "name": "多頭起漲量能判讀",
+      "category": "量價",
+      "file": "量價/多頭起漲量能判讀.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（5個判讀重點的觸發條件、關鍵價位（起漲紅K最低點/最高點）與後續K線顏色/漲跌方向在原文中描述明確）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-VOLPRICE-01"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-09",
+      "name": "多頭轉折關鍵大量K線操作對應",
+      "category": "量價",
+      "file": "量價/多頭轉折關鍵大量K線操作對應.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（5個對應點在原文中皆有明確K線顏色、關鍵點與後續反應的文字描述；第3點雖為原文獨有內容，但描述同樣具體明確）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-12",
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-04",
+        "R-VOLPRICE-05"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-08",
+      "name": "大量K線支撐壓力回溯標記通用規則",
+      "category": "量價",
+      "file": "量價/大量K線支撐壓力回溯標記通用規則.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（回溯標記邏輯在原文中以7條並列句型明確列出，且明確指出此邏輯可通用於多頭/空頭/盤整三種狀態）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-03"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-01",
+      "name": "成交量分類與倍數門檻定義",
+      "category": "量價",
+      "file": "量價/成交量分類與倍數門檻定義.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（書中對主要6項給出明確倍數與天數門檻；「進貨量/出貨量/調節量/草叢量」的方向標記需搭配後續價格回溯確認，屬於書中明確描述的判定邏輯而非額外假設，故仍評為高）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-10",
+        "R-VOLPRICE-03"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-06",
+      "name": "空頭下跌大量支撐壓力轉化與換手失敗判定",
+      "category": "量價",
+      "file": "量價/空頭下跌大量支撐壓力轉化與換手失敗判定.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（支撐/壓力轉化邏輯、換手失敗判定條件與回溯標記為進貨量的觸發條件在原文中描述明確）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-10",
+        "R-TREND-13",
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-03",
+        "R-VOLPRICE-07"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-10",
+      "name": "空頭轉折關鍵大量K線操作對應",
+      "category": "量價",
+      "file": "量價/空頭轉折關鍵大量K線操作對應.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（5條在原文中皆有明確K線顏色、關鍵點與後續反應的文字描述，且為書中對空頭起跌量能的唯一完整段落，不與其他規則重疊）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-VOLPRICE-01",
+        "R-VOLPRICE-09"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-07",
+      "name": "窒息量與凹洞量（空頭末跌段力竭反轉訊號）",
+      "category": "量價",
+      "file": "量價/窒息量與凹洞量.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（窒息量的0.5倍門檻與凹洞量的3日K線組合順序在原文中皆有明確數字與描述）",
+      "implementation_status": "not_started",
+      "depends_on": []
+    },
+    {
+      "rule_id": "R-VOLPRICE-02",
+      "name": "量價因果關係與四維度綜合判讀原則",
+      "category": "量價",
+      "file": "量價/量價因果關係與四維度綜合判讀原則.md",
+      "programmable": "部分",
+      "programmable_note": "（第4、5點的「4維度框架」可作為所有量價規則的必要輸入變數，屬於可程式化的規則骨架；第1、3、6點屬於方法論告誡與風險提示，難以直接轉為單一觸發條件，僅能作為規則設計的前提假設或訊號可信度的權重調整依據）",
+      "backtestable": "否（本規則為質性方法論與風險提示，非可直接觸發買賣訊號的量化條件；4維度框架可作為其他量化規則的必要輸入欄位間接參與回測）",
+      "confidence": "中",
+      "confidence_note": "（核心觀念與4維度框架在原文中描述明確＝高；但缺乏具體數字門檻、且主力對敲等提示屬於定性風險提醒，難以獨立驗證，故整體評為中）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-03",
+        "R-TREND-04"
+      ]
+    },
+    {
+      "rule_id": "R-VOLPRICE-03",
+      "name": "高檔爆量三分類判讀（調節量／換手量／出貨量）",
+      "category": "量價",
+      "file": "量價/高檔爆量三分類判讀.md",
+      "programmable": "是",
+      "programmable_note": "",
+      "backtestable": "是",
+      "confidence": "高",
+      "confidence_note": "（3種分類的判定條件、比較基準（前一日量2倍）與情境二擇一的門檻在原文中皆有明確文字描述）",
+      "implementation_status": "not_started",
+      "depends_on": [
+        "R-TREND-01",
+        "R-VOLPRICE-01"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+pandas>=2.2
+numpy>=1.26
+pytest>=8.0
+requests>=2.31
+# Turso(libsql)雲端資料庫連線：套件名稱這幾年改過幾次(libsql-client -> libsql-experimental -> libsql)，
+# 部署前務必到 docs.turso.tech/sdk/python 確認目前實際可用的套件名稱與此處是否一致。
+libsql
+streamlit>=1.35

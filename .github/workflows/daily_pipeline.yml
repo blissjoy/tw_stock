@@ -1,0 +1,36 @@
+name: 每日選股 pipeline
+
+on:
+  schedule:
+    # UTC 11:30 週一~五 = 台灣時間 19:30，晚於三大法人/融資融券資料通常齊全的時間點
+    - cron: "30 11 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  daily-pipeline:
+    runs-on: ubuntu-latest
+    # TPEx透過FinMind逐股抓取約需2400次請求，600次/小時額度下大約4小時，
+    # public repo 的 GitHub Actions 標準Linux runner無分鐘數上限，故此處放寬timeout
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily pipeline
+        env:
+          FINMIND_API_TOKEN: ${{ secrets.FINMIND_API_TOKEN }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
+        run: python scripts/daily_pipeline.py
