@@ -562,3 +562,44 @@ session意外中斷後恢復，使用者確認接續系統呈現層（GitHub Act
 拿到Turso憑證後的驗證順序：`seed_turso_from_local.py`（一次性灌歷史資料）→ `daily_pipeline.py --dry-run`（驗證管線邏輯）→ 補完LINE/Gmail憑證後跑一次正式（不加`--dry-run`）確認真的收得到通知 → GitHub Actions手動`workflow_dispatch`觸發一次確認排程正確 → Streamlit部署確認手機/電腦都看得到。詳細步驟見 `README.md`。
 
 之後可選方向（待使用者決定）：①調校R-TREND-14的「頭頭低」提早出場機制（回測時發現勝率偏低22.1%卻佔出場64%）；②逐步接上更多規則庫規則到`daily_screener.py`（目前只有R-TREND-14一條）；③分點籌碼資料（FinMind帳號權限限制）與剩餘21檔TPEx缺資料原因（待IP解封）。
+
+## 首次 commit + push 上 GitHub（2026-07-22）
+
+發現整個專案（連246條規則庫、回測引擎都算在內）從頭到尾**只有GitHub建repo時的`first commit`**，其餘全部檔案都還是本機未追蹤狀態。使用者確認後執行：`.gitignore`補上`*.log`/`backfill_log.txt`（避免`scripts/backfill_history.py`的stdout log檔被誤commit），確認`.env`與`data/*.db`（531MB）皆正確被忽略，393個檔案、32,404行一次commit+push上`github.com/blissjoy/tw_stock`。過程中在GitHub網頁上另外多了一個使用者自己加的`.devcontainer/devcontainer.json`（Codespaces快速設定），已正常merge，無衝突。
+
+## Turso 連線問題排查與修正（2026-07-22）
+
+實際申請Turso帳號、把憑證放進`.env`與GitHub Actions/Streamlit Cloud的secrets後，真正動手跑`seed_turso_from_local.py`才發現一連串規劃階段沒預料到的問題：
+
+1. **`libsql`套件在本機Python 3.14環境裝不起來**：這個套件是PyO3/Rust原生binding，沒有這個Python版本的預編譯wheel，需要Rust+cmake從原始碼編譯，直接失敗。改用純Python實作、實測可正常安裝的舊版**`libsql-client`**（`requirements.txt`已更新並加註原因）。
+2. **`libsql-client`預設的websocket(hrana)連線模式對目前Turso伺服器不穩定**：`TURSO_DATABASE_URL`的`libsql://`被client轉譯成`wss://`，實測會隨機出現連線hang住或`aiohttp.client_exceptions.WSServerHandshakeError: 400 Invalid response status`；改成同一個host的`https://`（純HTTP batch API）scheme實測穩定且快很多。已在`turso_client.py`寫成`_force_https_scheme()`固定轉換，不使用`.env`原本設定的scheme。
+3. **`libsql_client.ClientSync`的實際API跟原本假設的sqlite3風格差很多**：`.execute()`回傳`ResultSet`（`.rows`/`.columns`，沒有`.fetchone()`/`.fetchall()`/`.description`）、沒有`.commit()`（每個statement即時生效）、沒有`.executemany()`但有`.batch()`可一次網路請求送多筆。重寫了`turso_client.py`的`TursoConnection`轉接器：包一層`_ResultSetCursor`補齊cursor慣用介面，`executemany()`優先用`.batch()`（分500筆一個chunk，避免單次請求過大），都沒有才逐列迴圈。新增2個對**真實`libsql_client`套件**（用本機`file:`模式，不需要網路或Turso帳號）的整合測試，取代原本只對假物件的測試，實際驗證這個轉接器對「真正會用到的那個套件」有效。
+4. 修正後`seed_turso_from_local.py`（400天歷史資料）成功背景執行中，進度：stocks 1,854、stock_prices已接近跑完（661,771筆）、institutional_investors進行中、margin_trading尚未開始。
+
+⚠️ 這整段印證了`turso_client.py`當初「把套件細節隔離在單一檔案」的設計是對的——套件從假設的`libsql`換成`libsql-client`、連線scheme從`libsql://`改成`https://`、API從假設的sqlite3風格改成真實的ResultSet風格，全部只需要改這一個檔案，`storage.py`與呼叫端完全沒有異動。
+
+## 儀表板UX不符預期，補上市場海選+點選串接+即時重跑（2026-07-22）
+
+使用者部署Streamlit Cloud後回報兩個問題，依序處理：
+
+1. **`dashboard/app.py`連Turso時crash**：`get_conn()`從沒建過表的全新Turso資料庫查詢`daily_candidates`直接噴「no such table」。修正：連線後立刻呼叫`storage.ensure_schema(conn)`。
+2. **功能不符預期**：使用者原本想要的是「用目前的rule海選全部台股，列出清單，點進去才看個股分析」，但看到的畫面只剩下面手動輸入股票代號查價格的區塊（因為`daily_candidates`還是空的，海選清單那一區沒東西可顯示，看起來像整個功能只有手動查詢）。釐清後確認：最上面的「候選清單」本來就是設計給這個用途，只是還沒真的跑過選股；另外加碼使用者要求「立即重新篩選」按鈕（不必等GitHub Actions排程）。
+
+實作：
+- `src/screener/daily_screener.py`新增`load_trailing_frames()`（從`scripts/daily_pipeline.py`搬過來，避免兩邊各自維護一份）+ `run_screen_and_store()`（只用資料庫裡『目前已有』的資料重算並寫回`daily_candidates`，刻意不對外抓取新資料——抓資料成本高（TPEx約4小時）跟純本地重算(幾秒內)分開，才能讓儀表板提供即時操作）。`scripts/daily_pipeline.py`改為呼叫這個共用函式，不再自己重複實作。
+- `dashboard/app.py`新增「🔄 立即重新篩選」按鈕（呼叫`run_screen_and_store`）；候選清單改用`st.dataframe(..., on_select="rerun", selection_mode="single-row")`（Streamlit 1.35+功能，`requirements.txt`已符合），點選任一列會在下方自動顯示該股票的價格走勢圖，串起「海選清單→點進去看個股分析」的完整流程。
+
+## 改採本機開發優先流程 + 建立本機UI驗證能力（2026-07-22）
+
+使用者提出：GitHub Actions + Streamlit Cloud + Turso 這條路徑對開發階段太麻煩（改一次要commit+push+等部署+使用者肉眼確認，AI完全看不到雲端上的畫面），要求先在本機把整套系統做對，最後才切回雲端三件套。
+
+- **`dashboard/app.py`新增`LOCAL_DB_PATH`環境變數**：設定後直接連本機sqlite檔案，完全略過Turso，讓本機開發不依賴Turso帳號/網路。
+- **本機安裝Playwright + headless Chromium**：讓AI自己也能實際啟動`streamlit run`、操作按鈕與表格點選、截圖檢查，不再只能憑程式碼判斷「應該可以動」。用`scripts/seed_turso_from_local.py`的`seed()`函式(其實跟目標端是Turso還是本機sqlite無關)灌了一份90天小規模本機測試資料(`data/tw_stock_dev.db`)供快速驗證用。
+- **本機實測立刻抓到2個先前沒發現的真實bug**（規劃/程式碼review都沒抓到，只有真的跑起來才會噴）：
+  1. `st.secrets.items()`在本機沒有`secrets.toml`時不是回傳空值，而是直接丟`StreamlitSecretNotFoundError`，整頁crash——包try/except解決。
+  2. `storage.init_db()`預設的sqlite3連線是thread-bound，但Streamlit的`@st.cache_resource`快取連線在不同次rerun之間可能被不同thread重用，丟出`SQLite objects created in a thread can only be used in that same thread`——`init_db()`新增`check_same_thread`參數，本機dashboard路徑改用`check_same_thread=False`。
+  3. 兩個bug都補了對應測試，全套測試385個全過。
+- **意外發現`README.md`檔案編碼從第一次commit前就已經損壞**（整檔案是亂碼，跟這次改動無關，是單一檔案的既有問題，其餘所有檔案確認皆為正常UTF-8），已用原始內容重寫並補上本機開發流程說明。
+- 用Playwright實際截圖驗證了完整流程：海選清單（本機測試資料跑出20檔候選）→ 點選任一列 → 下方即時顯示該股票價格走勢圖，瀏覽器console無任何錯誤。
+
+**下一步**：全市場400天Turso種子資料回補仍在背景執行中（`seed_turso_from_local.py`，最後檢查進度：stock_prices已接近完成、institutional_investors進行中、margin_trading尚未開始）；本機開發驗證流程已建立，後續功能異動應先用`LOCAL_DB_PATH`本機驗證過，再推上GitHub讓Turso/Streamlit Cloud/GitHub Actions生效。
