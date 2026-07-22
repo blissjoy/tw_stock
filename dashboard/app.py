@@ -53,7 +53,7 @@ def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
 def main() -> None:
     import streamlit as st
 
-    from src.data import turso_client
+    from src.data import storage, turso_client
 
     for key, value in st.secrets.items():
         os.environ.setdefault(key, str(value))
@@ -62,7 +62,12 @@ def main() -> None:
 
     @st.cache_resource
     def get_conn():
-        return turso_client.get_connection()
+        # Turso資料庫可能是全新、還沒被seed_turso_from_local.py或daily_pipeline.py建過表的狀態
+        # （例如儀表板比每日pipeline更早部署），這裡確保schema一定存在，query才不會噴
+        # "no such table" 的錯誤。
+        conn = turso_client.get_connection()
+        storage.ensure_schema(conn)
+        return conn
 
     st.title("📈 台股每日選股")
     st.caption("資料來源：TWSE / TPEx(透過FinMind) — 每日收盤後自動更新")
