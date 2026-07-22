@@ -1,4 +1,5 @@
 import scripts.daily_pipeline as daily_pipeline
+import src.screener.daily_screener as daily_screener
 from src.data import storage
 
 
@@ -31,7 +32,9 @@ def test_run_daily_pipeline_writes_candidates_and_skips_notify_on_dry_run(monkey
         "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
         "entry_price": 104.0, "stop_loss": 99.0, "note": "測試",
     }
-    monkeypatch.setattr(daily_pipeline, "screen_all_stocks", lambda frames, min_days: [fake_candidate])
+    # 特意patch daily_screener.screen_all_stocks（而不是整個run_screen_and_store），讓
+    # run_screen_and_store真正的「寫進daily_candidates」邏輯照常執行，才能驗證這條路徑。
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [fake_candidate])
 
     notify_calls = []
     monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: notify_calls.append(("line", text)))
@@ -51,7 +54,7 @@ def test_run_daily_pipeline_sends_notifications_when_not_dry_run(monkeypatch):
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
-    monkeypatch.setattr(daily_pipeline, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
 
     notify_calls = []
     monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: notify_calls.append(("line", text)))
@@ -69,7 +72,7 @@ def test_run_daily_pipeline_line_still_sent_when_email_not_configured(monkeypatc
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
-    monkeypatch.setattr(daily_pipeline, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
 
     notify_calls = []
     monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: notify_calls.append("line"))
@@ -96,7 +99,7 @@ def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", lambda sid, s, e: [_price_row(stock_id=sid, d="2026-07-22")])
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_institutional_investors", lambda sid, s, e: [])
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_margin_trading", lambda sid, s, e: [])
-    monkeypatch.setattr(daily_pipeline, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False)
 
@@ -121,7 +124,7 @@ def test_run_daily_pipeline_continues_when_single_tpex_stock_fails(monkeypatch):
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", _flaky_prices)
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_institutional_investors", lambda sid, s, e: [])
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_margin_trading", lambda sid, s, e: [])
-    monkeypatch.setattr(daily_pipeline, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False)
 

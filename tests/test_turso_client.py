@@ -1,7 +1,21 @@
+import os
 import sqlite3
+import tempfile
 
-from src.data.storage import upsert_stock_prices, upsert_stocks
-from src.data.turso_client import TursoConnection, _to_positional
+import libsql_client
+import pytest
+
+from src.data.storage import ensure_schema, get_latest_candidates, upsert_daily_candidates, upsert_stock_prices, upsert_stocks
+from src.data.turso_client import TursoConnection, _force_https_scheme, _to_positional
+
+
+def test_force_https_scheme_converts_libsql_scheme_to_https():
+    assert _force_https_scheme("libsql://twstock-joywang.aws-ap-northeast-1.turso.io") == \
+        "https://twstock-joywang.aws-ap-northeast-1.turso.io"
+
+
+def test_force_https_scheme_preserves_path_and_query():
+    assert _force_https_scheme("libsql://host.turso.io/path?x=1") == "https://host.turso.io/path?x=1"
 
 
 def test_to_positional_converts_named_params_in_declared_order():
@@ -70,3 +84,63 @@ def test_turso_connection_execute_with_positional_tuple_passthrough():
     conn.commit()
     row = raw.execute("SELECT dataset FROM fetch_log").fetchone()
     assert row == ("TaiwanStockPrice",)
+
+
+@pytest.fixture
+def real_libsql_client_conn():
+    """實測用的真實 libsql_client 連線（透過本機file:模式，不需要網路或Turso帳號），
+    用來驗證 TursoConnection 對「真正會用到的那個套件」的介面轉接是否正確，
+    而不是只測我們自己捏造的假物件。"""
+    path = os.path.join(tempfile.gettempdir(), f"_turso_client_test_{os.getpid()}.db")
+    if os.path.exists(path):
+        os.remove(path)
+    raw = libsql_client.create_client_sync(f"file:{path}")
+    yield TursoConnection(raw)
+    raw.close()
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def test_turso_connection_against_real_libsql_client_full_round_trip(real_libsql_client_conn):
+    """對真實libsql_client套件跑一次完整的 ensure_schema + upsert + query 流程，
+    確認ResultSet包裝(_ResultSetCursor)、批次寫入(.batch())、無commit()都運作正常。"""
+    conn = real_libsql_client_conn
+    ensure_schema(conn)
+
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": "測試", "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    candidates = get_latest_candidates(conn)
+    assert len(candidates) == 1
+    assert candidates[0]["stock_id"] == "2330"
+    assert candidates[0]["name"] == "台積電"
+    assert candidates[0]["entry_price"] == 104.0
+
+    # 確認 fetchone()/description 介面轉接正確
+    row = conn.execute("SELECT COUNT(*) FROM stocks").fetchone()
+    assert row == (2,)
+    cur = conn.execute("SELECT stock_id, name FROM stocks ORDER BY stock_id")
+    assert [c[0] for c in cur.description] == ["stock_id", "name"]
+    assert cur.fetchall() == [("1101", "台泥"), ("2330", "台積電")]
+
+
+def test_turso_connection_batch_writes_many_rows_against_real_client(real_libsql_client_conn):
+    """驗證executemany對真實client會走.batch()分chunk路徑（非逐列迴圈），且chunk邊界(500)
+    前後的筆數都能正確寫入，不會漏掉最後一個不滿一個chunk的餘數。"""
+    conn = real_libsql_client_conn
+    ensure_schema(conn)
+
+    rows = [
+        {"stock_id": f"{1000 + i}", "name": f"股票{i}", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}
+        for i in range(1201)  # 2個完整chunk(500) + 1個餘數chunk(201)
+    ]
+    upsert_stocks(conn, rows)
+
+    count = conn.execute("SELECT COUNT(*) FROM stocks").fetchone()[0]
+    assert count == 1201

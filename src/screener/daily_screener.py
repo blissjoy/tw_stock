@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
+
 import pandas as pd
 
+from src.data import storage
 from src.indicators.moving_average import sma
 from src.indicators.trend import (
     bull_short_term_entry_ready,
@@ -68,4 +71,49 @@ def screen_all_stocks(stock_frames: dict[str, pd.DataFrame], min_days: int = 60)
         result = screen_bull_short_term_entry(df, min_days=min_days)
         if result is not None:
             candidates.append({"stock_id": stock_id, **result})
+    return candidates
+
+
+def load_trailing_frames(conn, min_days: int = 60) -> dict[str, pd.DataFrame]:
+    """讀出每檔股票至今的全部OHLCV歷史(不設上限，由screen_all_stocks自己判斷天數夠不夠算指標)。
+    純讀取，跟資料是Turso還是本機sqlite無關，供 scripts/daily_pipeline.py 與 dashboard/app.py 共用。
+    """
+    stock_ids = [r[0] for r in conn.execute("SELECT stock_id FROM stocks ORDER BY stock_id").fetchall()]
+
+    frames: dict[str, pd.DataFrame] = {}
+    for stock_id in stock_ids:
+        rows = conn.execute(
+            "SELECT date, open, high, low, close, volume FROM stock_prices WHERE stock_id = ? ORDER BY date",
+            (stock_id,),
+        ).fetchall()
+        if len(rows) < min_days:
+            continue
+        df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
+        df["date"] = pd.to_datetime(df["date"])
+        frames[stock_id] = df.set_index("date")
+    return frames
+
+
+def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) -> list[dict]:
+    """只用資料庫裡『目前已有』的資料重新跑一次選股並寫回daily_candidates，不對外抓取任何新資料。
+
+    這是刻意的設計：抓新資料(TWSE/TPEx)成本很高(TPEx經FinMind約4小時)，跟「用現有資料重算
+    訊號」(純本地運算，通常幾秒內)分開，才能讓 dashboard 提供「立即重新篩選」這種不需要等待
+    資料抓取的即時操作；scripts/daily_pipeline.py 抓完當天新資料後也呼叫同一份邏輯，避免重複實作。
+    """
+    if iso_date is None:
+        iso_date = date.today().isoformat()
+
+    frames = load_trailing_frames(conn, min_days=min_days)
+    candidates = screen_all_stocks(frames, min_days=min_days)
+
+    if candidates:
+        storage.upsert_daily_candidates(conn, [
+            {
+                "date": iso_date, "stock_id": c["stock_id"], "signal_name": c["signal_name"],
+                "entry_price": c["entry_price"], "stop_loss": c["stop_loss"], "note": c.get("note"),
+                "created_at": datetime.now().isoformat(),
+            }
+            for c in candidates
+        ])
     return candidates

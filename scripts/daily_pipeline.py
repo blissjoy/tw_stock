@@ -25,15 +25,13 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-import pandas as pd
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import finmind_client, storage, twse_client  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
-from src.screener.daily_screener import screen_all_stocks  # noqa: E402
+from src.screener.daily_screener import run_screen_and_store  # noqa: E402
 
 
 def fetch_today_twse(conn, date_str: str) -> bool:
@@ -84,24 +82,6 @@ def fetch_today_tpex(conn, date_str: str) -> int:
     return success_count
 
 
-def load_trailing_frames(conn, min_days: int) -> dict[str, pd.DataFrame]:
-    """讀出每檔股票至今的全部OHLCV歷史(不設上限，由screener自己判斷天數夠不夠算指標)。"""
-    stock_ids = [r[0] for r in conn.execute("SELECT stock_id FROM stocks ORDER BY stock_id").fetchall()]
-
-    frames: dict[str, pd.DataFrame] = {}
-    for stock_id in stock_ids:
-        rows = conn.execute(
-            "SELECT date, open, high, low, close, volume FROM stock_prices WHERE stock_id = ? ORDER BY date",
-            (stock_id,),
-        ).fetchall()
-        if len(rows) < min_days:
-            continue
-        df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
-        df["date"] = pd.to_datetime(df["date"])
-        frames[stock_id] = df.set_index("date")
-    return frames
-
-
 def run_daily_pipeline(
     conn, date_str: str | None = None, min_days: int = 60, dry_run: bool = False, skip_tpex: bool = False,
 ) -> list[dict]:
@@ -121,18 +101,7 @@ def run_daily_pipeline(
         tpex_count = fetch_today_tpex(conn, date_str)
         print(f"TPEx：{tpex_count} 檔成功更新")
 
-    frames = load_trailing_frames(conn, min_days=min_days)
-    candidates = screen_all_stocks(frames, min_days=min_days)
-
-    if candidates:
-        storage.upsert_daily_candidates(conn, [
-            {
-                "date": iso_date, "stock_id": c["stock_id"], "signal_name": c["signal_name"],
-                "entry_price": c["entry_price"], "stop_loss": c["stop_loss"], "note": c.get("note"),
-                "created_at": datetime.now().isoformat(),
-            }
-            for c in candidates
-        ])
+    candidates = run_screen_and_store(conn, iso_date=iso_date, min_days=min_days)
 
     print(f"=== {iso_date} 候選清單（共{len(candidates)}檔）===")
     for c in candidates:

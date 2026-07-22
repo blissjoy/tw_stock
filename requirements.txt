@@ -2,7 +2,9 @@ pandas>=2.2
 numpy>=1.26
 pytest>=8.0
 requests>=2.31
-# Turso(libsql)雲端資料庫連線：套件名稱這幾年改過幾次(libsql-client -> libsql-experimental -> libsql)，
-# 部署前務必到 docs.turso.tech/sdk/python 確認目前實際可用的套件名稱與此處是否一致。
-libsql
+# Turso(libsql)雲端資料庫連線：官方文件推薦的新版`libsql`套件是Rust原生binding，在部分環境
+# (例如較新的Python版本)沒有預編譯wheel、需要Rust+cmake從原始碼編譯而安裝失敗；改用純Python
+# 實作、實測可正常安裝運作的舊版`libsql-client`。若之後這個套件停止維護，只需要改
+# src/data/turso_client.py 這一個檔案。
+libsql-client
 streamlit>=1.35

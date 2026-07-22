@@ -1,6 +1,9 @@
-"""Streamlit 儀表板：顯示每日選股結果（daily_candidates 表最新一天），以及查詢個股近期
-價格走勢。純讀取，不做任何指標運算（那些已經由 scripts/daily_pipeline.py 算完寫進
-daily_candidates 表），儀表板端保持輕量。
+"""Streamlit 儀表板：顯示每日選股結果（daily_candidates 表最新一天，可點選清單中任一列
+直接看該檔股票的價格走勢），也可以手動查詢任意股票代號。
+
+「🔄 立即重新篩選」按鈕呼叫 src/screener/daily_screener.run_screen_and_store()，只用
+資料庫裡『目前已有』的資料重算訊號，不會對外重新抓取TWSE/TPEx資料（那個很慢，交給
+scripts/daily_pipeline.py 的每日排程做），所以按下去通常幾秒內就有結果。
 
 部署：Streamlit Community Cloud，在其後台 Secrets 設定與 GitHub Actions 同一組
 TURSO_DATABASE_URL / TURSO_AUTH_TOKEN（st.secrets 在這裡先搬進 os.environ，讓
@@ -54,6 +57,7 @@ def main() -> None:
     import streamlit as st
 
     from src.data import storage, turso_client
+    from src.screener.daily_screener import run_screen_and_store
 
     for key, value in st.secrets.items():
         os.environ.setdefault(key, str(value))
@@ -69,23 +73,49 @@ def main() -> None:
         storage.ensure_schema(conn)
         return conn
 
+    conn = get_conn()
+
     st.title("📈 台股每日選股")
     st.caption("資料來源：TWSE / TPEx(透過FinMind) — 每日收盤後自動更新")
 
-    conn = get_conn()
+    if st.button("🔄 立即重新篩選"):
+        # 只用資料庫裡目前已有的資料重算訊號，不重新對外抓取TWSE/TPEx資料(那個很慢，交給
+        # 每日排程做)，所以這個按鈕通常幾秒內就能算完，可以隨時按而不用擔心額度或等待。
+        with st.spinner("正在用目前資料庫裡的最新資料重新計算選股訊號..."):
+            run_screen_and_store(conn)
+        st.success("已重新計算完成，候選清單已更新。")
+
     candidates_df, latest_date = load_latest_candidates(conn)
 
+    selected_stock_id = None
     if latest_date is None:
-        st.info("目前 Turso 資料庫裡還沒有任何每日選股紀錄，等 GitHub Actions 第一次跑完後就會顯示。")
+        st.info("目前 Turso 資料庫裡還沒有任何每日選股紀錄，點上方「立即重新篩選」或等 GitHub Actions 排程跑完後就會顯示。")
     else:
         st.subheader(f"最新候選清單（{latest_date}，共 {len(candidates_df)} 檔）")
         if candidates_df.empty:
             st.write("這一天沒有符合條件的候選股。")
         else:
-            st.dataframe(candidates_df, use_container_width=True, hide_index=True)
+            st.caption("點選任一列可在下方查看該檔股票的價格走勢")
+            event = st.dataframe(
+                candidates_df, use_container_width=True, hide_index=True,
+                on_select="rerun", selection_mode="single-row", key="candidates_table",
+            )
+            if event.selection.rows:
+                selected_stock_id = str(candidates_df.iloc[event.selection.rows[0]]["stock_id"])
 
     st.divider()
-    st.subheader("個股價格走勢查詢")
+
+    if selected_stock_id:
+        st.subheader(f"📊 {selected_stock_id} 價格走勢（點選自候選清單）")
+        price_df = load_price_history(conn, selected_stock_id)
+        if price_df.empty:
+            st.warning(f"查無股票代號 {selected_stock_id} 的價格資料。")
+        else:
+            st.line_chart(price_df[["close"]])
+            st.dataframe(price_df.tail(20), use_container_width=True)
+        st.divider()
+
+    st.subheader("個股價格走勢查詢（手動輸入任意股票代號）")
     stock_id = st.text_input("輸入股票代號（例如 2330）", value="")
     if stock_id:
         price_df = load_price_history(conn, stock_id.strip())
