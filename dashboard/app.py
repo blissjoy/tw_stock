@@ -23,11 +23,24 @@ sys.path.insert(0, str(ROOT))
 
 from src.data import trading_calendar  # noqa: E402
 from src.indicators.moving_average import FULL_PERIODS, compute_ma_set  # noqa: E402
+from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
 
 _MA_COLORS = {
     5: "#2e86de", 10: "#e67e22", 20: "#8e44ad",
     60: "#16a085", 120: "#7f8c8d", 240: "#b8860b",
 }
+
+_TRENDLINE_LABELS = {
+    "up_tangent": "上升切線", "down_tangent": "下降切線",
+    "up_channel": "上升軌道線", "down_channel": "下降軌道線",
+}
+_TRENDLINE_STYLES = {
+    "up_tangent": {"color": "#1565c0", "dash": "solid"},
+    "down_tangent": {"color": "#d84315", "dash": "solid"},
+    "up_channel": {"color": "#64b5f6", "dash": "dash"},
+    "down_channel": {"color": "#ffab40", "dash": "dash"},
+}
+_SR_ROLE_COLORS = {"支撐": "#16a085", "壓力": "#c0392b"}
 
 
 def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
@@ -84,16 +97,22 @@ def load_holidays_for_chart(df: pd.DataFrame) -> tuple[list[str], bool]:
 
 def build_candlestick_figure(
     df: pd.DataFrame, title: str = "", holidays: list[str] | None = None, ma_periods: tuple[int, ...] = (),
+    trendlines: dict | None = None, show_trendline_keys: tuple[str, ...] = (),
+    sr_levels: list[dict] | None = None, show_support_resistance: bool = False,
 ):
-    """把OHLC資料畫成K線圖(非線圖)+下方成交量子圖，可疊加均線。漲用紅、跌用黑，比照書中與
-    規則庫(candles.py)一貫的紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的
-    綠漲紅跌相反)；成交量長條比照同一套配色，當天收紅用紅色、收黑用黑色。
+    """把OHLC資料畫成K線圖(非線圖)+下方成交量子圖，可疊加均線/切線軌道線/支撐壓力。漲用紅、
+    跌用黑，比照書中與規則庫(candles.py)一貫的紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，
+    與美股常見的綠漲紅跌相反)；成交量長條比照同一套配色，當天收紅用紅色、收黑用黑色。
 
     holidays: 該資料範圍內的休市日期清單("YYYY-MM-DD")，連同週末一起設成x軸的
     rangebreaks，避免非交易日在圖上留白間斷(維持真正的日期型x軸，不是改用category型)。
     ma_periods: 要疊加顯示的均線天期(例如(5,20,60))，對應df裡由load_price_history算好的
     MA{n}欄位；書中預設核心3線是MA5/10/20，可擴充至MA60(季線)/MA120(半年線)/MA240(年線)
     做4~6線多空排列判斷（不是MA200，書裡沒有這個天期）。
+    trendlines/show_trendline_keys: src.patterns.chart_overlays.compute_trendlines()算出的
+    切線/軌道線字典，與要實際畫出的key清單(例如("up_tangent","up_channel"))。
+    sr_levels/show_support_resistance: src.patterns.chart_overlays.compute_support_resistance_levels()
+    算出的支撐壓力清單，與是否要畫出來。
     """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -117,6 +136,25 @@ def build_candlestick_figure(
             x=df.index, y=df[col], mode="lines", name=col,
             line=dict(color=_MA_COLORS.get(n, "#999999"), width=1.3),
         ), row=1, col=1)
+
+    for key in show_trendline_keys:
+        if not trendlines or key not in trendlines:
+            continue
+        dates, prices = chart_overlays.trendline_to_xy(trendlines[key], df)
+        style = _TRENDLINE_STYLES.get(key, {"color": "#999999", "dash": "solid"})
+        fig.add_trace(go.Scatter(
+            x=dates, y=prices, mode="lines", name=_TRENDLINE_LABELS.get(key, key),
+            line=dict(color=style["color"], dash=style["dash"], width=1.5),
+        ), row=1, col=1)
+
+    if show_support_resistance and sr_levels:
+        for level in sr_levels:
+            color = _SR_ROLE_COLORS.get(level["role"], "#999999")
+            fig.add_trace(go.Scatter(
+                x=[df.index[0], df.index[-1]], y=[level["price"], level["price"]], mode="lines",
+                name=f"{level['role']} {level['price']:.2f}",
+                line=dict(color=color, dash="dot", width=1),
+            ), row=1, col=1)
 
     volume_colors = ["#c0392b" if c >= o else "#1a1a1a" for o, c in zip(df["open"], df["close"])]
     fig.add_trace(go.Bar(x=df.index, y=df["volume"], marker_color=volume_colors, name="成交量", showlegend=False), row=2, col=1)
@@ -185,14 +223,43 @@ def main() -> None:
             st.caption("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
 
         ma_options = [f"MA{n}" for n in FULL_PERIODS]
-        selected_labels = st.multiselect("顯示均線", ma_options, default=ma_options, key=f"{widget_key}_ma_select")
-        selected_periods = tuple(int(label[2:]) for label in selected_labels)
+        selected_ma_labels = st.multiselect("顯示均線", ma_options, default=ma_options, key=f"{widget_key}_ma_select")
+        selected_periods = tuple(int(label[2:]) for label in selected_ma_labels)
+
+        trendlines = chart_overlays.compute_trendlines(price_df)
+        trendline_options = [_TRENDLINE_LABELS[key] for key in _TRENDLINE_LABELS if key in trendlines]
+        label_to_key = {v: k for k, v in _TRENDLINE_LABELS.items()}
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if trendline_options:
+                selected_trendline_labels = st.multiselect(
+                    "顯示切線／軌道線", trendline_options, default=trendline_options, key=f"{widget_key}_trendline_select",
+                )
+            else:
+                selected_trendline_labels = []
+                st.caption("目前資料範圍內沒有找到符合「線不蓋線」條件的切線。")
+        with col2:
+            show_sr = st.checkbox("顯示支撐壓力", value=True, key=f"{widget_key}_sr_checkbox")
+        selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
+        sr_levels = chart_overlays.compute_support_resistance_levels(price_df) if show_sr else []
 
         st.plotly_chart(
-            build_candlestick_figure(price_df, holidays=holidays, ma_periods=selected_periods),
+            build_candlestick_figure(
+                price_df, holidays=holidays, ma_periods=selected_periods,
+                trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
+                sr_levels=sr_levels, show_support_resistance=show_sr,
+            ),
             use_container_width=True,
         )
         st.dataframe(price_df.tail(20), use_container_width=True)
+
+        summary = latest_day_summary.summarize_latest_day(price_df)
+        latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
+        st.markdown(f"**📋 最新交易日分析（{latest_date_label}）**")
+        st.write(f"K棒名稱：{summary['candle_name']}")
+        st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
+        st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))
+        st.caption("⚠️ 型態訊號僅判斷幾何條件是否成立，尚未確認是否位於真正的高檔/低檔位置（趨勢位置模組尚未實作）。")
 
     st.title("📈 台股每日選股")
     st.caption("資料來源：TWSE / TPEx(透過FinMind) — 每日收盤後自動更新")

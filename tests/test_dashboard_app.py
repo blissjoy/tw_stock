@@ -126,6 +126,68 @@ def test_build_candlestick_figure_adds_selected_ma_lines():
     assert list(line_traces["MA20"].y) == [98, 99, 100]
 
 
+def test_build_candlestick_figure_draws_selected_trendlines():
+    from src.indicators.trendlines import LinePoint, TrendLine
+
+    dates = pd.date_range("2026-01-01", periods=5)
+    df = pd.DataFrame(
+        {"open": [100] * 5, "high": [105] * 5, "low": [95] * 5, "close": [102] * 5, "volume": [1000] * 5},
+        index=dates,
+    )
+    trendlines = {
+        "up_tangent": TrendLine(a=LinePoint(0, 95.0), b=LinePoint(2, 97.0), role="support"),
+        "down_tangent": TrendLine(a=LinePoint(0, 105.0), b=LinePoint(2, 103.0), role="resistance"),
+    }
+
+    fig = build_candlestick_figure(df, trendlines=trendlines, show_trendline_keys=("up_tangent",))
+
+    line_names = {t.name for t in fig.data if t.type == "scatter"}
+    assert line_names == {"上升切線"}  # 只有被選到的up_tangent會被畫出來，down_tangent不會
+
+
+def test_build_candlestick_figure_ignores_trendline_key_not_in_dict():
+    dates = pd.date_range("2026-01-01", periods=3)
+    df = pd.DataFrame(
+        {"open": [100] * 3, "high": [105] * 3, "low": [95] * 3, "close": [102] * 3, "volume": [1000] * 3},
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, trendlines={}, show_trendline_keys=("up_tangent",))
+
+    assert not any(t.type == "scatter" for t in fig.data)
+
+
+def test_build_candlestick_figure_draws_support_resistance_levels_when_enabled():
+    dates = pd.date_range("2026-01-01", periods=3)
+    df = pd.DataFrame(
+        {"open": [100] * 3, "high": [105] * 3, "low": [95] * 3, "close": [102] * 3, "volume": [1000] * 3},
+        index=dates,
+    )
+    sr_levels = [
+        {"price": 90.0, "type": "bottom", "role": "支撐", "date": dates[0]},
+        {"price": 110.0, "type": "head", "role": "壓力", "date": dates[1]},
+    ]
+
+    fig = build_candlestick_figure(df, sr_levels=sr_levels, show_support_resistance=True)
+
+    line_names = {t.name for t in fig.data if t.type == "scatter"}
+    assert "支撐 90.00" in line_names
+    assert "壓力 110.00" in line_names
+
+
+def test_build_candlestick_figure_hides_support_resistance_when_disabled():
+    dates = pd.date_range("2026-01-01", periods=3)
+    df = pd.DataFrame(
+        {"open": [100] * 3, "high": [105] * 3, "low": [95] * 3, "close": [102] * 3, "volume": [1000] * 3},
+        index=dates,
+    )
+    sr_levels = [{"price": 90.0, "type": "bottom", "role": "支撐", "date": dates[0]}]
+
+    fig = build_candlestick_figure(df, sr_levels=sr_levels, show_support_resistance=False)
+
+    assert not any(t.type == "scatter" for t in fig.data)
+
+
 def test_build_candlestick_figure_skips_ma_period_missing_from_dataframe():
     """例如資料天數不夠、MA240整條是NaN被join進來但欄位仍存在，或欄位根本不存在，
     都不應該讓畫圖crash——沒有對應欄位的天期直接跳過不畫。"""
