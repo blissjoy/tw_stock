@@ -22,6 +22,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import trading_calendar  # noqa: E402
+from src.indicators.moving_average import FULL_PERIODS, compute_ma_set  # noqa: E402
+
+_MA_COLORS = {
+    5: "#2e86de", 10: "#e67e22", 20: "#8e44ad",
+    60: "#16a085", 120: "#7f8c8d", 240: "#b8860b",
+}
 
 
 def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
@@ -42,17 +48,25 @@ def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
 
 
 def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
-    """回傳指定股票最近days天的OHLCV，依date遞增排序、index為date；查無資料回傳空DataFrame。"""
+    """回傳指定股票最近days天的OHLCV+均線(MA5/10/20/60/120/240，欄位名MA{n})，依date遞增
+    排序、index為date；查無資料回傳空DataFrame。
+
+    多抓 max(FULL_PERIODS) 天的歷史資料當計算緩衝，讓均線在整個顯示範圍內都有值
+    （而不是從顯示視窗的第一天才開始算、前面一大段是NaN），抓完才裁切回實際要顯示的days天。
+    """
+    lookback_days = days + max(FULL_PERIODS)
     cur = conn.execute(
         "SELECT date, open, high, low, close, volume FROM stock_prices WHERE stock_id = ? ORDER BY date DESC LIMIT ?",
-        (stock_id, days),
+        (stock_id, lookback_days),
     )
     columns = [d[0] for d in cur.description]
     df = pd.DataFrame(cur.fetchall(), columns=columns).iloc[::-1].reset_index(drop=True)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.set_index("date")
-    return df
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date")
+    df = df.join(compute_ma_set(df["close"], periods=FULL_PERIODS))
+    return df.tail(days)
 
 
 def load_holidays_for_chart(df: pd.DataFrame) -> tuple[list[str], bool]:
@@ -68,28 +82,54 @@ def load_holidays_for_chart(df: pd.DataFrame) -> tuple[list[str], bool]:
         return [], False
 
 
-def build_candlestick_figure(df: pd.DataFrame, title: str = "", holidays: list[str] | None = None):
-    """把OHLC資料畫成K線圖(非線圖)。漲用紅、跌用黑，比照書中與規則庫(candles.py)一貫的
-    紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的綠漲紅跌相反)。
+def build_candlestick_figure(
+    df: pd.DataFrame, title: str = "", holidays: list[str] | None = None, ma_periods: tuple[int, ...] = (),
+):
+    """把OHLC資料畫成K線圖(非線圖)+下方成交量子圖，可疊加均線。漲用紅、跌用黑，比照書中與
+    規則庫(candles.py)一貫的紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的
+    綠漲紅跌相反)；成交量長條比照同一套配色，當天收紅用紅色、收黑用黑色。
 
     holidays: 該資料範圍內的休市日期清單("YYYY-MM-DD")，連同週末一起設成x軸的
     rangebreaks，避免非交易日在圖上留白間斷(維持真正的日期型x軸，不是改用category型)。
+    ma_periods: 要疊加顯示的均線天期(例如(5,20,60))，對應df裡由load_price_history算好的
+    MA{n}欄位；書中預設核心3線是MA5/10/20，可擴充至MA60(季線)/MA120(半年線)/MA240(年線)
+    做4~6線多空排列判斷（不是MA200，書裡沒有這個天期）。
     """
     import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
-    fig = go.Figure(data=[go.Candlestick(
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.03,
+    )
+    fig.add_trace(go.Candlestick(
         x=df.index,
         open=df["open"], high=df["high"], low=df["low"], close=df["close"],
         increasing_line_color="#c0392b", increasing_fillcolor="#c0392b",
         decreasing_line_color="#1a1a1a", decreasing_fillcolor="#1a1a1a",
-        name="",
-    )])
+        name="", showlegend=False,
+    ), row=1, col=1)
+
+    for n in ma_periods:
+        col = f"MA{n}"
+        if col not in df.columns:
+            continue
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df[col], mode="lines", name=col,
+            line=dict(color=_MA_COLORS.get(n, "#999999"), width=1.3),
+        ), row=1, col=1)
+
+    volume_colors = ["#c0392b" if c >= o else "#1a1a1a" for o, c in zip(df["open"], df["close"])]
+    fig.add_trace(go.Bar(x=df.index, y=df["volume"], marker_color=volume_colors, name="成交量", showlegend=False), row=2, col=1)
+
     fig.update_layout(
         title=title,
         xaxis_rangeslider_visible=False,
         margin=dict(l=10, r=10, t=40 if title else 10, b=10),
-        height=420,
+        height=560,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
     )
+    fig.update_yaxes(title_text="價格", row=1, col=1)
+    fig.update_yaxes(title_text="成交量", row=2, col=1)
 
     rangebreaks = [dict(bounds=["sat", "mon"])]
     if holidays:
@@ -134,6 +174,26 @@ def main() -> None:
 
     conn = get_conn()
 
+    def render_price_chart(stock_id: str, widget_key: str) -> None:
+        price_df = load_price_history(conn, stock_id)
+        if price_df.empty:
+            st.warning(f"查無股票代號 {stock_id} 的價格資料。")
+            return
+
+        holidays, holidays_ok = load_holidays_for_chart(price_df)
+        if not holidays_ok:
+            st.caption("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
+
+        ma_options = [f"MA{n}" for n in FULL_PERIODS]
+        selected_labels = st.multiselect("顯示均線", ma_options, default=ma_options, key=f"{widget_key}_ma_select")
+        selected_periods = tuple(int(label[2:]) for label in selected_labels)
+
+        st.plotly_chart(
+            build_candlestick_figure(price_df, holidays=holidays, ma_periods=selected_periods),
+            use_container_width=True,
+        )
+        st.dataframe(price_df.tail(20), use_container_width=True)
+
     st.title("📈 台股每日選股")
     st.caption("資料來源：TWSE / TPEx(透過FinMind) — 每日收盤後自動更新")
 
@@ -166,29 +226,13 @@ def main() -> None:
 
     if selected_stock_id:
         st.subheader(f"📊 {selected_stock_id} 價格走勢（點選自候選清單）")
-        price_df = load_price_history(conn, selected_stock_id)
-        if price_df.empty:
-            st.warning(f"查無股票代號 {selected_stock_id} 的價格資料。")
-        else:
-            holidays, holidays_ok = load_holidays_for_chart(price_df)
-            if not holidays_ok:
-                st.caption("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
-            st.plotly_chart(build_candlestick_figure(price_df, holidays=holidays), use_container_width=True)
-            st.dataframe(price_df.tail(20), use_container_width=True)
+        render_price_chart(selected_stock_id, widget_key="drilldown")
         st.divider()
 
     st.subheader("個股價格走勢查詢（手動輸入任意股票代號）")
     stock_id = st.text_input("輸入股票代號（例如 2330）", value="")
     if stock_id:
-        price_df = load_price_history(conn, stock_id.strip())
-        if price_df.empty:
-            st.warning(f"查無股票代號 {stock_id} 的價格資料。")
-        else:
-            holidays, holidays_ok = load_holidays_for_chart(price_df)
-            if not holidays_ok:
-                st.caption("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
-            st.plotly_chart(build_candlestick_figure(price_df, holidays=holidays), use_container_width=True)
-            st.dataframe(price_df.tail(20), use_container_width=True)
+        render_price_chart(stock_id.strip(), widget_key="manual")
 
 
 if __name__ == "__main__":
