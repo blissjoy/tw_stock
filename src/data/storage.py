@@ -20,9 +20,14 @@ def ensure_schema(conn) -> None:
     conn.commit()
 
 
-def init_db(db_path: str | Path) -> sqlite3.Connection:
-    """依 schema.sql 建立(或沿用既有)本機檔案資料庫，回傳已開啟的連線。"""
-    conn = sqlite3.connect(db_path)
+def init_db(db_path: str | Path, check_same_thread: bool = True) -> sqlite3.Connection:
+    """依 schema.sql 建立(或沿用既有)本機檔案資料庫，回傳已開啟的連線。
+
+    check_same_thread=False 給像 Streamlit 這種「快取的連線可能被不同執行緒重用」的呼叫端用
+    （@st.cache_resource 快取的物件在rerun之間可能不是同一條thread，sqlite3預設會拒絕跨
+    thread使用同一個connection並丟出 ProgrammingError）；一般CLI腳本維持預設True即可。
+    """
+    conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     ensure_schema(conn)
     return conn
 

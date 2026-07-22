@@ -55,17 +55,31 @@ def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
 
 def main() -> None:
     import streamlit as st
+    from streamlit.errors import StreamlitSecretNotFoundError
 
     from src.data import storage, turso_client
     from src.screener.daily_screener import run_screen_and_store
 
-    for key, value in st.secrets.items():
-        os.environ.setdefault(key, str(value))
+    try:
+        for key, value in st.secrets.items():
+            os.environ.setdefault(key, str(value))
+    except StreamlitSecretNotFoundError:
+        # 本機開發(尤其搭配 LOCAL_DB_PATH 不連Turso時)通常沒有 secrets.toml，
+        # st.secrets 存取本身就會丟例外(不是回傳空dict)，直接略過即可。
+        pass
 
     st.set_page_config(page_title="台股每日選股", page_icon="📈", layout="wide")
 
     @st.cache_resource
     def get_conn():
+        # 開發階段可設定 LOCAL_DB_PATH 環境變數，改連本機sqlite檔案而不連線Turso，
+        # 讓「跑起來看畫面」不必依賴Turso帳號/網路，本機開發完全確定沒問題後再切回Turso。
+        local_db_path = os.environ.get("LOCAL_DB_PATH")
+        if local_db_path:
+            # check_same_thread=False：@st.cache_resource 快取的連線在不同次rerun間可能被
+            # 不同thread重用，sqlite3預設會拒絕跨thread共用同一個connection。
+            return storage.init_db(local_db_path, check_same_thread=False)
+
         # Turso資料庫可能是全新、還沒被seed_turso_from_local.py或daily_pipeline.py建過表的狀態
         # （例如儀表板比每日pipeline更早部署），這裡確保schema一定存在，query才不會噴
         # "no such table" 的錯誤。

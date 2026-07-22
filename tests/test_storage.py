@@ -17,6 +17,28 @@ def _fresh_db() -> sqlite3.Connection:
     return init_db(":memory:")
 
 
+def test_init_db_check_same_thread_false_allows_cross_thread_use():
+    """Streamlit的@st.cache_resource快取連線可能在不同thread被重用，確認
+    check_same_thread=False時，從另一條thread操作連線不會丟ProgrammingError。"""
+    import threading
+
+    conn = init_db(":memory:", check_same_thread=False)
+    errors = []
+
+    def _use_from_other_thread():
+        try:
+            upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=_use_from_other_thread)
+    t.start()
+    t.join()
+
+    assert errors == []
+    assert conn.execute("SELECT COUNT(*) FROM stocks").fetchone()[0] == 1
+
+
 def test_init_db_creates_all_expected_tables():
     conn = _fresh_db()
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
