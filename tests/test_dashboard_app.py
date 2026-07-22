@@ -1,4 +1,6 @@
-from dashboard.app import load_latest_candidates, load_price_history
+import pandas as pd
+
+from dashboard.app import build_candlestick_figure, load_latest_candidates, load_price_history
 from src.data.storage import init_db, upsert_daily_candidates, upsert_stock_prices, upsert_stocks
 
 
@@ -49,3 +51,22 @@ def test_load_price_history_returns_empty_for_unknown_stock():
     conn = _fresh_conn()
     df = load_price_history(conn, "9999")
     assert df.empty
+
+
+def test_build_candlestick_figure_uses_ohlc_and_is_not_a_line_chart():
+    dates = pd.date_range("2026-07-01", periods=3)
+    df = pd.DataFrame(
+        {"open": [100, 102, 101], "high": [103, 104, 105], "low": [99, 101, 100], "close": [102, 101, 104], "volume": [1000, 1200, 900]},
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, title="2330")
+
+    assert len(fig.data) == 1
+    trace = fig.data[0]
+    assert trace.type == "candlestick"
+    assert list(trace.open) == [100, 102, 101]
+    assert list(trace.high) == [103, 104, 105]
+    assert list(trace.low) == [99, 101, 100]
+    assert list(trace.close) == [102, 101, 104]
+    assert list(trace.x) == list(dates)

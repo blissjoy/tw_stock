@@ -53,6 +53,28 @@ def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
     return df
 
 
+def build_candlestick_figure(df: pd.DataFrame, title: str = ""):
+    """把OHLC資料畫成K線圖(非線圖)。漲用紅、跌用黑，比照書中與規則庫(candles.py)一貫的
+    紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的綠漲紅跌相反)。
+    """
+    import plotly.graph_objects as go
+
+    fig = go.Figure(data=[go.Candlestick(
+        x=df.index,
+        open=df["open"], high=df["high"], low=df["low"], close=df["close"],
+        increasing_line_color="#c0392b", increasing_fillcolor="#c0392b",
+        decreasing_line_color="#1a1a1a", decreasing_fillcolor="#1a1a1a",
+        name="",
+    )])
+    fig.update_layout(
+        title=title,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=40 if title else 10, b=10),
+        height=420,
+    )
+    return fig
+
+
 def main() -> None:
     import streamlit as st
     from streamlit.errors import StreamlitSecretNotFoundError
@@ -125,7 +147,7 @@ def main() -> None:
         if price_df.empty:
             st.warning(f"查無股票代號 {selected_stock_id} 的價格資料。")
         else:
-            st.line_chart(price_df[["close"]])
+            st.plotly_chart(build_candlestick_figure(price_df), use_container_width=True)
             st.dataframe(price_df.tail(20), use_container_width=True)
         st.divider()
 
@@ -136,7 +158,7 @@ def main() -> None:
         if price_df.empty:
             st.warning(f"查無股票代號 {stock_id} 的價格資料。")
         else:
-            st.line_chart(price_df[["close"]])
+            st.plotly_chart(build_candlestick_figure(price_df), use_container_width=True)
             st.dataframe(price_df.tail(20), use_container_width=True)
 
 
