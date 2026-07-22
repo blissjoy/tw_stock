@@ -21,6 +21,8 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.data import trading_calendar  # noqa: E402
+
 
 def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
     """回傳 (最新一天的候選清單DataFrame, 該日期字串)；尚無任何紀錄時回傳(空DataFrame, None)。"""
@@ -53,9 +55,25 @@ def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
     return df
 
 
-def build_candlestick_figure(df: pd.DataFrame, title: str = ""):
+def load_holidays_for_chart(df: pd.DataFrame) -> tuple[list[str], bool]:
+    """回傳(該圖表資料範圍內的休市日清單, 是否成功抓取)。TWSE假日曆這一步是畫圖路徑上
+    新增的網路依賴，抓取失敗時回傳([], False)而不拋例外，呼叫端可以決定要不要提示使用者
+    「假日清單暫時無法取得」，圖表仍能正常畫出來(退回只套用週末rangebreak)。
+    """
+    if df.empty:
+        return [], True
+    try:
+        return trading_calendar.holidays_between(df.index.min().year, df.index.max().year), True
+    except Exception:  # noqa: BLE001 - 不應該讓TWSE暫時打不通就讓整張圖表壞掉
+        return [], False
+
+
+def build_candlestick_figure(df: pd.DataFrame, title: str = "", holidays: list[str] | None = None):
     """把OHLC資料畫成K線圖(非線圖)。漲用紅、跌用黑，比照書中與規則庫(candles.py)一貫的
     紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的綠漲紅跌相反)。
+
+    holidays: 該資料範圍內的休市日期清單("YYYY-MM-DD")，連同週末一起設成x軸的
+    rangebreaks，避免非交易日在圖上留白間斷(維持真正的日期型x軸，不是改用category型)。
     """
     import plotly.graph_objects as go
 
@@ -72,6 +90,11 @@ def build_candlestick_figure(df: pd.DataFrame, title: str = ""):
         margin=dict(l=10, r=10, t=40 if title else 10, b=10),
         height=420,
     )
+
+    rangebreaks = [dict(bounds=["sat", "mon"])]
+    if holidays:
+        rangebreaks.append(dict(values=holidays))
+    fig.update_xaxes(rangebreaks=rangebreaks)
     return fig
 
 
@@ -147,7 +170,10 @@ def main() -> None:
         if price_df.empty:
             st.warning(f"查無股票代號 {selected_stock_id} 的價格資料。")
         else:
-            st.plotly_chart(build_candlestick_figure(price_df), use_container_width=True)
+            holidays, holidays_ok = load_holidays_for_chart(price_df)
+            if not holidays_ok:
+                st.caption("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
+            st.plotly_chart(build_candlestick_figure(price_df, holidays=holidays), use_container_width=True)
             st.dataframe(price_df.tail(20), use_container_width=True)
         st.divider()
 
@@ -158,7 +184,10 @@ def main() -> None:
         if price_df.empty:
             st.warning(f"查無股票代號 {stock_id} 的價格資料。")
         else:
-            st.plotly_chart(build_candlestick_figure(price_df), use_container_width=True)
+            holidays, holidays_ok = load_holidays_for_chart(price_df)
+            if not holidays_ok:
+                st.caption("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
+            st.plotly_chart(build_candlestick_figure(price_df, holidays=holidays), use_container_width=True)
             st.dataframe(price_df.tail(20), use_container_width=True)
 
 
