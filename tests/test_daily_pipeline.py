@@ -14,8 +14,14 @@ def _price_row(stock_id="2330", d="2026-07-22"):
     }
 
 
+def _stub_stock_info(monkeypatch, rows):
+    """預設的FinMind股票基本資料回應；每個測試若不特別關心名稱，用一份最小的假資料即可。"""
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_info", lambda: rows)
+
+
 def test_run_daily_pipeline_skips_when_twse_has_no_data(monkeypatch):
     conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
 
     candidates = daily_pipeline.run_daily_pipeline(conn, date_str="20260101", dry_run=True, skip_tpex=True)
@@ -24,6 +30,7 @@ def test_run_daily_pipeline_skips_when_twse_has_no_data(monkeypatch):
 
 def test_run_daily_pipeline_writes_candidates_and_skips_notify_on_dry_run(monkeypatch):
     conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
@@ -49,8 +56,36 @@ def test_run_daily_pipeline_writes_candidates_and_skips_notify_on_dry_run(monkey
     assert row == ("2330", "R-TREND-14多頭短線進場")
 
 
+def test_fetch_today_twse_stores_real_name_and_industry_from_finmind(monkeypatch):
+    """先前的bug：stocks表的name欄位一律被寫成stock_id本身，而不是FinMind提供的真實公司名稱。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+
+    stock_info_by_id = {"2330": {"name": "台積電", "industry": "半導體"}}
+    daily_pipeline.fetch_today_twse(conn, "20260722", stock_info_by_id)
+
+    row = conn.execute("SELECT name, industry FROM stocks WHERE stock_id = '2330'").fetchone()
+    assert row == ("台積電", "半導體")
+
+
+def test_fetch_today_twse_falls_back_to_stock_id_when_name_unknown(monkeypatch):
+    """FinMind名單可能沒有100%涵蓋所有代號，查不到時退回用代號本身當name，不應該crash。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row(stock_id="9999")])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+
+    daily_pipeline.fetch_today_twse(conn, "20260722", {})
+
+    row = conn.execute("SELECT name FROM stocks WHERE stock_id = '9999'").fetchone()
+    assert row == ("9999",)
+
+
 def test_run_daily_pipeline_sends_notifications_when_not_dry_run(monkeypatch):
     conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
@@ -69,6 +104,7 @@ def test_run_daily_pipeline_line_still_sent_when_email_not_configured(monkeypatc
     """Gmail憑證尚未設定時，send_email()會丟RuntimeError，但不應該阻止LINE通知照常發送、
     也不應該讓整條pipeline因此中斷（候選清單已經寫進資料庫了）。"""
     conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
@@ -93,8 +129,9 @@ def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_info", lambda: [
-        {"stock_id": "6488", "market": "TPEx"}, {"stock_id": "2330", "market": "TWSE"},
+    _stub_stock_info(monkeypatch, [
+        {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"},
     ])
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", lambda sid, s, e: [_price_row(stock_id=sid, d="2026-07-22")])
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_institutional_investors", lambda sid, s, e: [])
@@ -103,8 +140,8 @@ def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False)
 
-    row = conn.execute("SELECT market FROM stocks WHERE stock_id = '6488'").fetchone()
-    assert row == ("TPEx",)
+    row = conn.execute("SELECT market, name FROM stocks WHERE stock_id = '6488'").fetchone()
+    assert row == ("TPEx", "環球晶")
 
 
 def test_run_daily_pipeline_continues_when_single_tpex_stock_fails(monkeypatch):
@@ -112,8 +149,9 @@ def test_run_daily_pipeline_continues_when_single_tpex_stock_fails(monkeypatch):
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_info", lambda: [
-        {"stock_id": "9999", "market": "TPEx"}, {"stock_id": "6488", "market": "TPEx"},
+    _stub_stock_info(monkeypatch, [
+        {"stock_id": "9999", "name": "測試失敗股", "market": "TPEx", "industry": None},
+        {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
     ])
 
     def _flaky_prices(sid, s, e):
@@ -128,5 +166,5 @@ def test_run_daily_pipeline_continues_when_single_tpex_stock_fails(monkeypatch):
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False)
 
-    row = conn.execute("SELECT market FROM stocks WHERE stock_id = '6488'").fetchone()
-    assert row == ("TPEx",)
+    row = conn.execute("SELECT market, name FROM stocks WHERE stock_id = '6488'").fetchone()
+    assert row == ("TPEx", "環球晶")

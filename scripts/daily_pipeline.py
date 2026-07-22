@@ -34,8 +34,14 @@ from src.notify.line_notify import format_candidates_message, send_line_broadcas
 from src.screener.daily_screener import run_screen_and_store  # noqa: E402
 
 
-def fetch_today_twse(conn, date_str: str) -> bool:
-    """抓TWSE當天全市場批次資料並寫入conn，回傳是否有資料(True代表是交易日)。"""
+def fetch_today_twse(conn, date_str: str, stock_info_by_id: dict[str, dict]) -> bool:
+    """抓TWSE當天全市場批次資料並寫入conn，回傳是否有資料(True代表是交易日)。
+
+    stock_info_by_id: {stock_id: {"name":..., "industry":...}}，來自FinMind TaiwanStockInfo，
+    用來讓stocks表存真實公司名稱／產業別，而不是用stock_id頂替name（此前的bug：TWSE官方端點
+    回應本身雖有股票名稱欄位，但twse_client的parse函式沒有取用，這裡改用FinMind的名單補上；
+    查不到的代號(FinMind名單可能不是100%涵蓋)才退回用代號本身當name）。
+    """
     prices = twse_client.fetch_stock_prices(date_str)
     if not prices:
         return False
@@ -45,7 +51,11 @@ def fetch_today_twse(conn, date_str: str) -> bool:
     # 三份報表的股票代號集合不完全相同，取聯集才不會在寫margin/institutional時違反外鍵約束
     stock_ids = {r["stock_id"] for r in prices} | {r["stock_id"] for r in institutional} | {r["stock_id"] for r in margin}
     storage.upsert_stocks(conn, [
-        {"stock_id": sid, "name": sid, "market": "TWSE", "industry": None, "updated_at": datetime.now().isoformat()}
+        {
+            "stock_id": sid, "name": stock_info_by_id.get(sid, {}).get("name", sid),
+            "market": "TWSE", "industry": stock_info_by_id.get(sid, {}).get("industry"),
+            "updated_at": datetime.now().isoformat(),
+        }
         for sid in stock_ids
     ])
     storage.upsert_stock_prices(conn, prices)
@@ -56,20 +66,26 @@ def fetch_today_twse(conn, date_str: str) -> bool:
     return True
 
 
-def fetch_today_tpex(conn, date_str: str) -> int:
-    """透過FinMind抓TPEx全部上櫃股票當天增量資料，回傳成功更新的股票數。單檔失敗不中斷整批。"""
-    stock_info = finmind_client.fetch_stock_info()
-    tpex_ids = [r["stock_id"] for r in stock_info if r["market"] == "TPEx"]
+def fetch_today_tpex(conn, date_str: str, stock_info: list[dict]) -> int:
+    """透過FinMind抓TPEx全部上櫃股票當天增量資料，回傳成功更新的股票數。單檔失敗不中斷整批。
+
+    stock_info: finmind_client.fetch_stock_info() 的結果，同時提供TPEx股票清單與真實
+    名稱/產業別（此前的bug：這裡明明已經呼叫過這個API拿到真實名稱，卻只取了stock_id，
+    寫入stocks表時又用stock_id頂替了name）。
+    """
+    tpex_rows = [r for r in stock_info if r["market"] == "TPEx"]
     success_count = 0
-    for stock_id in tpex_ids:
+    for row in tpex_rows:
+        stock_id = row["stock_id"]
         try:
             prices = finmind_client.fetch_stock_prices(stock_id, date_str, date_str)
             institutional = finmind_client.fetch_institutional_investors(stock_id, date_str, date_str)
             margin = finmind_client.fetch_margin_trading(stock_id, date_str, date_str)
 
-            storage.upsert_stocks(conn, [
-                {"stock_id": stock_id, "name": stock_id, "market": "TPEx", "industry": None, "updated_at": datetime.now().isoformat()}
-            ])
+            storage.upsert_stocks(conn, [{
+                "stock_id": stock_id, "name": row.get("name", stock_id), "market": "TPEx",
+                "industry": row.get("industry"), "updated_at": datetime.now().isoformat(),
+            }])
             if prices:
                 storage.upsert_stock_prices(conn, prices)
             if institutional:
@@ -92,13 +108,18 @@ def run_daily_pipeline(
         date_str = date.today().strftime("%Y%m%d")
     iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
 
-    is_trading_day = fetch_today_twse(conn, date_str)
+    # 只呼叫一次FinMind的股票基本資料(涵蓋TWSE+TPEx)，同時供TWSE/TPEx兩條路徑取得真實
+    # 公司名稱/產業別；即使skip_tpex=True也需要這份名單來修正TWSE的name欄位，成本很低(單次請求)。
+    stock_info = finmind_client.fetch_stock_info()
+    stock_info_by_id = {r["stock_id"]: r for r in stock_info}
+
+    is_trading_day = fetch_today_twse(conn, date_str, stock_info_by_id)
     if not is_trading_day:
         print(f"{iso_date} TWSE無資料，判定為非交易日，跳過選股與通知。")
         return []
 
     if not skip_tpex:
-        tpex_count = fetch_today_tpex(conn, date_str)
+        tpex_count = fetch_today_tpex(conn, date_str, stock_info)
         print(f"TPEx：{tpex_count} 檔成功更新")
 
     candidates = run_screen_and_store(conn, iso_date=iso_date, min_days=min_days)
