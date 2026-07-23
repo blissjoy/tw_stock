@@ -1,18 +1,18 @@
-"""每日自動化 pipeline 進入點：GitHub Actions 排程呼叫這支腳本。
+"""每日自動化 pipeline 進入點：本機Windows工作排程器或GitHub Actions排程呼叫這支腳本。
 
-流程：連線 Turso → 抓「今天」的 TWSE 全市場批次 + TPEx(透過FinMind逐股，只抓股價) 增量
-資料 → 寫入 → 跑 daily_screener 算候選清單 → 寫入 daily_candidates 表 → 發送 LINE + Email 通知。
+流程：連線資料庫(本機sqlite或Turso) → 抓「今天」的 TWSE 全市場批次 + TPEx(透過yfinance
+批次下載，只抓股價) 增量資料 → 寫入 → 跑 daily_screener 算候選清單 → 寫入 daily_candidates
+表 → 發送 LINE + Email 通知。
 
-⚠️ **實測修正(2026-07-23)**：TPEx這一步原本假設約需4小時，實測發現原因不只是額度，而是
-三個複合問題：①FinMind的TPEx股票清單裡有~1900筆，但只有~640筆是純4碼的普通股票，其餘是
-ETF/債券/權證，這裡先濾掉；②目前daily_screener只用得到股價，法人與融資融券還沒有任何規則
-在用，所以TPEx只抓股價(1個dataset)，需要時再另外補；③FinMind超過額度時不是優雅變慢，而是
-直接對每個請求回傳402、要等整個小時視窗過去才恢復，重試機制救不了——已在
-`src/data/finmind_client.py` 的 `_get()` 內建主動節流(_throttle)，送出前就先確保不超過
-每小時上限，不再依賴事後重試。三者合計後，TPEx預估縮短到約1小時內（640檔 x 1個dataset）。
+⚠️ **TPEx資料來源沿革**：一開始用FinMind逐股抓取(~640檔各自一次請求)，實測發現需要約1小時
+(FinMind的TPEx股票清單裡有~1900筆，但只有~640筆是純4碼的普通股票，其餘是ETF/債券/權證；
+且FinMind超過額度時直接回傳402、要等一小時視窗過去才恢復)。2026-07-23改用
+`src/data/yfinance_client.py`批次下載(仿照`ref-project/tw_stock_analyzer`長期實測驗證過
+的`yf.download(tickers_array)`做法)，同樣資料量縮短到數十秒內。目前daily_screener只用得到
+股價，法人與融資融券還沒有任何規則在用，所以TPEx仍然只抓股價，需要時再另外補。
 
---local-db 參數可以指向本機sqlite檔案而不連線Turso，方便在還沒申請Turso帳號、或想在
-本機快速驗證整條管線邏輯時使用。
+--local-db 參數可以指向本機sqlite檔案而不連線Turso，本機優先架構下(見README)這是預設
+的日常使用方式；不加這個參數則連線Turso，用於之後恢復雲端部署時。
 
 用法：
     # 正式：連線Turso（需先在.env設定TURSO_DATABASE_URL/TURSO_AUTH_TOKEN）
@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.data import finmind_client, storage, twse_client  # noqa: E402
+from src.data import finmind_client, storage, twse_client, yfinance_client  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
@@ -73,31 +73,44 @@ def fetch_today_twse(conn, date_str: str, stock_info_by_id: dict[str, dict]) -> 
 
 
 def fetch_today_tpex(conn, date_str: str, stock_info: list[dict]) -> int:
-    """透過FinMind抓TPEx普通股股價當天增量資料，回傳成功更新的股票數。單檔失敗不中斷整批。
+    """批次抓TPEx普通股股價當天增量資料，回傳成功更新的股票數。
 
-    stock_info: finmind_client.fetch_stock_info() 的結果，同時提供TPEx股票清單與真實
-    名稱/產業別。這裡只篩選純4碼的普通股票代號(排除ETF/債券/權證等，比照
-    src.data.twse_client.STOCK_CODE_PATTERN 對TWSE的既有做法一致)，且只抓股價一個
-    dataset——法人與融資融券目前沒有任何規則會用到，先不抓，之後有規則需要時再加回來
-    （見上方模組docstring的實測修正說明）。
+    ⚠️ **改用yfinance批次下載(2026-07-23)**：原本透過FinMind逐股抓取(~640檔各自一次
+    請求)實測約需1小時；改用`src.data.yfinance_client`一次批次下載多檔(仿照
+    `ref-project/tw_stock_analyzer`長期實測驗證過的做法)，同樣資料量可以縮短到數十秒內。
+    yfinance是靠爬Yahoo Finance內部API運作的非官方套件，整批下載若失敗(例如網路問題)
+    不會逐檔重試，而是這一步直接回傳0檔成功、印出錯誤訊息，讓呼叫端知道當天TPEx更新
+    整批失敗，不強行假裝部分成功——原本FinMind逐股抓法仍保留在`src/data/finmind_client.py`，
+    之後若yfinance失效可以退回使用。
+
+    stock_info: finmind_client.fetch_stock_info() 的結果，只用來取得TPEx股票清單與真實
+    名稱/產業別（yfinance沒有這些基本資料，仍需要FinMind的名單來補stocks表的name/industry
+    欄位）。只篩選純4碼的普通股票代號(排除ETF/債券/權證等，比照
+    src.data.twse_client.STOCK_CODE_PATTERN 對TWSE的既有做法一致)。
     """
     tpex_rows = [r for r in stock_info if r["market"] == "TPEx" and STOCK_CODE_PATTERN.match(r["stock_id"])]
-    success_count = 0
-    for row in tpex_rows:
-        stock_id = row["stock_id"]
-        try:
-            prices = finmind_client.fetch_stock_prices(stock_id, date_str, date_str)
+    if not tpex_rows:
+        return 0
+    info_by_id = {r["stock_id"]: r for r in tpex_rows}
 
-            storage.upsert_stocks(conn, [{
-                "stock_id": stock_id, "name": row.get("name", stock_id), "market": "TPEx",
-                "industry": row.get("industry"), "updated_at": datetime.now().isoformat(),
-            }])
-            if prices:
-                storage.upsert_stock_prices(conn, prices)
-            success_count += 1
-        except Exception as exc:  # noqa: BLE001 - 單檔失敗不應中斷整批更新
-            print(f"[TPEx/FinMind] {stock_id}: 失敗 - {exc}")
-    return success_count
+    iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    next_day = (date.fromisoformat(iso_date) + timedelta(days=1)).isoformat()
+
+    try:
+        prices_by_stock = yfinance_client.fetch_tpex_prices_batch(list(info_by_id.keys()), iso_date, next_day)
+    except Exception as exc:  # noqa: BLE001 - 整批下載失敗不應該讓整條pipeline中斷
+        print(f"[TPEx/yfinance] 批次下載失敗，本次TPEx更新整批略過：{exc}")
+        return 0
+
+    for stock_id, prices in prices_by_stock.items():
+        row = info_by_id[stock_id]
+        storage.upsert_stocks(conn, [{
+            "stock_id": stock_id, "name": row.get("name", stock_id), "market": "TPEx",
+            "industry": row.get("industry"), "updated_at": datetime.now().isoformat(),
+        }])
+        storage.upsert_stock_prices(conn, prices)
+
+    return len(prices_by_stock)
 
 
 def run_daily_pipeline(

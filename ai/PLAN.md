@@ -756,3 +756,43 @@ patterns/strategies/risk/screener/notify/data）完全沒有UI框架耦合；`st
   標籤、支撐壓力線)/勾選框/最新交易日分析面板都跟Streamlit版一致；monkeypatch掉真正的
   `run_daily_pipeline`後點擊「立即重新篩選」與「手動抓取今日資料」兩個按鈕，確認QThread
   背景執行、訊號串接、按鈕重新啟用都正常，沒有crash或卡死。
+
+## TPEx股價改用yfinance批次下載取代FinMind逐股抓取（2026-07-23）
+
+使用者質疑「為什麼不能用ref-project的batch_fill_history.py下載方式？一定要用FinMind嗎？」。
+查證ref-project後發現：`get_taiwan_stock_list()`同時取得TWSE(`.TW`)與TPEx(`.TWO`)的股票
+清單，`yf.download(tickers_array, start=..., end=...)`用陣列一次批次下載歷史區間資料
+（不是只抓最新一天），長期實測1000檔批次20秒內完成，對兩種市場代碼一視同仁、沒有額外的
+可靠性落差或workaround（`.agents/AGENTS.md`裡也沒有相關的踩坑紀錄）。
+
+第一輪回答時錯誤地把「TPEx官方openapi端點可能只回傳最新一天」這個保留條件套用在yfinance
+本身上，被使用者指正後重新查證：yfinance的`start`/`end`參數本來就支援任意歷史區間查詢，
+跟TPEx官方端點是否支援歷史日期是兩件獨立的事，不應該混為一談。
+
+改用`src/data/yfinance_client.py`（新增檔案）：`fetch_prices_batch(stock_ids, start_date,
+end_date, market_suffix)`仿照ref-project的`extract_ticker_df`邏輯處理`yf.download`回傳的
+MultiIndex欄位（用真實網路請求驗證過實際欄位結構是`MultiIndex(names=['Price','Ticker'])`，
+不是憑空假設）；`fetch_tpex_prices_batch()`固定用`.TWO`後綴。`scripts/daily_pipeline.py`的
+`fetch_today_tpex()`改呼叫這個函式取代原本逐股呼叫`finmind_client.fetch_stock_prices()`
+的迴圈，整批下載失敗時回傳0檔並印出錯誤訊息、不讓整條pipeline中斷，不再假裝部分成功。
+TWSE股價維持用官方API(`src/data/twse_client.py`)不變——本來就已經是單次批次請求，沒有
+理由換成可靠性較低的來源；yfinance只用在原本真正的瓶頸(TPEx)。
+
+`tests/test_daily_pipeline.py`原本monkeypatch `finmind_client`來測TPEx路徑的4個測試改寫成
+monkeypatch `yfinance_client.fetch_tpex_prices_batch`——這個修正本身也是一次教訓：
+函式簽章換了但monkeypatch對象沒同步更新的話，測試會安靜地打真實網路（改寫前跑覺得「12個
+測試都過」，但其實有2個測試已經在悄悄對Yahoo Finance發送真實請求，只是剛好網路通、剛好
+資料存在才矇混過關）；新增`tests/test_yfinance_client.py`(6個測試，用手造MultiIndex
+DataFrame模擬yf.download回傳格式)。459個測試全過。
+
+**實測驗證**：直接對本機`data/tw_stock.db`跑`daily_pipeline.py --date 20260722/20260723
+--local-db data/tw_stock.db --dry-run`兩次真實回補，各自耗時約1分30秒（1596檔TPEx候選中
+約1250~1285檔成功、其餘是yfinance查無資料/下市的代碼），相較於改用yfinance前TPEx這一步
+單獨就需要約1小時，整條pipeline(含TWSE+選股)實測縮短到約1.5分鐘完成。順便發現先前session
+「FinMind的TPEx4碼股票只有~640檔」的說法有誤，即時重新查證FinMind目前實際回傳1596檔4碼
+TPEx股票，數字對不上；不影響這次修正的正確性，但记录下來避免以訛傳訛。
+
+⚠️ 副作用：先前為了驗證PySide6桌面版按鈕功能，曾對本機`data/tw_stock.db`按過一次「立即
+重新篩選」，在`daily_candidates`表裡留下2026-07-23當天19筆測試用的候選紀錄(created_at
+約14:24)，這次真正的回補又新增7筆(15:12)，兩批共存導致查詢`daily_candidates`看到26筆
+而不是pipeline印出的7筆——這是測試過程留下的資料，不是這次改動的bug，暫時保留未清除。

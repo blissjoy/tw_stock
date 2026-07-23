@@ -14,3 +14,8 @@ plotly>=5.20
 # Cloud。本機已驗證6.11.1可正常運作，含QtWebEngine(desktop/main_window.py用QWebEngineView
 # 顯示Plotly圖表，重用跟Streamlit版相同的src/presentation/chart_data.py畫圖邏輯)。
 PySide6>=6.6.0
+
+# TPEx股價批次下載(src/data/yfinance_client.py)：2026-07-23改用yfinance取代FinMind逐股抓取，
+# 仿照ref-project/tw_stock_analyzer長期實測驗證過的yf.download(tickers_array)批次做法，
+# 原本約需1小時的TPEx更新縮短到數十秒內。本機已驗證1.4.1可正常運作。
+yfinance>=1.4.1

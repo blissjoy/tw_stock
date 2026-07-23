@@ -133,9 +133,10 @@ def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):
         {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
         {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"},
     ])
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", lambda sid, s, e: [_price_row(stock_id=sid, d="2026-07-22")])
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_institutional_investors", lambda sid, s, e: [])
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_margin_trading", lambda sid, s, e: [])
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
+        lambda stock_ids, start_date, end_date: {"6488": [_price_row(stock_id="6488", d="2026-07-22")]},
+    )
     monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False)
@@ -145,8 +146,8 @@ def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):
 
 
 def test_fetch_today_tpex_filters_out_non_4_digit_codes(monkeypatch):
-    """FinMind的TPEx股票清單裡混雜ETF/債券/權證等非4碼代號(例如00878B)，這些不是我們要
-    每日追蹤的普通股，應該被濾掉，不浪費請求額度去抓它們。"""
+    """TPEx股票清單裡混雜ETF/債券/權證等非4碼代號(例如00878B)，這些不是我們要每日追蹤的
+    普通股，應該被濾掉，不浪費批次下載的額度去抓它們。"""
     conn = _fresh_conn()
     stock_info = [
         {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
@@ -154,55 +155,80 @@ def test_fetch_today_tpex_filters_out_non_4_digit_codes(monkeypatch):
         {"stock_id": "73107P", "name": "某權證", "market": "TPEx", "industry": None},
     ]
     fetched_ids = []
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", lambda sid, s, e: (fetched_ids.append(sid), [_price_row(stock_id=sid)])[1])
+
+    def _fake_batch(stock_ids, start_date, end_date):
+        fetched_ids.extend(stock_ids)
+        return {sid: [_price_row(stock_id=sid)] for sid in stock_ids}
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", _fake_batch)
 
     daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
 
     assert fetched_ids == ["6488"]  # 只有4碼的普通股被抓
 
 
-def test_fetch_today_tpex_does_not_fetch_institutional_or_margin_data(monkeypatch):
-    """目前daily_screener沒有任何規則用到TPEx的法人/融資融券資料，這裡刻意不抓，
-    節省約2/3的請求量；用「一被呼叫就報錯」確認真的完全沒有呼叫到這兩個函式。"""
+def test_fetch_today_tpex_does_not_call_finmind_anymore(monkeypatch):
+    """2026-07-23改用yfinance批次下載取代FinMind逐股抓取後，fetch_today_tpex不應該再
+    呼叫finmind_client的任何抓取函式——用「一被呼叫就報錯」確認沒有不小心殘留舊路徑。"""
     conn = _fresh_conn()
     stock_info = [{"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"}]
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", lambda sid, s, e: [_price_row(stock_id=sid)])
 
     def _fail_if_called(*args, **kwargs):
-        raise AssertionError("不應該被呼叫")
+        raise AssertionError("不應該被呼叫：TPEx股價已改用yfinance批次下載")
 
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", _fail_if_called)
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_institutional_investors", _fail_if_called)
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_margin_trading", _fail_if_called)
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
+        lambda stock_ids, start_date, end_date: {"6488": [_price_row(stock_id="6488")]},
+    )
 
     success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
 
     assert success_count == 1
 
 
-def test_run_daily_pipeline_continues_when_single_tpex_stock_fails(monkeypatch):
+def test_run_daily_pipeline_continues_when_one_tpex_stock_has_no_data(monkeypatch):
+    """yfinance批次下載時，個別股票查無資料(例如剛下市)不會出現在回傳的dict裡(見
+    src/data/yfinance_client.py)，其餘股票應該正常處理、不受影響。"""
     conn = _fresh_conn()
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
     _stub_stock_info(monkeypatch, [
-        {"stock_id": "9999", "name": "測試失敗股", "market": "TPEx", "industry": None},
+        {"stock_id": "9999", "name": "測試查無資料股", "market": "TPEx", "industry": None},
         {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
     ])
 
-    def _flaky_prices(sid, s, e):
-        if sid == "9999":
-            raise RuntimeError("模擬FinMind暫時失敗")
-        return [_price_row(stock_id=sid, d="2026-07-22")]
+    def _fake_batch(stock_ids, start_date, end_date):
+        # 模擬9999查無資料(例如剛下市)，只有6488有資料回傳
+        return {"6488": [_price_row(stock_id="6488", d="2026-07-22")]}
 
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", _flaky_prices)
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_institutional_investors", lambda sid, s, e: [])
-    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_margin_trading", lambda sid, s, e: [])
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", _fake_batch)
     monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False)
 
     row = conn.execute("SELECT market, name FROM stocks WHERE stock_id = '6488'").fetchone()
     assert row == ("TPEx", "環球晶")
+    assert conn.execute("SELECT COUNT(*) FROM stocks WHERE stock_id = '9999'").fetchone()[0] == 0
+
+
+def test_fetch_today_tpex_returns_zero_and_does_not_raise_when_batch_download_fails(monkeypatch):
+    """整批yfinance下載失敗(例如網路問題)不應該讓整條pipeline中斷，這一步直接回傳0檔成功、
+    印出錯誤訊息即可(呼叫端/排程紀錄可以看到當天TPEx更新失敗)。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"}]
+
+    def _raise(stock_ids, start_date, end_date):
+        raise RuntimeError("模擬yfinance網路逾時")
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", _raise)
+
+    success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    assert success_count == 0
 
 
 def test_run_daily_pipeline_writes_done_status_with_candidate_count(monkeypatch, tmp_path):
