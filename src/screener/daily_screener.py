@@ -1,10 +1,19 @@
-"""每日選股（Layer 4 應用層）：對每檔股票用「今天」的最新資料，判斷 R-TREND-14
-（多頭短線選股與停損停利SOP，信心92/100，已用真實資料回測驗證勝率33.5%）的進場條件是否成立。
+"""每日選股（Layer 4 應用層）：對每檔股票用「今天」的最新資料，判斷已接上的規則的進場
+條件是否成立。
 
-刻意只從這一條已被回測證實的規則起步，不在這次一次接上全部246條規則；之後要加其他規則
-的每日篩選時，比照這裡的模式各自寫一個獨立的 screen_* 函式（輸入df，輸出候選dict或None），
-再由 screen_all_stocks 或 daily_pipeline.py 呼叫端合併多個screen函式的結果即可，不需要
-重寫這一層。
+⚠️ 2026-07-23前只接了R-TREND-14（多頭短線選股與停損停利SOP，信心92/100，已用真實資料
+回測驗證勝率33.5%），刻意先從這一條已被回測證實的規則起步。這次追加R-SCREEN-11（底部
+狹幅盤整大量紅K突破鎖股，信心89/100）與R-SCREEN-15（緩漲上升軌道線突破大量長紅K做多，
+信心88/100）——246條規則庫其實已經100%都有程式實作(`scripts/check_rule_coverage.py`
+可查)，差別只在於這裡有沒有把它「接進每日自動選股」這一層；這兩條都是清楚的做多進場
+訊號、只需要OHLCV資料(不像R-SCREEN-05需要股本/營收/三大法人等本專案還沒抓取的基本面
+資料)，且各自能重用既有的building block(`src/indicators/consolidation.py`的橫盤突破
+偵測、`src/patterns/chart_overlays.py`的上升軌道線)，不需要另外新寫底層演算法。依使用者
+指示，這次先接上觀察實際選股表現，不像R-TREND-14那樣要求先個別回測驗證勝率。
+
+之後要加其他規則的每日篩選時，比照這裡的模式各自寫一個獨立的 screen_* 函式（輸入df，
+輸出候選dict或None），再由 screen_all_stocks 或 daily_pipeline.py 呼叫端合併多個screen
+函式的結果即可，不需要重寫這一層。
 """
 
 from __future__ import annotations
@@ -14,12 +23,19 @@ from datetime import date, datetime
 import pandas as pd
 
 from src.data import storage
+from src.indicators.candles import is_mid_long_red_candle
+from src.indicators.consolidation import detect_consolidation_breakout
 from src.indicators.moving_average import sma
 from src.indicators.trend import (
     bull_short_term_entry_ready,
     bull_short_term_stop_loss,
     daily_bull_trend_state,
 )
+from src.patterns import chart_overlays
+from src.screener.screening_rules import narrow_range_bottom_breakout, slow_rally_channel_breakout
+
+# 約2個月交易日，比照R-SCREEN-11「盤整須達2個月以上」的門檻換算(21個交易日/月概估)
+CONSOLIDATION_MIN_BARS = 42
 
 
 def screen_bull_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict | None:
@@ -61,16 +77,102 @@ def screen_bull_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict |
     }
 
 
+def screen_narrow_range_bottom_breakout(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票的OHLCV資料判斷「今天」是否觸發R-SCREEN-11底部狹幅盤整大量紅K突破鎖股訊號。
+
+    重用`src/indicators/consolidation.py`的橫盤偵測(min_bars設成約2個月交易日，比照書中
+    「盤整須達2個月以上」的門檻)；該函式已經確認過「中長紅K收盤站上頸線」，這裡只需要額外
+    算出區間均量、交給`screening_rules.narrow_range_bottom_breakout()`檢查量能是否達
+    區間均量2倍以上(這是`detect_consolidation_breakout`本身不檢查的部分)。
+    """
+    if len(df) < min_days:
+        return None
+    open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
+
+    box = detect_consolidation_breakout(open_, high, low, close, min_bars=CONSOLIDATION_MIN_BARS)
+    t = len(close) - 1
+    if t < 1 or not bool(box["breakout_up"].iloc[t]):
+        return None
+
+    prior_group_len = int(box["group_len"].iloc[t - 1])
+    range_start = max(0, t - prior_group_len)
+    range_avg_volume = float(volume.iloc[range_start:t].mean())
+    consolidation_upper = float(box["upper_neckline"].iloc[t - 1])
+
+    triggered = narrow_range_bottom_breakout(
+        duration_months=prior_group_len / 21.0,
+        is_red_k=bool(is_mid_long_red_candle(open_, close).iloc[t]),
+        close=float(close.iloc[t]), consolidation_upper=consolidation_upper,
+        volume=float(volume.iloc[t]), range_avg_volume=range_avg_volume,
+    )
+    if not triggered:
+        return None
+
+    entry_price = float(close.iloc[t])
+    stop_loss = bull_short_term_stop_loss(entry_bar_low=float(low.iloc[t]))
+    return {
+        "signal_name": "R-SCREEN-11底部盤整突破鎖股",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": f"底部狹幅盤整{prior_group_len}天以上大量紅K突破＋量能達區間均量2倍以上",
+    }
+
+
+def screen_slow_rally_channel_breakout(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票的OHLCV資料判斷「今天」是否觸發R-SCREEN-15緩漲上升軌道線突破大量長紅K
+    做多訊號。重用`src/patterns/chart_overlays.compute_trendlines()`已經算好的上升軌道線
+    (`up_channel`，跟K線圖疊圖用的是同一套邏輯，不重新發明取點演算法)。
+    """
+    if len(df) < min_days:
+        return None
+    open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
+
+    trendlines = chart_overlays.compute_trendlines(df)
+    up_channel = trendlines.get("up_channel")
+    if up_channel is None:
+        return None
+
+    t = len(close) - 1
+    channel_value = up_channel.at(t)
+    avg_volume_20 = float(volume.iloc[max(0, t - 20):t].mean())
+
+    triggered = slow_rally_channel_breakout(
+        close=float(close.iloc[t]), channel_upper_value=channel_value,
+        is_long_red_k=bool(is_mid_long_red_candle(open_, close).iloc[t]),
+        volume=float(volume.iloc[t]), avg_volume_20=avg_volume_20,
+    )
+    if not triggered:
+        return None
+
+    entry_price = float(close.iloc[t])
+    stop_loss = bull_short_term_stop_loss(entry_bar_low=float(low.iloc[t]))
+    return {
+        "signal_name": "R-SCREEN-15緩漲軌道突破做多",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": "緩漲上升軌道線大量長紅K突破＋量能達20日均量2倍以上",
+    }
+
+
+_SCREEN_FUNCTIONS = (
+    screen_bull_short_term_entry,
+    screen_narrow_range_bottom_breakout,
+    screen_slow_rally_channel_breakout,
+)
+
+
 def screen_all_stocks(stock_frames: dict[str, pd.DataFrame], min_days: int = 60) -> list[dict]:
-    """對多檔股票批次跑 screen_bull_short_term_entry，回傳今天所有觸發訊號的候選清單。
+    """對多檔股票批次跑目前已接上的所有screen_*規則，回傳今天所有觸發訊號的候選清單。
+    同一檔股票若同時觸發多條規則，會分別各出現一筆(不同signal_name)，不互相排擠。
 
     stock_frames: {stock_id: df}，df需已依date排序、index為date、含open/high/low/close/volume欄位。
     """
     candidates: list[dict] = []
     for stock_id, df in stock_frames.items():
-        result = screen_bull_short_term_entry(df, min_days=min_days)
-        if result is not None:
-            candidates.append({"stock_id": stock_id, **result})
+        for screen_fn in _SCREEN_FUNCTIONS:
+            result = screen_fn(df, min_days=min_days)
+            if result is not None:
+                candidates.append({"stock_id": stock_id, **result})
     return candidates
 
 

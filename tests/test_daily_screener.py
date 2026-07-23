@@ -45,6 +45,94 @@ def test_screen_bull_short_term_entry_returns_none_when_not_bull_trend(monkeypat
     assert daily_screener.screen_bull_short_term_entry(df, min_days=60) is None
 
 
+def _build_narrow_range_breakout_df(n_days: int = 60) -> pd.DataFrame:
+    """前n_days-1天維持完全相同的高低價(狹幅盤整不擴張)，最後一天中長紅K放量突破。"""
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    open_ = [100.0] * (n_days - 1) + [100.0]
+    high = [100.0] * (n_days - 1) + [106.0]
+    low = [95.0] * (n_days - 1) + [99.0]
+    close = [98.0] * (n_days - 1) + [105.0]  # 最後一天實體漲幅(105-100)/100=5% >= 3.5%門檻
+    volume = [1000] * (n_days - 1) + [3000]  # 區間均量1000，突破日3000 >= 2倍門檻
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+
+def test_screen_narrow_range_bottom_breakout_returns_none_when_not_enough_days():
+    df = _build_narrow_range_breakout_df(n_days=30)
+    assert daily_screener.screen_narrow_range_bottom_breakout(df, min_days=60) is None
+
+
+def test_screen_narrow_range_bottom_breakout_fires_when_conditions_met():
+    df = _build_narrow_range_breakout_df(n_days=60)
+
+    result = daily_screener.screen_narrow_range_bottom_breakout(df, min_days=60)
+
+    assert result is not None
+    assert result["signal_name"] == "R-SCREEN-11底部盤整突破鎖股"
+    assert result["entry_price"] == df["close"].iloc[-1]
+    assert result["stop_loss"] < result["entry_price"]
+
+
+def test_screen_narrow_range_bottom_breakout_returns_none_when_volume_not_enough():
+    df = _build_narrow_range_breakout_df(n_days=60)
+    df.loc[df.index[-1], "volume"] = 1100  # 只有區間均量的1.1倍，不到2倍門檻
+
+    assert daily_screener.screen_narrow_range_bottom_breakout(df, min_days=60) is None
+
+
+def test_screen_narrow_range_bottom_breakout_returns_none_without_prior_consolidation():
+    """沒有先形成夠長的橫盤區間(這裡直接用一般上升趨勢資料)，即使最後一天也是大量紅K，
+    也不應該被誤判成底部盤整突破。"""
+    df = _build_uptrend_df(n_days=60)
+    assert daily_screener.screen_narrow_range_bottom_breakout(df, min_days=60) is None
+
+
+def _build_channel_breakout_df(n_days: int = 60) -> pd.DataFrame:
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    open_ = [100.0] * (n_days - 1) + [100.0]
+    high = [102.0] * (n_days - 1) + [107.0]
+    low = [98.0] * (n_days - 1) + [99.0]
+    close = [100.0] * (n_days - 1) + [106.0]  # 最後一天實體漲幅6% >= 3.5%門檻
+    volume = [1000] * (n_days - 1) + [2500]  # 前20日均量1000，突破日2500 >= 2倍門檻
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+
+def test_screen_slow_rally_channel_breakout_returns_none_when_not_enough_days():
+    df = _build_channel_breakout_df(n_days=30)
+    assert daily_screener.screen_slow_rally_channel_breakout(df, min_days=60) is None
+
+
+def test_screen_slow_rally_channel_breakout_returns_none_when_no_channel_found():
+    """compute_trendlines()算不出up_channel(例如資料裡沒有形成夠格的上升軌道)時，
+    不應該誤判成軌道突破。"""
+    df = _build_channel_breakout_df(n_days=60)
+    assert daily_screener.screen_slow_rally_channel_breakout(df, min_days=60) is None
+
+
+def test_screen_slow_rally_channel_breakout_fires_when_conditions_met(monkeypatch):
+    from src.indicators.trendlines import LinePoint, TrendLine
+
+    df = _build_channel_breakout_df(n_days=60)
+    fake_channel = TrendLine(a=LinePoint(0, 90.0), b=LinePoint(1, 90.0), role="resistance")
+    monkeypatch.setattr(daily_screener.chart_overlays, "compute_trendlines", lambda df: {"up_channel": fake_channel})
+
+    result = daily_screener.screen_slow_rally_channel_breakout(df, min_days=60)
+
+    assert result is not None
+    assert result["signal_name"] == "R-SCREEN-15緩漲軌道突破做多"
+    assert result["entry_price"] == df["close"].iloc[-1]
+    assert result["stop_loss"] < result["entry_price"]
+
+
+def test_screen_slow_rally_channel_breakout_returns_none_when_close_below_channel(monkeypatch):
+    from src.indicators.trendlines import LinePoint, TrendLine
+
+    df = _build_channel_breakout_df(n_days=60)
+    fake_channel = TrendLine(a=LinePoint(0, 200.0), b=LinePoint(1, 200.0), role="resistance")  # 遠高於收盤價
+    monkeypatch.setattr(daily_screener.chart_overlays, "compute_trendlines", lambda df: {"up_channel": fake_channel})
+
+    assert daily_screener.screen_slow_rally_channel_breakout(df, min_days=60) is None
+
+
 def test_screen_all_stocks_aggregates_multiple_candidates(monkeypatch):
     monkeypatch.setattr(
         daily_screener, "daily_bull_trend_state",
