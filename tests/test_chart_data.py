@@ -32,6 +32,55 @@ def test_load_latest_candidates_returns_only_the_most_recent_date():
     assert df.iloc[0]["signal_name"] == "R-TREND-14多頭短線進場"
 
 
+def test_load_latest_candidates_merges_multiple_signals_for_same_stock_into_one_row():
+    """同一檔股票同一天同時觸發多條規則時，應該合併成一列顯示，不是一條規則一列
+    （這是2026-07-23接上R-SCREEN-11/15後才會出現的情境：同一檔股票可能同時符合
+    R-TREND-14跟R-SCREEN-15）。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": "多頭架構＋攻擊量", "created_at": "2026-07-23T18:00:00"},
+        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-SCREEN-15緩漲軌道突破做多",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": "軌道突破＋大量長紅K", "created_at": "2026-07-23T18:00:01"},
+        {"date": "2026-07-23", "stock_id": "1101", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 50.0, "stop_loss": 45.0, "note": "多頭架構＋攻擊量", "created_at": "2026-07-23T18:00:02"},
+    ])
+
+    df, latest_date = load_latest_candidates(conn)
+
+    assert latest_date == "2026-07-23"
+    assert len(df) == 2  # 2330合併成一列，1101單獨一列，總共2列不是3列
+    row_2330 = df[df["stock_id"] == "2330"].iloc[0]
+    assert row_2330["signal_name"] == "R-TREND-14多頭短線進場、R-SCREEN-15緩漲軌道突破做多"
+    assert "R-TREND-14多頭短線進場：多頭架構＋攻擊量" in row_2330["note"]
+    assert "R-SCREEN-15緩漲軌道突破做多：軌道突破＋大量長紅K" in row_2330["note"]
+    assert row_2330["entry_price"] == 104.0
+    assert row_2330["stop_loss"] == 99.0
+
+    row_1101 = df[df["stock_id"] == "1101"].iloc[0]
+    assert row_1101["signal_name"] == "R-TREND-14多頭短線進場"  # 只觸發一條規則時，格式維持不變
+
+
+def test_load_latest_candidates_skips_null_note_when_merging():
+    """合併note時，若其中一條規則的note是None，不應該把"None"字樣混進合併結果裡。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-23T18:00:00"},
+        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-SCREEN-15緩漲軌道突破做多",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": "軌道突破", "created_at": "2026-07-23T18:00:01"},
+    ])
+
+    df, _ = load_latest_candidates(conn)
+
+    assert df.iloc[0]["note"] == "R-SCREEN-15緩漲軌道突破做多：軌道突破"
+
+
 def test_load_price_history_returns_ascending_order_and_respects_limit():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])

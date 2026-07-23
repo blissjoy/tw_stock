@@ -41,7 +41,17 @@ SR_ROLE_COLORS = {"支撐": "#16a085", "壓力": "#c0392b"}
 
 
 def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
-    """回傳 (最新一天的候選清單DataFrame, 該日期字串)；尚無任何紀錄時回傳(空DataFrame, None)。"""
+    """回傳 (最新一天的候選清單DataFrame, 該日期字串)；尚無任何紀錄時回傳(空DataFrame, None)。
+
+    同一檔股票如果同時符合多條規則(daily_candidates裡有多筆同stock_id、不同signal_name
+    的紀錄，例如同時觸發R-TREND-14跟R-SCREEN-15)，這裡會合併成一列顯示，不是一條規則
+    一列——signal_name欄位列出所有符合的規則(用「、」分隔)，note欄位合併每條規則各自的
+    說明(用「；」分隔並標明對應的規則名稱，避免多條note混在一起看不出是誰的說明)。
+    entry_price/stop_loss取合併前第一筆的值：目前已接上的規則都是用同一天的收盤價/同一套
+    停損公式(bull_short_term_stop_loss)，理論上同一檔股票不管觸發幾條規則，算出來的值
+    本來就會相同；之後如果加入用不同公式的規則導致同一天算出不同的進場價/停損價，這裡
+    仍然只顯示第一筆，不特別提示「多個不同數值」，避免為了目前用不到的情境過度設計UI。
+    """
     latest_date = conn.execute("SELECT MAX(date) FROM daily_candidates").fetchone()[0]
     if latest_date is None:
         return pd.DataFrame(), None
@@ -49,12 +59,33 @@ def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
         """
         SELECT dc.stock_id, s.name, dc.signal_name, dc.entry_price, dc.stop_loss, dc.note
         FROM daily_candidates dc LEFT JOIN stocks s ON dc.stock_id = s.stock_id
-        WHERE dc.date = ? ORDER BY dc.stock_id
+        WHERE dc.date = ? ORDER BY dc.stock_id, dc.created_at
         """,
         (latest_date,),
     )
     columns = [d[0] for d in cur.description]
-    return pd.DataFrame(cur.fetchall(), columns=columns), latest_date
+    raw_df = pd.DataFrame(cur.fetchall(), columns=columns)
+    if raw_df.empty:
+        return raw_df, latest_date
+
+    merged_rows = []
+    for stock_id, group in raw_df.groupby("stock_id", sort=False):
+        first = group.iloc[0]
+        # note在DB裡是NULL時，pandas讀回來會變成float NaN(不是Python None)，而NaN在布林
+        # 判斷下是truthy的(bool(float('nan')) is True)——用pd.notna()才能正確排除掉，
+        # 否則合併結果會混進字面上的"nan"字樣。
+        notes = [f"{row.signal_name}：{row.note}" for row in group.itertuples() if pd.notna(row.note)]
+        merged_rows.append({
+            "stock_id": stock_id,
+            "name": first["name"],
+            "signal_name": "、".join(group["signal_name"]),
+            "entry_price": first["entry_price"],
+            "stop_loss": first["stop_loss"],
+            "note": "；".join(notes),
+        })
+    merged_df = pd.DataFrame(merged_rows, columns=["stock_id", "name", "signal_name", "entry_price", "stop_loss", "note"])
+    merged_df = merged_df.sort_values("stock_id").reset_index(drop=True)
+    return merged_df, latest_date
 
 
 def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
