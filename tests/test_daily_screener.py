@@ -133,6 +133,81 @@ def test_screen_slow_rally_channel_breakout_returns_none_when_close_below_channe
     assert daily_screener.screen_slow_rally_channel_breakout(df, min_days=60) is None
 
 
+def _build_big_black_breakout_df(n_days: int = 65, breakout: bool = True, breakout_volume_ok: bool = True) -> pd.DataFrame:
+    """前50天穩定緩升(確保MA5>MA10>MA20多頭排列成立)，第50天出現大量黑K(watch_high=131)，
+    之後盤整在watch_high之下，最後一天視參數決定要不要真的收盤突破watch_high、放量。"""
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    open_, high, low, close, volume = [], [], [], [], []
+
+    for i in range(50):
+        c = 100.0 + i * 0.5
+        open_.append(c - 0.2)
+        high.append(c + 0.3)
+        low.append(c - 0.3)
+        close.append(c)
+        volume.append(1000)
+
+    # 第50天(index 50)：多頭排列期間的大量黑K，high=131，收黑，量是前一日的2.5倍
+    open_.append(130.0)
+    close.append(125.0)
+    high.append(131.0)
+    low.append(124.0)
+    volume.append(2500)
+
+    # index 51~(n_days-2)：盤整在watch_high(131)之下，量能平淡
+    for _ in range(51, n_days - 1):
+        open_.append(126.0)
+        close.append(126.5)
+        high.append(127.0)
+        low.append(125.5)
+        volume.append(1000)
+
+    # 最後一天：依參數決定是否真的突破watch_high、放量
+    last_close = 135.0 if breakout else 128.0  # 128仍低於watch_high=131，不算突破
+    last_volume = 2200 if breakout_volume_ok else 1050  # 前一天量是1000，2200>=2倍門檻，1050不到
+    open_.append(126.0)
+    close.append(last_close)
+    high.append(max(last_close + 1, 132.0))
+    low.append(126.0)
+    volume.append(last_volume)
+
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+
+def test_screen_breakout_above_big_black_candle_returns_none_when_not_enough_days():
+    df = _build_uptrend_df(n_days=30)
+    assert daily_screener.screen_breakout_above_big_black_candle(df, min_days=60) is None
+
+
+def test_screen_breakout_above_big_black_candle_fires_when_conditions_met():
+    df = _build_big_black_breakout_df(n_days=65, breakout=True, breakout_volume_ok=True)
+
+    result = daily_screener.screen_breakout_above_big_black_candle(df, min_days=60)
+
+    assert result is not None
+    assert result["signal_name"] == "R-CLASSIC-24突破大量黑K買進"
+    assert result["entry_price"] == df["close"].iloc[-1]
+    assert result["stop_loss"] < result["entry_price"]
+    assert "131" in result["note"]  # note裡應該提到黑K高點(watch_high)
+
+
+def test_screen_breakout_above_big_black_candle_returns_none_when_not_broken_out_yet():
+    df = _build_big_black_breakout_df(n_days=65, breakout=False, breakout_volume_ok=True)
+    assert daily_screener.screen_breakout_above_big_black_candle(df, min_days=60) is None
+
+
+def test_screen_breakout_above_big_black_candle_returns_none_when_breakout_volume_not_enough():
+    df = _build_big_black_breakout_df(n_days=65, breakout=True, breakout_volume_ok=False)
+    assert daily_screener.screen_breakout_above_big_black_candle(df, min_days=60) is None
+
+
+def test_screen_breakout_above_big_black_candle_returns_none_without_prior_big_black_candle():
+    """一般上升趨勢資料裡沒有出現過大量黑K，即使最後一天大漲放量，也不應該誤判成
+    「突破大量黑K」訊號(根本沒有黑K可以當作突破基準)。"""
+    df = _build_uptrend_df(n_days=65)
+    assert daily_screener.screen_breakout_above_big_black_candle(df, min_days=60) is None
+
+
 def test_screen_all_stocks_aggregates_multiple_candidates(monkeypatch):
     monkeypatch.setattr(
         daily_screener, "daily_bull_trend_state",

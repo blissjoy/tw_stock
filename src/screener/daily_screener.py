@@ -2,14 +2,16 @@
 條件是否成立。
 
 ⚠️ 2026-07-23前只接了R-TREND-14（多頭短線選股與停損停利SOP，信心92/100，已用真實資料
-回測驗證勝率33.5%），刻意先從這一條已被回測證實的規則起步。這次追加R-SCREEN-11（底部
-狹幅盤整大量紅K突破鎖股，信心89/100）與R-SCREEN-15（緩漲上升軌道線突破大量長紅K做多，
-信心88/100）——246條規則庫其實已經100%都有程式實作(`scripts/check_rule_coverage.py`
-可查)，差別只在於這裡有沒有把它「接進每日自動選股」這一層；這兩條都是清楚的做多進場
-訊號、只需要OHLCV資料(不像R-SCREEN-05需要股本/營收/三大法人等本專案還沒抓取的基本面
-資料)，且各自能重用既有的building block(`src/indicators/consolidation.py`的橫盤突破
-偵測、`src/patterns/chart_overlays.py`的上升軌道線)，不需要另外新寫底層演算法。依使用者
-指示，這次先接上觀察實際選股表現，不像R-TREND-14那樣要求先個別回測驗證勝率。
+回測驗證勝率33.5%），刻意先從這一條已被回測證實的規則起步。之後追加R-SCREEN-11（底部
+狹幅盤整大量紅K突破鎖股，信心89/100）、R-SCREEN-15（緩漲上升軌道線突破大量長紅K做多，
+信心88/100）、R-CLASSIC-24（突破大量黑K買進，信心87/100）——246條規則庫其實已經100%
+都有程式實作(`scripts/check_rule_coverage.py`可查)，差別只在於這裡有沒有把它「接進每日
+自動選股」這一層；這幾條都是清楚的做多進場訊號、只需要OHLCV資料(不像R-SCREEN-05需要
+股本/營收/三大法人等本專案還沒抓取的基本面資料)，且各自能重用既有的building block
+(`src/indicators/consolidation.py`的橫盤突破偵測、`src/patterns/chart_overlays.py`的
+上升軌道線、`src/indicators/moving_average.py`的均線多頭排列、`src/indicators/
+volume_price.py`的大量判斷)，不需要另外新寫底層演算法。依使用者指示，這次先接上觀察
+實際選股表現，不像R-TREND-14那樣要求先個別回測驗證勝率。
 
 之後要加其他規則的每日篩選時，比照這裡的模式各自寫一個獨立的 screen_* 函式（輸入df，
 輸出候選dict或None），再由 screen_all_stocks 或 daily_pipeline.py 呼叫端合併多個screen
@@ -25,14 +27,19 @@ import pandas as pd
 from src.data import storage
 from src.indicators.candles import is_mid_long_red_candle
 from src.indicators.consolidation import detect_consolidation_breakout
-from src.indicators.moving_average import sma
+from src.indicators.moving_average import compute_ma_set, is_bullish_aligned, sma
 from src.indicators.trend import (
     bull_short_term_entry_ready,
     bull_short_term_stop_loss,
     daily_bull_trend_state,
 )
+from src.indicators.volume_price import is_big_volume_vs_prev_day
 from src.patterns import chart_overlays
 from src.screener.screening_rules import narrow_range_bottom_breakout, slow_rally_channel_breakout
+
+# R-CLASSIC-24往回搜尋「多頭排列期間的大量黑K」的天數上限，避免抓到太久以前、
+# 已經沒有參考意義的舊黑K高點當作watch_high。
+BIG_BLACK_BREAKOUT_LOOKBACK = 20
 
 # 約2個月交易日，比照R-SCREEN-11「盤整須達2個月以上」的門檻換算(21個交易日/月概估)
 CONSOLIDATION_MIN_BARS = 42
@@ -154,10 +161,52 @@ def screen_slow_rally_channel_breakout(df: pd.DataFrame, min_days: int = 60) -> 
     }
 
 
+def screen_breakout_above_big_black_candle(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票的OHLCV資料判斷「今天」是否觸發R-CLASSIC-24突破大量黑K買進訊號。
+
+    書中觀念：多頭排列(均線多頭)期間出現的大量黑K，表面上是賣壓K棒，但只要後續股價收盤
+    突破該黑K高點且放量，黑K反而不是轉空訊號、而是續漲買進訊號。往回搜尋最近
+    `BIG_BLACK_BREAKOUT_LOOKBACK`天內、最近一根「均線多頭排列期間出現的大量黑K」當作
+    突破基準(watch_high)，只取最近一根而不是任一根，避免抓到已經沒有參考意義的舊黑K。
+    """
+    if len(df) < min_days:
+        return None
+    open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
+    t = len(close) - 1
+
+    ma_frame = compute_ma_set(close, periods=(5, 10, 20))
+    bullish = is_bullish_aligned(ma_frame)
+    big_volume = is_big_volume_vs_prev_day(volume, multiple=2.0)
+    is_black = close < open_
+
+    watch_high = None
+    search_start = t - 1
+    search_end = max(search_start - BIG_BLACK_BREAKOUT_LOOKBACK, -1)
+    for j in range(search_start, search_end, -1):
+        if bool(is_black.iloc[j]) and bool(big_volume.iloc[j]) and bool(bullish.iloc[j]):
+            watch_high = float(high.iloc[j])
+            break
+    if watch_high is None:
+        return None
+
+    if not (close.iloc[t] > watch_high and bool(big_volume.iloc[t])):
+        return None
+
+    entry_price = float(close.iloc[t])
+    stop_loss = bull_short_term_stop_loss(entry_bar_low=float(low.iloc[t]))
+    return {
+        "signal_name": "R-CLASSIC-24突破大量黑K買進",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": f"多頭排列期間出現大量黑K(高點{watch_high:.2f})，今日收盤突破且放量，非轉空為續漲買進訊號",
+    }
+
+
 _SCREEN_FUNCTIONS = (
     screen_bull_short_term_entry,
     screen_narrow_range_bottom_breakout,
     screen_slow_rally_channel_breakout,
+    screen_breakout_above_big_black_candle,
 )
 
 
