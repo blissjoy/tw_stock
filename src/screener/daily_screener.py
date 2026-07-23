@@ -97,10 +97,16 @@ def load_trailing_frames(conn, min_days: int = 60) -> dict[str, pd.DataFrame]:
 def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) -> list[dict]:
     """只用資料庫裡『目前已有』的資料重新跑一次選股並寫回daily_candidates，不對外抓取任何新資料。
 
-    這是刻意的設計：抓新資料(TWSE/TPEx)成本較高(TPEx經FinMind逐股抓取，實測約1小時內)，跟
+    這是刻意的設計：抓新資料(TWSE/TPEx)成本較高(TPEx經yfinance批次下載，實測約1~2分鐘)，跟
     「用現有資料重算訊號」(純本地運算，通常幾秒內)分開，才能讓 dashboard 提供「立即重新篩選」
     這種不需要等待資料抓取的即時操作；scripts/daily_pipeline.py 抓完當天新資料後也呼叫同一份
     邏輯，避免重複實作。
+
+    ⚠️ 同一天可能重跑選股不只一次(手動按「立即重新篩選」按很多次、或補資料後重算)，每次都是
+    從資料庫現有資料重新算出『完整』的候選清單，不是增量疊加——所以寫入前一定要先清掉這個
+    日期的舊紀錄(見storage.delete_daily_candidates_for_date)，否則「這次已經不再符合條件」
+    的股票會繼續卡在表裡，讓候選清單顯示過時的結果。即使這次重算出0檔候選，也要清掉舊紀錄
+    (代表『今天正確答案就是沒有候選股』)，不能因為candidates是空的就跳過清除這一步。
     """
     if iso_date is None:
         iso_date = date.today().isoformat()
@@ -108,6 +114,7 @@ def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) 
     frames = load_trailing_frames(conn, min_days=min_days)
     candidates = screen_all_stocks(frames, min_days=min_days)
 
+    storage.delete_daily_candidates_for_date(conn, iso_date)
     if candidates:
         storage.upsert_daily_candidates(conn, [
             {

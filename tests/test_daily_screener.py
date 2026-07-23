@@ -108,3 +108,58 @@ def test_run_screen_and_store_writes_nothing_when_no_candidates(monkeypatch):
     assert candidates == []
     count = conn.execute("SELECT COUNT(*) FROM daily_candidates").fetchone()[0]
     assert count == 0
+
+
+def test_run_screen_and_store_rerun_same_date_drops_stale_candidates_not_selected_this_time(monkeypatch):
+    """同一天可能重跑選股不只一次(手動按「立即重新篩選」按很多次、或補資料後重算)，每次都是
+    從資料庫現有資料重新算出完整的候選清單。如果第一次選中A、第二次改成只選中B(A這次已經
+    不符合條件)，第二次跑完後A不應該繼續留在daily_candidates裡——否則候選清單會顯示過時的
+    結果(這正是2026-07-23實測回補時發現的真實現象：同一天重跑兩次，19檔舊結果沒被清掉，
+    跟新的7檔一起顯示，變成26檔)。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+    _seed_stock_prices(conn, "1101", n_days=70)
+    candidate_a = {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None}
+    candidate_b = {"stock_id": "1101", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 50.0, "stop_loss": 45.0, "note": None}
+
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate_a])
+    daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
+
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate_b])
+    daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
+
+    rows = conn.execute("SELECT stock_id FROM daily_candidates WHERE date = '2026-07-23'").fetchall()
+    assert rows == [("1101",)]  # 2330(第一次選中)應該被清掉，只留下第二次真正選中的1101
+
+
+def test_run_screen_and_store_rerun_with_zero_candidates_clears_previous_stale_rows(monkeypatch):
+    """就算重跑後這次算出0檔候選，也代表『今天正確答案就是沒有候選股』，一樣要清掉舊紀錄，
+    不能因為candidates是空list就跳過清除、讓舊結果繼續殘留。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+    candidate_a = {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None}
+
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate_a])
+    daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
+
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
+
+    count = conn.execute("SELECT COUNT(*) FROM daily_candidates WHERE date = '2026-07-23'").fetchone()[0]
+    assert count == 0
+
+
+def test_run_screen_and_store_does_not_affect_other_dates(monkeypatch):
+    """清除舊紀錄只能限定在這次重算的日期，不能誤刪其他日期的歷史候選紀錄。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+    candidate = {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None}
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate])
+
+    daily_screener.run_screen_and_store(conn, iso_date="2026-07-22", min_days=60)
+    daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
+
+    count_22 = conn.execute("SELECT COUNT(*) FROM daily_candidates WHERE date = '2026-07-22'").fetchone()[0]
+    count_23 = conn.execute("SELECT COUNT(*) FROM daily_candidates WHERE date = '2026-07-23'").fetchone()[0]
+    assert count_22 == 1
+    assert count_23 == 1

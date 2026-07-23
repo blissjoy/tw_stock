@@ -1,10 +1,12 @@
 import sqlite3
 
 from src.data.storage import (
+    delete_daily_candidates_for_date,
     init_db,
     is_fetched,
     mark_fetched,
     upsert_broker_chips,
+    upsert_daily_candidates,
     upsert_institutional_investors,
     upsert_margin_trading,
     upsert_securities_traders,
@@ -116,3 +118,28 @@ def test_fetch_log_round_trip():
     assert is_fetched(conn, "TaiwanStockPrice", "2330", "2026-07-22") is False
     mark_fetched(conn, "TaiwanStockPrice", "2330", "2026-07-22", "2026-07-22T18:00:00")
     assert is_fetched(conn, "TaiwanStockPrice", "2330", "2026-07-22") is True
+
+
+def _candidate_row(date_str: str, stock_id: str) -> dict:
+    return {
+        "date": date_str, "stock_id": stock_id, "signal_name": "R-TREND-14多頭短線進場",
+        "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": f"{date_str}T18:00:00",
+    }
+
+
+def test_delete_daily_candidates_for_date_removes_only_that_date():
+    conn = _fresh_db()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_daily_candidates(conn, [_candidate_row("2026-07-22", "2330"), _candidate_row("2026-07-23", "2330")])
+
+    delete_daily_candidates_for_date(conn, "2026-07-22")
+
+    remaining = conn.execute("SELECT date FROM daily_candidates").fetchall()
+    assert remaining == [("2026-07-23",)]  # 只刪指定日期，2026-07-23的紀錄不受影響
+
+
+def test_delete_daily_candidates_for_date_is_noop_when_nothing_to_delete():
+    conn = _fresh_db()
+    delete_daily_candidates_for_date(conn, "2026-07-22")  # 不應該拋出例外
+    count = conn.execute("SELECT COUNT(*) FROM daily_candidates").fetchone()[0]
+    assert count == 0

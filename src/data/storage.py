@@ -182,6 +182,18 @@ def upsert_daily_candidates(conn: sqlite3.Connection, rows: list[dict]) -> None:
     conn.commit()
 
 
+def delete_daily_candidates_for_date(conn: sqlite3.Connection, iso_date: str) -> None:
+    """刪除指定日期的所有候選紀錄。daily_screener.run_screen_and_store()在寫入這次重算的
+    結果前會先呼叫這個函式——同一天可能重跑選股好幾次(例如手動按「立即重新篩選」按了不只
+    一次、或補資料後又重算一次)，每次重算都是用『當下資料庫裡現有資料』從頭算出完整的候選
+    清單，不是增量疊加；如果不先清掉舊紀錄，只用INSERT...ON CONFLICT DO UPDATE的話，
+    「上一次選中、但這次已經不再符合條件」的股票會繼續留在表裡，讓候選清單顯示過時的
+    結果。這裡刪除後由呼叫端寫入這次的完整結果，確保每個日期的候選清單永遠只反映『最新一次
+    重算』的正確狀態。"""
+    conn.execute("DELETE FROM daily_candidates WHERE date = ?", (iso_date,))
+    conn.commit()
+
+
 def get_latest_candidates(conn: sqlite3.Connection) -> list[dict]:
     """回傳最新一天的候選清單（若當天無候選則回傳空list，不回溯更早的日期）。"""
     latest = conn.execute("SELECT MAX(date) FROM daily_candidates").fetchone()[0]
