@@ -31,7 +31,7 @@ def test_screen_bull_short_term_entry_fires_when_conditions_met(monkeypatch):
 
     result = daily_screener.screen_bull_short_term_entry(df, min_days=60)
     assert result is not None
-    assert result["signal_name"] == "R-TREND-14多頭短線進場"
+    assert result["signal_name"] == "R-TREND-14多頭短線進場（92%）"
     assert result["entry_price"] == df["close"].iloc[-1]
     assert result["stop_loss"] < result["entry_price"]
 
@@ -67,7 +67,7 @@ def test_screen_narrow_range_bottom_breakout_fires_when_conditions_met():
     result = daily_screener.screen_narrow_range_bottom_breakout(df, min_days=60)
 
     assert result is not None
-    assert result["signal_name"] == "R-SCREEN-11底部盤整突破鎖股"
+    assert result["signal_name"] == "R-SCREEN-11底部盤整突破鎖股（89%）"
     assert result["entry_price"] == df["close"].iloc[-1]
     assert result["stop_loss"] < result["entry_price"]
 
@@ -118,7 +118,7 @@ def test_screen_slow_rally_channel_breakout_fires_when_conditions_met(monkeypatc
     result = daily_screener.screen_slow_rally_channel_breakout(df, min_days=60)
 
     assert result is not None
-    assert result["signal_name"] == "R-SCREEN-15緩漲軌道突破做多"
+    assert result["signal_name"] == "R-SCREEN-15緩漲軌道突破做多（88%）"
     assert result["entry_price"] == df["close"].iloc[-1]
     assert result["stop_loss"] < result["entry_price"]
 
@@ -185,7 +185,7 @@ def test_screen_breakout_above_big_black_candle_fires_when_conditions_met():
     result = daily_screener.screen_breakout_above_big_black_candle(df, min_days=60)
 
     assert result is not None
-    assert result["signal_name"] == "R-CLASSIC-24突破大量黑K買進"
+    assert result["signal_name"] == "R-CLASSIC-24突破大量黑K買進（87%）"
     assert result["entry_price"] == df["close"].iloc[-1]
     assert result["stop_loss"] < result["entry_price"]
     assert "131" in result["note"]  # note裡應該提到黑K高點(watch_high)
@@ -206,6 +206,73 @@ def test_screen_breakout_above_big_black_candle_returns_none_without_prior_big_b
     「突破大量黑K」訊號(根本沒有黑K可以當作突破基準)。"""
     df = _build_uptrend_df(n_days=65)
     assert daily_screener.screen_breakout_above_big_black_candle(df, min_days=60) is None
+
+
+def _build_breakaway_gap_df(n_days: int = 65, gap_up: bool = True, big_volume: bool = True) -> pd.DataFrame:
+    """前n_days-1天維持完全相同的高低價(底部盤整不擴張，上緣=100)，最後一天視參數決定
+    要不要真的向上跳空突破盤整區上緣、放量。"""
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    open_ = [97.0] * (n_days - 1)
+    high = [100.0] * (n_days - 1)
+    low = [95.0] * (n_days - 1)
+    close = [98.0] * (n_days - 1)
+    volume = [1000] * (n_days - 1)
+
+    if gap_up:
+        last_open, last_close, last_high, last_low = 106.0, 109.0, 110.0, 105.0  # low=105>前一日high=100，缺口成立
+    else:
+        last_open, last_close, last_high, last_low = 99.0, 100.5, 101.0, 98.0  # low=98<=前一日high=100，沒有跳空
+    last_volume = 2500 if big_volume else 1050  # 20日均量約1000，2500>=2倍門檻，1050不到
+
+    open_.append(last_open)
+    close.append(last_close)
+    high.append(last_high)
+    low.append(last_low)
+    volume.append(last_volume)
+
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+
+def test_screen_breakaway_gap_up_returns_none_when_not_enough_days():
+    df = _build_breakaway_gap_df(n_days=30)
+    assert daily_screener.screen_breakaway_gap_up(df, min_days=60) is None
+
+
+def test_screen_breakaway_gap_up_fires_with_strong_signal_when_big_volume():
+    df = _build_breakaway_gap_df(n_days=65, gap_up=True, big_volume=True)
+
+    result = daily_screener.screen_breakaway_gap_up(df, min_days=60)
+
+    assert result is not None
+    assert result["signal_name"] == "R-GAP-09打底完成向上突破缺口（90%）"
+    assert result["entry_price"] == df["close"].iloc[-1]
+    assert result["stop_loss"] < result["entry_price"]
+    assert "強力買進訊號" in result["note"]
+    assert "100" in result["note"]  # note裡應該提到缺口下緣(原盤整區上緣，轉為支撐)
+
+
+def test_screen_breakaway_gap_up_still_fires_but_weaker_when_volume_not_enough():
+    """detect_breakaway_gap_up()本身在量能不足時不是回傳None，而是回傳訊號強度降低的
+    版本(書中的規則語意本來就是如此，不是這裡另外加的邏輯)，跟其他規則「量不夠就不算」
+    的模式不同，這裡刻意測這個差異，避免以後改壞了都不知道。"""
+    df = _build_breakaway_gap_df(n_days=65, gap_up=True, big_volume=False)
+
+    result = daily_screener.screen_breakaway_gap_up(df, min_days=60)
+
+    assert result is not None
+    assert "缺乏大量配合" in result["note"]
+
+
+def test_screen_breakaway_gap_up_returns_none_when_no_gap():
+    df = _build_breakaway_gap_df(n_days=65, gap_up=False)
+    assert daily_screener.screen_breakaway_gap_up(df, min_days=60) is None
+
+
+def test_screen_breakaway_gap_up_returns_none_without_prior_consolidation():
+    """沒有先形成夠長的底部盤整區間(這裡直接用一般上升趨勢資料)，即使最後一天也符合
+    跳空條件，也不應該被誤判成「打底完成」突破缺口。"""
+    df = _build_uptrend_df(n_days=65)
+    assert daily_screener.screen_breakaway_gap_up(df, min_days=60) is None
 
 
 def test_screen_all_stocks_aggregates_multiple_candidates(monkeypatch):

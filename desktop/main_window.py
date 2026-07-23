@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
 
         self.candidates_table = QTableWidget()
         self.candidates_table.setColumnCount(6)
-        self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "訊號", "進場價", "停損價", "備註"])
+        self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "訊號(信心%)", "進場價", "停損價", "備註"])
         self.candidates_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.candidates_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.candidates_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)

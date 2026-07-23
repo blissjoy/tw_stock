@@ -13,6 +13,13 @@
 volume_price.py`的大量判斷)，不需要另外新寫底層演算法。依使用者指示，這次先接上觀察
 實際選股表現，不像R-TREND-14那樣要求先個別回測驗證勝率。
 
+⚠️ 2026-07-23追加R-GAP-09（打底完成向上突破缺口，信心90/100）時，一開始誤判這條規則
+「需要缺口隔天的成交量確認、跟只評估今天的做法衝突」而排除掉——這個判斷是錯的：實際已
+實作的`src.indicators.gaps.detect_breakaway_gap_up()`裡，「3天內是否回補」只是事後才能
+加註的warning欄位，從來不是回傳訊號與否的必要條件(gap_filled_within_3_days=False時一樣
+正常回傳訊號)，所以評估「缺口發生當天」完全不需要用到未來資料，跟其他4條規則的模式
+一致，只是最初排除得太草率，之後補上了。
+
 之後要加其他規則的每日篩選時，比照這裡的模式各自寫一個獨立的 screen_* 函式（輸入df，
 輸出候選dict或None），再由 screen_all_stocks 或 daily_pipeline.py 呼叫端合併多個screen
 函式的結果即可，不需要重寫這一層。
@@ -26,7 +33,8 @@ import pandas as pd
 
 from src.data import storage
 from src.indicators.candles import is_mid_long_red_candle
-from src.indicators.consolidation import detect_consolidation_breakout
+from src.indicators.consolidation import detect_consolidation, detect_consolidation_breakout
+from src.indicators.gaps import detect_breakaway_gap_up, detect_gap
 from src.indicators.moving_average import compute_ma_set, is_bullish_aligned, sma
 from src.indicators.trend import (
     bull_short_term_entry_ready,
@@ -36,6 +44,11 @@ from src.indicators.trend import (
 from src.indicators.volume_price import is_big_volume_vs_prev_day
 from src.patterns import chart_overlays
 from src.screener.screening_rules import narrow_range_bottom_breakout, slow_rally_channel_breakout
+
+# R-GAP-09判斷「打底完成」的盤整天數門檻：書中這條規則本身沒有給出明確的天數(只引用
+# 「盤整區上下頸線支撐壓力規則」等其他章節)，這裡用比R-SCREEN-11(2個月/42天)略短的
+# 20個交易日(約1個月)當工程估計值，不是書中明文數字。
+GAP_CONSOLIDATION_MIN_BARS = 20
 
 # R-CLASSIC-24往回搜尋「多頭排列期間的大量黑K」的天數上限，避免抓到太久以前、
 # 已經沒有參考意義的舊黑K高點當作watch_high。
@@ -77,7 +90,7 @@ def screen_bull_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict |
     entry_price = float(close.iloc[t])
     stop_loss = bull_short_term_stop_loss(entry_bar_low=float(low.iloc[t]))
     return {
-        "signal_name": "R-TREND-14多頭短線進場",
+        "signal_name": "R-TREND-14多頭短線進場（92%）",
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "note": "多頭架構＋MA10/MA20多排向上＋攻擊量(前日1.3倍以上)＋紅K實體漲幅>2%",
@@ -118,7 +131,7 @@ def screen_narrow_range_bottom_breakout(df: pd.DataFrame, min_days: int = 60) ->
     entry_price = float(close.iloc[t])
     stop_loss = bull_short_term_stop_loss(entry_bar_low=float(low.iloc[t]))
     return {
-        "signal_name": "R-SCREEN-11底部盤整突破鎖股",
+        "signal_name": "R-SCREEN-11底部盤整突破鎖股（89%）",
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "note": f"底部狹幅盤整{prior_group_len}天以上大量紅K突破＋量能達區間均量2倍以上",
@@ -154,7 +167,7 @@ def screen_slow_rally_channel_breakout(df: pd.DataFrame, min_days: int = 60) -> 
     entry_price = float(close.iloc[t])
     stop_loss = bull_short_term_stop_loss(entry_bar_low=float(low.iloc[t]))
     return {
-        "signal_name": "R-SCREEN-15緩漲軌道突破做多",
+        "signal_name": "R-SCREEN-15緩漲軌道突破做多（88%）",
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "note": "緩漲上升軌道線大量長紅K突破＋量能達20日均量2倍以上",
@@ -195,10 +208,58 @@ def screen_breakout_above_big_black_candle(df: pd.DataFrame, min_days: int = 60)
     entry_price = float(close.iloc[t])
     stop_loss = bull_short_term_stop_loss(entry_bar_low=float(low.iloc[t]))
     return {
-        "signal_name": "R-CLASSIC-24突破大量黑K買進",
+        "signal_name": "R-CLASSIC-24突破大量黑K買進（87%）",
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "note": f"多頭排列期間出現大量黑K(高點{watch_high:.2f})，今日收盤突破且放量，非轉空為續漲買進訊號",
+    }
+
+
+def screen_breakaway_gap_up(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票的OHLCV資料判斷「今天」是否觸發R-GAP-09打底完成向上突破缺口訊號。
+
+    書中評為訊號等級最高的型態之一：底部盤整完成後，股價向上跳空且缺口下緣不低於盤整區
+    上緣(真正突破、不是普通缺口)，屬強力買進訊號，原本的壓力線也轉為支撐。「3天內回補
+    視為假突破」是事後才能確認的警示，不是觸發訊號的前提(見`detect_breakaway_gap_up()`
+    的docstring)，這裡評估「缺口發生當天」時傳入`gap_filled_within_3_days=False`
+    (當下還不知道未來3天會不會回補，不代表訊號無效，只是還沒有這個額外警示可以標註)。
+    """
+    if len(df) < min_days:
+        return None
+    open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
+    t = len(close) - 1
+    if t < 1:
+        return None
+
+    gap = detect_gap(
+        prev_high=float(high.iloc[t - 1]), prev_low=float(low.iloc[t - 1]),
+        curr_high=float(high.iloc[t]), curr_low=float(low.iloc[t]),
+    )
+    if gap is None or gap.type != "up_gap":
+        return None
+
+    box = detect_consolidation(high.iloc[:t], low.iloc[:t], min_bars=GAP_CONSOLIDATION_MIN_BARS)
+    if not bool(box["is_consolidating"].iloc[-1]):
+        return None
+    consolidation_upper = float(box["upper_neckline"].iloc[-1])
+
+    avg_volume_20 = float(volume.iloc[max(0, t - 20):t].mean())
+    is_large_volume = bool(volume.iloc[t] >= 2.0 * avg_volume_20)
+
+    result = detect_breakaway_gap_up(
+        gap=gap, consolidation_upper=consolidation_upper,
+        is_large_volume=is_large_volume, gap_filled_within_3_days=False,
+    )
+    if result is None:
+        return None
+
+    entry_price = float(close.iloc[t])
+    stop_loss = bull_short_term_stop_loss(entry_bar_low=float(low.iloc[t]))
+    return {
+        "signal_name": "R-GAP-09打底完成向上突破缺口（90%）",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": f"{result['signal']}，缺口下緣{result['support']:.2f}(原壓力轉支撐)",
     }
 
 
@@ -207,6 +268,7 @@ _SCREEN_FUNCTIONS = (
     screen_narrow_range_bottom_breakout,
     screen_slow_rally_channel_breakout,
     screen_breakout_above_big_black_candle,
+    screen_breakaway_gap_up,
 )
 
 

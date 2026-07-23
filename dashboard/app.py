@@ -146,6 +146,11 @@ def main() -> None:
             event = st.dataframe(
                 candidates_df, use_container_width=True, hide_index=True,
                 on_select="rerun", selection_mode="single-row", key="candidates_table",
+                column_config={
+                    "stock_id": "股票代號", "name": "名稱",
+                    "signal_name": "訊號(信心%)",  # 信心分數已經內含在signal_name字串裡(見daily_screener.py)，這裡只是把「(信心%)」這個提示放進欄位標題，不用每一列都重複寫「信心」兩個字
+                    "entry_price": "進場價", "stop_loss": "停損價", "note": "備註",
+                },
             )
             if event.selection.rows:
                 selected_stock_id = str(candidates_df.iloc[event.selection.rows[0]]["stock_id"])
