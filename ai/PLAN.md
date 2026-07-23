@@ -987,3 +987,27 @@ NaN不是Python None，`if row.note`這種寫法對NaN是True(`bool(float('nan')
 (合併多訊號、跳過NULL note)，全部20個chart_data測試通過，479個測試全過。對本機真實db
 驗證：17筆原始訊號正確合併成15列，6878/8039各自顯示「R-TREND-14多頭短線進場、
 R-SCREEN-15緩漲軌道突破做多」。
+
+## 多條規則合併顯示改成同一格內換行，而不是同一行用頓號串接（2026-07-23）
+
+使用者希望多條規則不要擠在同一行(用「、」分隔)，改成同一格內用類似`<BR>`的方式斷行、
+一條規則一行。查證：`<BR>`是HTML標籤，Streamlit的`st.dataframe`與PySide6的
+`QTableWidget`都不會解析HTML，字面上的`<BR>`只會顯示成文字。實際能用的是換行字元`\n`，
+但兩邊元件支不支援要分別實測，不能只憑假設。
+
+寫了兩支最小化的測試腳本驗證：①`st.dataframe`裡`\n`會被吃成空白(不換行)、`<br>`顯示成
+字面文字"<br>"，證實這個元件本身不支援儲存格內換行；②PySide6的`QTableWidget`搭配
+`setWordWrap(True)` + 每個item的text裡放`\n` + 事後呼叫`resizeRowsToContents()`，
+確實能讓儲存格正確換行、列高也會自動撐開，實測截圖看到6878那一列的「訊號」欄清楚分成
+兩行、列高從預設值撐開到195px。
+
+改法：`chart_data.py`的`load_latest_candidates()`把signal_name/note的合併分隔符從
+「、」「；」改成「\n」——這是刻意選擇讓兩個前端能「各自合理降級」的單一資料格式：
+desktop端開word wrap後能完整發揮多行效果；Streamlit端`\n`會退化成空白分隔的單行，
+維持能讀、只是沒有真的換行，不是bug，是次要前端可以接受的降級效果。desktop/main_window.py
+的candidates_table加上`setWordWrap(True)`，`_reload_candidates()`填完資料後呼叫
+`resizeRowsToContents()`撐開列高。
+
+更新1個既有測試的分隔符期望值(從「、」改成「\n」)，479個測試全過。對本機真實桌面版
+截圖驗證：6878列的「訊號」欄正確顯示兩行(R-TREND-14一行、R-SCREEN-15一行)，「備註」欄
+同步分行顯示對應說明，列高正確撐開至195px。

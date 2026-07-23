@@ -55,7 +55,7 @@ def test_load_latest_candidates_merges_multiple_signals_for_same_stock_into_one_
     assert latest_date == "2026-07-23"
     assert len(df) == 2  # 2330合併成一列，1101單獨一列，總共2列不是3列
     row_2330 = df[df["stock_id"] == "2330"].iloc[0]
-    assert row_2330["signal_name"] == "R-TREND-14多頭短線進場、R-SCREEN-15緩漲軌道突破做多"
+    assert row_2330["signal_name"] == "R-TREND-14多頭短線進場\nR-SCREEN-15緩漲軌道突破做多"
     assert "R-TREND-14多頭短線進場：多頭架構＋攻擊量" in row_2330["note"]
     assert "R-SCREEN-15緩漲軌道突破做多：軌道突破＋大量長紅K" in row_2330["note"]
     assert row_2330["entry_price"] == 104.0

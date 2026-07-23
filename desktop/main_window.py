@@ -130,6 +130,12 @@ class MainWindow(QMainWindow):
         self.candidates_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.candidates_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.candidates_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # 同一檔股票符合多條規則時，訊號/備註欄位的內容用「\n」分隔多行(見
+        # src/presentation/chart_data.py的load_latest_candidates())；開word wrap
+        # 讓Qt正確把每個\n斷行顯示，而不是被裁掉或擠在一行，_reload_candidates()填完
+        # 資料後還要呼叫resizeRowsToContents()讓列高跟著撐開，不然多行內容會被壓在
+        # 原本單行的列高裡看不全。
+        self.candidates_table.setWordWrap(True)
         self.candidates_table.itemSelectionChanged.connect(self._on_candidate_selected)
         splitter.addWidget(self.candidates_table)
 
@@ -216,6 +222,7 @@ class MainWindow(QMainWindow):
                 # 滑鼠移過去任一儲存格都能懸浮顯示完整文字，不用特別放寬欄寬。
                 item.setToolTip(str(value))
                 self.candidates_table.setItem(row_idx, col_idx, item)
+        self.candidates_table.resizeRowsToContents()  # 讓多行的訊號/備註欄位撐開列高，完整顯示
 
     def _on_candidate_selected(self) -> None:
         rows = self.candidates_table.selectionModel().selectedRows()

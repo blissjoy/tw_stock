@@ -45,8 +45,12 @@ def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
 
     同一檔股票如果同時符合多條規則(daily_candidates裡有多筆同stock_id、不同signal_name
     的紀錄，例如同時觸發R-TREND-14跟R-SCREEN-15)，這裡會合併成一列顯示，不是一條規則
-    一列——signal_name欄位列出所有符合的規則(用「、」分隔)，note欄位合併每條規則各自的
-    說明(用「；」分隔並標明對應的規則名稱，避免多條note混在一起看不出是誰的說明)。
+    一列——signal_name/note欄位都用「\n」換行字元分隔多條規則的內容(而不是逗號/頓號
+    這類同一行內的分隔符)，讓桌面版(desktop/main_window.py開了word wrap +
+    resizeRowsToContents)能在同一格內分成好幾行顯示，一條規則一行，比擠在同一行裡
+    好讀。⚠️ Streamlit的`st.dataframe`不支援儲存格內換行(實測\n會被吃成空白、
+    HTML的<br>則會顯示成字面文字)，這是該元件本身的限制；用\n分隔在那邊會退化成
+    單行、規則之間用空白隔開，不是bug，是目前Streamlit這個次要前端能接受的降級效果。
     entry_price/stop_loss取合併前第一筆的值：目前已接上的規則都是用同一天的收盤價/同一套
     停損公式(bull_short_term_stop_loss)，理論上同一檔股票不管觸發幾條規則，算出來的值
     本來就會相同；之後如果加入用不同公式的規則導致同一天算出不同的進場價/停損價，這裡
@@ -78,10 +82,10 @@ def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
         merged_rows.append({
             "stock_id": stock_id,
             "name": first["name"],
-            "signal_name": "、".join(group["signal_name"]),
+            "signal_name": "\n".join(group["signal_name"]),
             "entry_price": first["entry_price"],
             "stop_loss": first["stop_loss"],
-            "note": "；".join(notes),
+            "note": "\n".join(notes),
         })
     merged_df = pd.DataFrame(merged_rows, columns=["stock_id", "name", "signal_name", "entry_price", "stop_loss", "note"])
     merged_df = merged_df.sort_values("stock_id").reset_index(drop=True)
