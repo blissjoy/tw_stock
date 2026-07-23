@@ -106,6 +106,17 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
 
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel("候選清單篩選條件："))
+        self.filter_checkboxes: dict[str, QCheckBox] = {}
+        for label in chart_data.CANDIDATE_FILTERS:
+            cb = QCheckBox(label)
+            cb.stateChanged.connect(self._reload_candidates)
+            filter_bar.addWidget(cb)
+            self.filter_checkboxes[label] = cb
+        filter_bar.addStretch()
+        root_layout.addLayout(filter_bar)
+
         top_bar = QHBoxLayout()
         self.refresh_btn = QPushButton("🔄 立即重新篩選")
         self.refresh_btn.setToolTip("只用資料庫裡目前已有的資料重算候選清單，不重新抓取資料，通常幾秒內完成")
@@ -181,6 +192,16 @@ class MainWindow(QMainWindow):
         self.sr_checkbox.setChecked(True)
         self.sr_checkbox.stateChanged.connect(self._rerender_chart)
         controls_row.addWidget(self.sr_checkbox)
+
+        self.macd_checkbox = QCheckBox("顯示MACD")
+        self.macd_checkbox.setChecked(True)
+        self.macd_checkbox.stateChanged.connect(self._rerender_chart)
+        controls_row.addWidget(self.macd_checkbox)
+
+        self.kd_checkbox = QCheckBox("顯示KD")
+        self.kd_checkbox.setChecked(True)
+        self.kd_checkbox.stateChanged.connect(self._rerender_chart)
+        controls_row.addWidget(self.kd_checkbox)
         controls_row.addStretch()
         bottom_layout.addLayout(controls_row)
 
@@ -204,6 +225,8 @@ class MainWindow(QMainWindow):
         if self.conn is None:
             return
         df, latest_date = chart_data.load_latest_candidates(self.conn)
+        active_filters = [label for label, cb in self.filter_checkboxes.items() if cb.isChecked()]
+        df = chart_data.apply_candidate_filters(self.conn, df, active_filters)
         self.candidates_table.setRowCount(0)
         if latest_date is None:
             self.setWindowTitle("台股每日選股（本機版）— 尚無候選清單")
@@ -267,6 +290,7 @@ class MainWindow(QMainWindow):
             price_df, title=self._current_stock_id, holidays=holidays, ma_periods=selected_periods,
             trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
             sr_levels=sr_levels, show_support_resistance=show_sr,
+            show_macd=self.macd_checkbox.isChecked(), show_kd=self.kd_checkbox.isChecked(),
         )
         # render_chart_html()疊加滑鼠十字線(貫穿價格/成交量兩個子圖)+左上角動態資訊框，
         # 取代Plotly預設會跟著滑鼠跑的浮動tooltip，仿TradingView的畫法(desktop/chart_render.py

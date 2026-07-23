@@ -2,7 +2,14 @@ import pandas as pd
 
 import src.presentation.chart_data as chart_data
 from src.data.storage import init_db, upsert_daily_candidates, upsert_stock_prices, upsert_stocks
-from src.presentation.chart_data import build_candlestick_figure, load_holidays_for_chart, load_latest_candidates, load_price_history
+from src.presentation.chart_data import (
+    apply_candidate_filters,
+    build_candlestick_figure,
+    compute_ma_bullish_flags,
+    load_holidays_for_chart,
+    load_latest_candidates,
+    load_price_history,
+)
 
 
 def _fresh_conn():
@@ -122,6 +129,70 @@ def test_load_price_history_computes_full_ma_set_with_lookback_buffer():
     for col in ("MA5", "MA10", "MA20", "MA60", "MA120", "MA240"):
         assert col in df.columns
         assert df[col].notna().all(), f"{col} 在顯示視窗內不應該有NaN(緩衝資料應該足夠)"
+
+
+def test_load_price_history_includes_macd_and_kd_columns():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    n_days = 60
+    rows = [
+        {"stock_id": "2330", "date": f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 100.0, "high": 101.0 + d * 0.1, "low": 99.0,
+         "close": 100.0 + d * 0.1, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(n_days)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    df = load_price_history(conn, "2330", days=10)
+
+    for col in ("DIF", "MACD", "OSC", "K", "D"):
+        assert col in df.columns
+
+
+def test_compute_ma_bullish_flags_true_when_ma5_gt_ma10_gt_ma20():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    # 持續上漲的收盤價序列，足以讓MA5>MA10>MA20成立(多頭排列)
+    rows = [
+        {"stock_id": "2330", "date": f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0 + d * 0.5, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(40)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    flags = compute_ma_bullish_flags(conn, ["2330"])
+    assert flags["2330"] is True
+
+
+def test_compute_ma_bullish_flags_false_when_not_enough_history():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    rows = [
+        {"stock_id": "2330", "date": f"2025-01-{d:02d}", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(1, 6)  # 只有5天，不夠算MA20
+    ]
+    upsert_stock_prices(conn, rows)
+
+    flags = compute_ma_bullish_flags(conn, ["2330"])
+    assert flags["2330"] is False
+
+
+def test_apply_candidate_filters_returns_unfiltered_when_no_active_filters():
+    df = pd.DataFrame({"stock_id": ["2330", "1101"]})
+    result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=[])
+    assert list(result["stock_id"]) == ["2330", "1101"]
+
+
+def test_apply_candidate_filters_keeps_only_stocks_matching_ma_bullish(monkeypatch):
+    df = pd.DataFrame({"stock_id": ["2330", "1101", "2603"]})
+    monkeypatch.setitem(
+        chart_data.CANDIDATE_FILTERS, "均線多頭排列（MA5>MA10>MA20）",
+        lambda conn, stock_ids: {"2330": True, "1101": False, "2603": True},
+    )
+
+    result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=["均線多頭排列（MA5>MA10>MA20）"])
+
+    assert list(result["stock_id"]) == ["2330", "2603"]
 
 
 def test_build_candlestick_figure_uses_ohlc_and_is_not_a_line_chart():
@@ -250,6 +321,68 @@ def test_build_candlestick_figure_skips_ma_period_missing_from_dataframe():
 
     line_traces = [t for t in fig.data if t.type == "scatter"]
     assert line_traces == []
+
+
+def test_build_candlestick_figure_adds_macd_subplot_when_enabled():
+    dates = pd.date_range("2026-07-01", periods=3)
+    df = pd.DataFrame(
+        {
+            "open": [100, 102, 101], "high": [103, 104, 105], "low": [99, 101, 100], "close": [102, 101, 104],
+            "volume": [1000, 1200, 900], "DIF": [1.0, 1.2, 1.5], "MACD": [0.8, 0.9, 1.0], "OSC": [0.2, 0.3, -0.1],
+        },
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, show_macd=True)
+
+    assert fig.layout.yaxis3.title.text == "MACD"
+    osc_trace = next(t for t in fig.data if t.name == "OSC")
+    assert list(osc_trace.marker.color) == ["#c0392b", "#c0392b", "#27ae60"]  # 正值紅柱、負值綠柱
+    dif_trace = next(t for t in fig.data if t.name == "DIF")
+    assert list(dif_trace.y) == [1.0, 1.2, 1.5]
+
+
+def test_build_candlestick_figure_adds_kd_subplot_when_enabled():
+    dates = pd.date_range("2026-07-01", periods=3)
+    df = pd.DataFrame(
+        {
+            "open": [100, 102, 101], "high": [103, 104, 105], "low": [99, 101, 100], "close": [102, 101, 104],
+            "volume": [1000, 1200, 900], "K": [50.0, 60.0, 70.0], "D": [45.0, 55.0, 65.0],
+        },
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, show_kd=True)
+
+    k_trace = next(t for t in fig.data if t.name == "K")
+    d_trace = next(t for t in fig.data if t.name == "D")
+    assert list(k_trace.y) == [50.0, 60.0, 70.0]
+    assert list(d_trace.y) == [45.0, 55.0, 65.0]
+
+
+def test_build_candlestick_figure_omits_macd_kd_traces_when_columns_missing():
+    """show_macd/show_kd=True但df裡沒有對應欄位時(例如舊呼叫端)，不應該crash，只是不畫。"""
+    dates = pd.date_range("2026-07-01", periods=2)
+    df = pd.DataFrame(
+        {"open": [100, 102], "high": [103, 104], "low": [99, 101], "close": [102, 101], "volume": [1000, 1200]},
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, show_macd=True, show_kd=True)
+
+    assert not any(t.name in ("OSC", "DIF", "MACD訊號線", "K", "D") for t in fig.data)
+
+
+def test_build_candlestick_figure_row_count_unchanged_when_macd_kd_disabled():
+    dates = pd.date_range("2026-07-01", periods=2)
+    df = pd.DataFrame(
+        {"open": [100, 102], "high": [103, 104], "low": [99, 101], "close": [102, 101], "volume": [1000, 1200]},
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, show_macd=False, show_kd=False)
+
+    assert len(fig.data) == 2
 
 
 def test_build_candlestick_figure_sets_weekend_and_holiday_rangebreaks():

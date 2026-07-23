@@ -10,10 +10,14 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 import pandas as pd
 
 from src.data import trading_calendar
-from src.indicators.moving_average import FULL_PERIODS, compute_ma_set
+from src.indicators.kd import compute_kd
+from src.indicators.macd import compute_macd
+from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned
 from src.patterns import chart_overlays
 
 MA_COLORS = {
@@ -38,6 +42,51 @@ TRENDLINE_DEFAULT_ROLE = {
     "up_channel": "resistance", "down_channel": "support",
 }
 SR_ROLE_COLORS = {"支撐": "#16a085", "壓力": "#c0392b"}
+
+
+def compute_ma_bullish_flags(conn, stock_ids: list[str], lookback_days: int = 60) -> dict[str, bool]:
+    """對每檔股票算出「均線多頭排列」(MA5>MA10>MA20，書中做多的地基條件)是否成立，取最新
+    一筆已知資料為準。只在候選清單篩選器實際勾選這個條件時才呼叫(見CANDIDATE_FILTERS)，
+    不是每次載入候選清單都算，避免候選股數量變多時拖慢清單載入速度。
+
+    資料不足20天(算不出MA20)時該檔股票視為不成立(False)，不是拋例外或跳過。
+    """
+    flags: dict[str, bool] = {}
+    for stock_id in stock_ids:
+        cur = conn.execute(
+            "SELECT close FROM stock_prices WHERE stock_id = ? ORDER BY date DESC LIMIT ?",
+            (stock_id, lookback_days),
+        )
+        closes = [row[0] for row in cur.fetchall()][::-1]
+        if len(closes) < max(DEFAULT_BULLISH_PERIODS):
+            flags[stock_id] = False
+            continue
+        close_series = pd.Series(closes)
+        ma_frame = compute_ma_set(close_series, periods=DEFAULT_BULLISH_PERIODS)
+        flags[stock_id] = bool(is_bullish_aligned(ma_frame, periods=DEFAULT_BULLISH_PERIODS).iloc[-1])
+    return flags
+
+
+# 候選清單篩選器registry：{顯示標籤: 計算函式(conn, stock_ids) -> {stock_id: bool}}。
+# 目前只有「均線多頭排列」一個條件，之後要加其他篩選條件(例如量能/型態)時，在這裡多加一組
+# 標籤/函式即可，兩個前端(dashboard/app.py、desktop/main_window.py)都是迴圈讀取這個registry
+# 動態產生勾選框、不用另外改UI程式碼。
+CANDIDATE_FILTERS: dict[str, Callable[[object, list[str]], dict[str, bool]]] = {
+    "均線多頭排列（MA5>MA10>MA20）": compute_ma_bullish_flags,
+}
+
+
+def apply_candidate_filters(conn, candidates_df: pd.DataFrame, active_filter_labels: list[str]) -> pd.DataFrame:
+    """依勾選的篩選標籤(CANDIDATE_FILTERS的key)逐一AND套用，回傳過濾後的候選清單。
+    未勾選任何篩選(active_filter_labels為空)時原樣回傳，不做任何運算。"""
+    if not active_filter_labels or candidates_df.empty:
+        return candidates_df
+    stock_ids = candidates_df["stock_id"].tolist()
+    mask = pd.Series(True, index=candidates_df.index)
+    for label in active_filter_labels:
+        flags = CANDIDATE_FILTERS[label](conn, stock_ids)
+        mask &= candidates_df["stock_id"].map(flags).fillna(False)
+    return candidates_df[mask].reset_index(drop=True)
 
 
 def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
@@ -111,6 +160,8 @@ def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"])
     df = df.set_index("date")
     df = df.join(compute_ma_set(df["close"], periods=FULL_PERIODS))
+    df = df.join(compute_macd(df["close"]))  # 欄位DIF/MACD/OSC，朱老師書中固定參數12/26/9(EMA)
+    df = df.join(compute_kd(df["high"], df["low"], df["close"]))  # 欄位K/D，常用KD(9,3,3)參數
     return df.tail(days)
 
 
@@ -131,10 +182,12 @@ def build_candlestick_figure(
     df: pd.DataFrame, title: str = "", holidays: list[str] | None = None, ma_periods: tuple[int, ...] = (),
     trendlines: dict | None = None, show_trendline_keys: tuple[str, ...] = (),
     sr_levels: list[dict] | None = None, show_support_resistance: bool = False,
+    show_macd: bool = False, show_kd: bool = False,
 ):
-    """把OHLC資料畫成K線圖(非線圖)+下方成交量子圖，可疊加均線/切線軌道線/支撐壓力。漲用紅、
-    跌用黑，比照書中與規則庫(candles.py)一貫的紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，
-    與美股常見的綠漲紅跌相反)；成交量長條比照同一套配色，當天收紅用紅色、收黑用黑色。
+    """把OHLC資料畫成K線圖(非線圖)+下方成交量子圖，可疊加均線/切線軌道線/支撐壓力，並可選擇
+    在最下方再疊加MACD/KD子圖。漲用紅、跌用黑，比照書中與規則庫(candles.py)一貫的紅K/黑K
+    命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的綠漲紅跌相反)；成交量長條比照同一套
+    配色，當天收紅用紅色、收黑用黑色。
 
     holidays: 該資料範圍內的休市日期清單("YYYY-MM-DD")，連同週末一起設成x軸的
     rangebreaks，避免非交易日在圖上留白間斷(維持真正的日期型x軸，不是改用category型)。
@@ -145,12 +198,22 @@ def build_candlestick_figure(
     切線/軌道線字典，與要實際畫出的key清單(例如("up_tangent","up_channel"))。
     sr_levels/show_support_resistance: src.patterns.chart_overlays.compute_support_resistance_levels()
     算出的支撐壓力清單，與是否要畫出來。
+    show_macd/show_kd: 是否在成交量子圖下方各自再加一列MACD(DIF/MACD訊號線/OSC柱狀體)、
+    KD(K/D線，含80/20參考線)子圖，對應df裡由load_price_history算好的DIF/MACD/OSC/K/D欄位；
+    欄位不存在時(例如舊呼叫端傳入的df沒有這些欄位)直接跳過不畫，不會crash。
     """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
+    extra_rows = int(show_macd) + int(show_kd)
+    total_rows = 2 + extra_rows
+    row_heights = {0: [0.72, 0.28], 1: [0.52, 0.2, 0.28], 2: [0.42, 0.16, 0.21, 0.21]}[extra_rows]
+
+    macd_row = 3 if show_macd else None
+    kd_row = (4 if show_macd else 3) if show_kd else None
+
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.03,
+        rows=total_rows, cols=1, shared_xaxes=True, row_heights=row_heights, vertical_spacing=0.03,
     )
     fig.add_trace(go.Candlestick(
         x=df.index,
@@ -202,15 +265,33 @@ def build_candlestick_figure(
     volume_colors = ["#c0392b" if c >= o else "#1a1a1a" for o, c in zip(df["open"], df["close"])]
     fig.add_trace(go.Bar(x=df.index, y=df["volume"], marker_color=volume_colors, name="成交量", showlegend=False), row=2, col=1)
 
+    if macd_row is not None and {"DIF", "MACD", "OSC"}.issubset(df.columns):
+        # OSC正值紅柱(多方動能)/負值綠柱(空方動能)是書中原文定義的顏色，跟K棒紅漲黑跌是
+        # 兩套獨立配色慣例，不要混用(見src/indicators/macd.py docstring)。
+        osc_colors = ["#c0392b" if v >= 0 else "#27ae60" for v in df["OSC"].fillna(0)]
+        fig.add_trace(go.Bar(x=df.index, y=df["OSC"], marker_color=osc_colors, name="OSC", showlegend=False), row=macd_row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["DIF"], mode="lines", name="DIF", line=dict(color="#e74c3c", width=1.2)), row=macd_row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], mode="lines", name="MACD訊號線", line=dict(color="#2980b9", width=1.2)), row=macd_row, col=1)
+
+    if kd_row is not None and {"K", "D"}.issubset(df.columns):
+        fig.add_trace(go.Scatter(x=df.index, y=df["K"], mode="lines", name="K", line=dict(color="#8e44ad", width=1.3)), row=kd_row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["D"], mode="lines", name="D", line=dict(color="#f39c12", width=1.3)), row=kd_row, col=1)
+        fig.add_hline(y=80, line=dict(color="#999999", width=1, dash="dot"), row=kd_row, col=1)
+        fig.add_hline(y=20, line=dict(color="#999999", width=1, dash="dot"), row=kd_row, col=1)
+
     fig.update_layout(
         title=title,
         xaxis_rangeslider_visible=False,
         margin=dict(l=10, r=10, t=40 if title else 10, b=10),
-        height=560,
+        height=560 + 140 * extra_rows,
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
     )
     fig.update_yaxes(title_text="價格", row=1, col=1)
     fig.update_yaxes(title_text="成交量", row=2, col=1)
+    if macd_row is not None:
+        fig.update_yaxes(title_text="MACD", row=macd_row, col=1)
+    if kd_row is not None:
+        fig.update_yaxes(title_text="KD", range=[0, 100], row=kd_row, col=1)
 
     rangebreaks = [dict(bounds=["sat", "mon"])]
     if holidays:

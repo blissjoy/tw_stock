@@ -25,6 +25,8 @@ from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
 from src.presentation import chart_data  # noqa: E402
 from src.presentation.chart_data import (  # noqa: E402
+    CANDIDATE_FILTERS,
+    apply_candidate_filters,
     build_candlestick_figure,
     load_holidays_for_chart,
     load_latest_candidates,
@@ -85,7 +87,7 @@ def main() -> None:
         trendlines = chart_overlays.compute_trendlines(price_df)
         trendline_options = [chart_data.TRENDLINE_LABELS[key] for key in chart_data.TRENDLINE_LABELS if key in trendlines]
         label_to_key = {v: k for k, v in chart_data.TRENDLINE_LABELS.items()}
-        col1, col2 = st.columns([3, 1])
+        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
         with col1:
             if trendline_options:
                 selected_trendline_labels = st.multiselect(
@@ -96,6 +98,10 @@ def main() -> None:
                 st.caption("目前資料範圍內沒有找到符合「線不蓋線」條件的切線。")
         with col2:
             show_sr = st.checkbox("顯示支撐壓力", value=True, key=f"{widget_key}_sr_checkbox")
+        with col3:
+            show_macd = st.checkbox("顯示MACD", value=True, key=f"{widget_key}_macd_checkbox")
+        with col4:
+            show_kd = st.checkbox("顯示KD", value=True, key=f"{widget_key}_kd_checkbox")
         selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
         # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到6條、
         # 會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。
@@ -109,6 +115,7 @@ def main() -> None:
                 price_df, holidays=holidays, ma_periods=selected_periods,
                 trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
                 sr_levels=sr_levels, show_support_resistance=show_sr,
+                show_macd=show_macd, show_kd=show_kd,
             ),
             use_container_width=True,
         )
@@ -125,6 +132,13 @@ def main() -> None:
     st.title("📈 台股每日選股")
     st.caption("資料來源：TWSE / TPEx(透過FinMind) — 每日收盤後自動更新")
 
+    st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件）")
+    filter_cols = st.columns(len(CANDIDATE_FILTERS))
+    active_filters = [
+        label for col, label in zip(filter_cols, CANDIDATE_FILTERS)
+        if col.checkbox(label, key=f"filter_{label}")
+    ]
+
     if st.button("🔄 立即重新篩選"):
         # 只用資料庫裡目前已有的資料重算訊號，不重新對外抓取TWSE/TPEx資料(那個很慢，交給
         # 每日排程做)，所以這個按鈕通常幾秒內就能算完，可以隨時按而不用擔心額度或等待。
@@ -133,6 +147,7 @@ def main() -> None:
         st.success("已重新計算完成，候選清單已更新。")
 
     candidates_df, latest_date = load_latest_candidates(conn)
+    candidates_df = apply_candidate_filters(conn, candidates_df, active_filters)
 
     selected_stock_id = None
     if latest_date is None:
