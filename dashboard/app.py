@@ -40,6 +40,12 @@ _TRENDLINE_STYLES = {
     "up_channel": {"color": "#64b5f6", "dash": "dash"},
     "down_channel": {"color": "#ffab40", "dash": "dash"},
 }
+# 每種切線預設的role(未被跌破/突破時)，用來偵測R-LINE-11/12的角色互換是否發生過
+# （up_channel/down_channel目前的實作沒有另外套用跌破/突破檢查，role固定不變）。
+_TRENDLINE_DEFAULT_ROLE = {
+    "up_tangent": "support", "down_tangent": "resistance",
+    "up_channel": "resistance", "down_channel": "support",
+}
 _SR_ROLE_COLORS = {"支撐": "#16a085", "壓力": "#c0392b"}
 
 
@@ -140,11 +146,22 @@ def build_candlestick_figure(
     for key in show_trendline_keys:
         if not trendlines or key not in trendlines:
             continue
-        dates, prices = chart_overlays.trendline_to_xy(trendlines[key], df)
+        line = trendlines[key]
+        dates, prices = chart_overlays.trendline_to_xy(line, df)
         style = _TRENDLINE_STYLES.get(key, {"color": "#999999", "dash": "solid"})
+        label = _TRENDLINE_LABELS.get(key, key)
+        color = style["color"]
+        # R-LINE-11/12：這條線如果已經被跌破(上升切線)或突破(下降切線)，role會被
+        # compute_trendlines()就地互換過，不再是預設角色——用支撐/壓力的顏色改標示，
+        # 不要讓使用者誤以為它還在發揮原本的作用(這正是使用者回報的問題：舊切線畫得
+        # 好像還在支撐現在的股價，但其實早就跌破、對「現在」已經沒有意義)。
+        if line.role != _TRENDLINE_DEFAULT_ROLE.get(key, line.role):
+            swapped_to = "壓力" if line.role == "resistance" else "支撐"
+            label = f"{label}（已{'跌破' if swapped_to == '壓力' else '突破'}，轉{swapped_to}）"
+            color = _SR_ROLE_COLORS.get(swapped_to, color)
         fig.add_trace(go.Scatter(
-            x=dates, y=prices, mode="lines", name=_TRENDLINE_LABELS.get(key, key),
-            line=dict(color=style["color"], dash=style["dash"], width=1.5),
+            x=dates, y=prices, mode="lines", name=label,
+            line=dict(color=color, dash=style["dash"], width=1.5),
         ), row=1, col=1)
 
     if show_support_resistance and sr_levels:
@@ -241,7 +258,12 @@ def main() -> None:
         with col2:
             show_sr = st.checkbox("顯示支撐壓力", value=True, key=f"{widget_key}_sr_checkbox")
         selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
-        sr_levels = chart_overlays.compute_support_resistance_levels(price_df) if show_sr else []
+        # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到6條、
+        # 會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。
+        sr_levels = []
+        if show_sr:
+            all_levels = chart_overlays.compute_support_resistance_levels(price_df)
+            sr_levels = chart_overlays.nearest_support_resistance(all_levels, float(price_df["close"].iloc[-1]))
 
         st.plotly_chart(
             build_candlestick_figure(

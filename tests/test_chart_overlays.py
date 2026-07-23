@@ -77,6 +77,89 @@ def test_compute_trendlines_no_tangent_when_bottoms_not_rising(monkeypatch):
     assert lines == {}
 
 
+def test_compute_trendlines_tracks_newest_valid_consecutive_pair_not_a_stale_one(monkeypatch):
+    """R-LINE-05動態更新：只比較『相鄰』的轉折點配對，每次都用最新一組更新，不是回頭搜尋
+    整段歷史找任一組合法的舊配對。這裡構造(b0,b1)合法、(b1,b2)不合法(未底底高)、(b2,b3)
+    又合法的情境——結果應該是最新的(b2,b3)，不能停在很久以前的(b0,b1)。"""
+    df = _flat_df(n=10)
+    monkeypatch.setattr(
+        chart_overlays, "compute_turning_points",
+        lambda high, low, close, n=5: [
+            TurningPoint("bottom", 90.0, 2),
+            TurningPoint("bottom", 95.0, 4),  # (b0,b1)：95>90，合法
+            TurningPoint("bottom", 92.0, 6),  # (b1,b2)：92<95，不是底底高，不合法
+            TurningPoint("bottom", 98.0, 8),  # (b2,b3)：98>92，合法，應該取代(b0,b1)成為目前的線
+        ],
+    )
+
+    lines = compute_trendlines(df)
+
+    assert lines["up_tangent"].a == LinePoint(6, 92.0)
+    assert lines["up_tangent"].b == LinePoint(8, 98.0)
+
+
+def test_compute_trendlines_swaps_role_to_resistance_when_broken_by_latest_close(monkeypatch):
+    """R-LINE-11：如果目前這條上升切線已經被最新收盤價跌破，代表它已經失去支撐作用、
+    角色互換成壓力——不應該繼續被當成還在生效的支撐線呈現(這正是使用者回報的問題：
+    2911案例裡6月初畫的切線，到7月下旬早就跌破了，卻還被畫得像現在仍是支撐)。"""
+    df = _flat_df(n=10)
+    df.loc[9, "close"] = 50.0  # 遠低於切線在x=9的延伸值(90+2.5*7=107.5)，明確跌破
+
+    monkeypatch.setattr(
+        chart_overlays, "compute_turning_points",
+        lambda high, low, close, n=5: [
+            TurningPoint("bottom", 90.0, 2),
+            TurningPoint("bottom", 95.0, 4),  # 唯一一組合法配對，之後沒有更新的線
+        ],
+    )
+
+    lines = compute_trendlines(df)
+
+    assert lines["up_tangent"].role == "resistance"  # 角色已互換，不再是"support"
+
+
+def test_compute_trendlines_keeps_support_role_when_not_broken(monkeypatch):
+    df = _flat_df(n=10)
+    df.loc[9, "close"] = 150.0  # 切線在x=9的延伸值是90+2.5*7=107.5，150遠高於此，不算跌破
+
+    monkeypatch.setattr(
+        chart_overlays, "compute_turning_points",
+        lambda high, low, close, n=5: [
+            TurningPoint("bottom", 90.0, 2),
+            TurningPoint("bottom", 95.0, 4),
+        ],
+    )
+
+    lines = compute_trendlines(df)
+    assert lines["up_tangent"].role == "support"
+
+
+def test_nearest_support_resistance_picks_closest_above_and_below():
+    levels = [
+        {"price": 80.0, "type": "bottom", "role": "支撐", "date": 1},
+        {"price": 95.0, "type": "bottom", "role": "支撐", "date": 2},  # 現價(100)之下最近
+        {"price": 110.0, "type": "head", "role": "壓力", "date": 3},  # 現價之上最近
+        {"price": 130.0, "type": "head", "role": "壓力", "date": 4},
+    ]
+
+    nearest = chart_overlays.nearest_support_resistance(levels, current_price=100.0)
+
+    prices = {lv["price"] for lv in nearest}
+    assert prices == {95.0, 110.0}
+    assert len(nearest) == 2
+
+
+def test_nearest_support_resistance_handles_only_one_side_present():
+    levels = [{"price": 80.0, "type": "bottom", "role": "支撐", "date": 1}]
+    nearest = chart_overlays.nearest_support_resistance(levels, current_price=100.0)
+    assert len(nearest) == 1
+    assert nearest[0]["price"] == 80.0
+
+
+def test_nearest_support_resistance_handles_empty_list():
+    assert chart_overlays.nearest_support_resistance([], current_price=100.0) == []
+
+
 def test_trendline_to_xy_extends_line_from_start_point_to_last_row():
     df = _flat_df(n=6)
     line = chart_overlays.TrendLine(a=LinePoint(1, 10.0), b=LinePoint(3, 20.0))
