@@ -123,15 +123,22 @@ class TursoConnection:
 
     def _execute_schema_statement_with_retry(self, statement: str) -> None:
         """schema.sql 裡的每個statement（PRAGMA、CREATE TABLE/INDEX IF NOT EXISTS）套用起來
-        都是冪等的，重複執行是安全的。但實測發現：多個process同時對Turso執行ensure_schema()
-        時（例如daily_pipeline.py背景在跑，使用者手動又跑一次，或Streamlit Cloud冷啟動時
-        剛好撞上），libsql_client 0.3.1（已停止維護）對伺服器端在併發衝突下回傳的錯誤回應
-        處理不完善，會在libsql_client/http.py內部丟出未預期的裸KeyError('result')而不是
-        正常的錯誤訊息——這是套件本身在瞬間併發衝突下的bug，跟這句statement本身合不合法
-        無關（先前版本只放行statement文字裡包含"IF NOT EXISTS"的情況，但schema.sql開頭的
-        `PRAGMA foreign_keys = ON;`不含這段文字，一樣會撞到同一個底層bug，卻沒被涵蓋到）。
-        短暫重試就能恢復；重試次數用完仍失敗，代表不是這個瞬間衝突，照常往外拋出，不會
-        掩蓋真正的錯誤（真正的SQL語法錯誤不會是KeyError，會是libsql_client自己的例外類別）。
+        都是冪等的，重複執行是安全的。
+
+        ⚠️ 這裡的KeyError('result')**不是**「多個process併發寫入Turso互相卡到」的bug
+        （這是先前排查時的錯誤結論，已用繞過libsql_client、直接印出原始HTTP回應JSON的方式
+        推翻）：libsql_client 0.3.1（已停止維護）的`http.py`在HTTP狀態碼是200時，直接假設
+        回應JSON一定長得像`{"result": {...}}`、無條件做`response["result"]`，完全沒檢查
+        回應內容；只要伺服器回傳的是別種合法的200 JSON形狀（實測遇過的一種：Turso免費方案
+        寫入額度用完時回傳`{"code": "BLOCKED", "message": "...upgrade your plan?"}`），
+        就會在這裡炸出一個完全不含任何上下文的裸KeyError，把「伺服器明確拒絕寫入」偽裝成
+        「解析回應失敗」。這代表KeyError('result')只告訴我們「回應形狀不是預期的」，可能是
+        真正的瞬間網路問題(重試有機會恢復)，也可能是像BLOCKED這種持續性狀態(重試無法恢復，
+        必須真的解決成因，例如檢查Turso帳號的用量/方案)。這裡保留短暫重試是為了不放棄真正
+        瞬間性的問題，但呼叫端(尤其是像儀表板這種以讀取為主、不該被「寫入被拒絕」卡住的
+        使用情境)不能假設這裡最終一定會成功——ensure_schema()失敗時應該視情況決定是否要
+        讓呼叫失敗(daily_pipeline.py這種真的需要寫入的流程)還是降級繼續(dashboard/app.py
+        這種讀取為主、資料表通常早就存在的情境)。
         """
         for attempt in range(_SCHEMA_RETRY_ATTEMPTS):
             try:

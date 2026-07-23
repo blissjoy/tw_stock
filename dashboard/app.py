@@ -223,8 +223,20 @@ def main() -> None:
         # Turso資料庫可能是全新、還沒被seed_turso_from_local.py或daily_pipeline.py建過表的狀態
         # （例如儀表板比每日pipeline更早部署），這裡確保schema一定存在，query才不會噴
         # "no such table" 的錯誤。
+        #
+        # ⚠️ ensure_schema()是寫入操作(CREATE TABLE/INDEX)，但儀表板是唯讀為主的用途——
+        # 實測發現Turso免費方案額度用完時會直接在協定層封鎖所有寫入(HTTP 200但回傳
+        # {"code": "BLOCKED", "message": "...do you need to upgrade your plan?"}，
+        # 不是HTTP錯誤狀態碼，之前誤以為是libsql_client在併發寫入下的bug，用raw HTTP
+        # response驗證後才發現真正原因是Turso本身封鎖寫入)。這裡刻意不讓ensure_schema()
+        # 失敗直接crash掉整個儀表板：既有資料表通常早就建好了，讀取功能不該被「寫入被封鎖」
+        # 這種跟讀取無關的問題波及。若資料庫真的是全新、還沒建表，後續查詢會出現
+        # "no such table"，這是可接受的降級行為，仍遠比整個app crash掉更好。
         conn = turso_client.get_connection()
-        storage.ensure_schema(conn)
+        try:
+            storage.ensure_schema(conn)
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"⚠️ 無法確認資料庫schema已建立（{exc}），若資料表原本就存在應不影響讀取。")
         return conn
 
     conn = get_conn()

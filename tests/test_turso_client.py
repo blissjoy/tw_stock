@@ -131,11 +131,9 @@ def test_turso_connection_against_real_libsql_client_full_round_trip(real_libsql
 
 
 def test_turso_connection_ensure_schema_twice_does_not_crash(real_libsql_client_conn):
-    """實測發現的真實bug：多個process同時對Turso呼叫ensure_schema()時(例如daily_pipeline.py
-    背景在跑、使用者手動又跑一次)，schema.sql的CREATE TABLE/INDEX IF NOT EXISTS陳述式在物件
-    已存在時，libsql_client 0.3.1對伺服器錯誤回應處理不完善，會在其內部丟出未預期的
-    KeyError('result')，而不是正常表達「已存在，這是預期結果」。這裡直接對真實client連續
-    呼叫兩次ensure_schema，模擬「表格已存在」的情境，確認第二次不會crash。"""
+    """ensure_schema()應該是冪等操作(CREATE TABLE/INDEX IF NOT EXISTS)，重複呼叫（例如
+    daily_pipeline.py與Streamlit儀表板各自獨立呼叫get_conn()）不應該crash。這裡對真實
+    libsql_client連續呼叫兩次，確認「表格已存在」的情境下第二次仍正常。"""
     conn = real_libsql_client_conn
     ensure_schema(conn)
     ensure_schema(conn)  # 不應該拋出例外
@@ -145,11 +143,11 @@ def test_turso_connection_ensure_schema_twice_does_not_crash(real_libsql_client_
 
 
 def test_executescript_retries_and_recovers_from_transient_keyerror(monkeypatch):
-    """實測發現的真實bug：多個process同時對Turso併發寫入時，libsql_client 0.3.1對伺服器端
-    衝突回應處理不完善，會丟出未預期的裸KeyError('result')——這跟statement文字本身是不是
-    「IF NOT EXISTS」無關(schema.sql開頭的`PRAGMA foreign_keys = ON;`就不含這段文字，一樣
-    會撞到)，純粹是瞬間併發衝突。這裡模擬「前兩次撞到衝突、第三次恢復」，確認會重試到成功，
-    不會在第一次失敗就整段放棄。"""
+    """libsql_client 0.3.1在HTTP 200但回應JSON形狀不是預期的{"result": ...}時，會丟出
+    未預期的裸KeyError('result')，這可能代表真正瞬間性的問題(例如短暫網路異常)，也可能是
+    像Turso寫入額度用完這種持續性狀態(見_execute_schema_statement_with_retry的docstring)。
+    這裡模擬「前兩次是瞬間問題、第三次恢復」，確認短暫重試能處理真正瞬間性的情況，不會在
+    第一次失敗就整段放棄。"""
     import src.data.turso_client as turso_client_module
     monkeypatch.setattr(turso_client_module.time, "sleep", lambda _: None)
 
@@ -171,8 +169,9 @@ def test_executescript_retries_and_recovers_from_transient_keyerror(monkeypatch)
 
 
 def test_executescript_raises_after_retries_exhausted_on_persistent_keyerror(monkeypatch):
-    """如果KeyError不是瞬間衝突、而是持續發生(重試次數用完仍失敗)，不應該被靜默吞掉到底——
-    否則等於永遠看不出schema真的建立失敗了。"""
+    """如果KeyError不是瞬間問題、而是持續發生(例如Turso寫入額度用完，重試次數用完仍失敗)，
+    不應該被靜默吞掉到底——否則等於永遠看不出schema真的建立失敗了，呼叫端(daily_pipeline.py
+    這種真的需要寫入成功的流程)也才有機會捕捉這個例外、決定要不要用降級方式處理。"""
     import src.data.turso_client as turso_client_module
     monkeypatch.setattr(turso_client_module.time, "sleep", lambda _: None)
 

@@ -675,3 +675,23 @@ session意外中斷後恢復，使用者確認接續系統呈現層（GitHub Act
 `tests/test_turso_client.py`原本測「IF NOT EXISTS文字比對」的兩個測試改寫成對應新語意：驗證「前兩次撞到衝突、第三次恢復」會重試到成功、「持續失敗到重試次數用完」最終還是會拋出(不是永遠靜默吞掉)、以及非KeyError例外完全不重試立即拋出。445個測試全過。
 
 ⚠️ 這次事件也再次印證README已經寫的警語「同一時間只能有一個行程對Turso寫入」是真實會發生的風險，不是理論上的邊角案例——重試機制能讓「短暫撞在一起」自動恢復，但如果背景寫入行程跑得夠久、恰好每次重試視窗都撞上，還是可能失敗，治本的做法還是避免同時對Turso跑兩個寫入行程。
+
+## 🔍 修正：上面兩節對`KeyError('result')`的根因診斷其實是錯的——真正原因是Turso帳號寫入額度用完，不是併發衝突
+
+使用者reboot Streamlit Cloud app後回報還是同一個crash，且明確要求「先驗證再checkin」。用重試次數(3次)、遞增間隔(最多3秒)都無法恢復——每一次呼叫都100%失敗，這跟「短暫併發衝突」的特徵(應該是偶發、重試後多半能恢復)完全不符，逼出一次真正繞過套件表面行為、直接檢視原始資料的排查。
+
+寫了一支小腳本monkeypatch `libsql_client.http.HttpClient.execute`，在它對回應JSON做`["result"]`存取之前先印出完整原始內容，直接對真實Turso（當下我背景的`daily_pipeline.py --date 20260722`仍在執行）發送請求，實測結果：
+
+```
+{'message': 'Operation was blocked: SQL write operations are forbidden (writes are blocked, do you need to upgrade your plan?)', 'code': 'BLOCKED'}
+```
+
+真相：Turso伺服器用HTTP 200回傳這個JSON（`libsql_client/http.py`的`_send()`只有在HTTP狀態碼不是2xx時才會辨識出錯誤、拋出`LibsqlError`；200但JSON形狀不是預期的`{"result": ...}`時，`_send()`原封不動把這個dict回傳給呼叫端，呼叫端無條件做`response["result"]`才炸出`KeyError`）——這是**Turso免費方案的寫入額度用完，帳號層級封鎖所有寫入**，跟「多個process同時呼叫ensure_schema()互相卡到」完全無關。前面兩節（「修好Turso併發crash」「Turso schema執行改用重試」）的根因診斷都是錯的：文字比對也好、重試機制也好，都只是針對「併發衝突」這個錯誤假說設計的緩解措施，對「帳號寫入被封鎖」這種**持續性**狀態完全無效——這也解釋了為什麼使用者reboot後還是同樣的錯誤，且新版重試機制在使用者端也100%必然失敗（3次重試全部落空才拋出，只是讓crash多花3秒才出現）。
+
+真正的架構問題：**儀表板（`dashboard/app.py`）明明只需要讀取資料，卻在每次連線時都呼叫`ensure_schema()`這個寫入操作**，導致「寫入被封鎖」這種跟讀取無關的問題，把整個唯讀儀表板也拖垮。修正：
+- `dashboard/app.py`的`get_conn()`：`ensure_schema()`改包try/except，失敗時用`st.warning()`顯示警告訊息但不中斷，讓連線物件正常回傳——資料表通常早就建好了，讀取不應該被寫入被拒絕波及；真的是全新空資料庫的話，後續查詢會自然出現"no such table"，這是可接受的降級行為。
+- **驗證方式**：這次事件本身就是現成的實測環境——Turso當下確實處於寫入被封鎖的狀態，直接把本機儀表板指向真實Turso（不是本機sqlite）重新整理，實測確認：畫面正確顯示黃色警告訊息、候選清單（2026-07-22，30檔）正常從Turso讀出並顯示，證明修法真的解決了使用者回報的crash，不是又一次沒驗證就checkin的猜測。
+- `src/data/turso_client.py`與`tests/test_turso_client.py`的docstring/註解更新，移除「併發衝突」的錯誤敘述，改成準確描述：`KeyError('result')`只代表「回應形狀不是預期的」，可能是真正瞬間性問題(重試有機會恢復)，也可能是像BLOCKED這種持續性狀態(重試無法恢復)；保留重試機制是為了不放棄真正瞬間性的問題，但呼叫端不能假設它一定會成功。README同步修正，加上「檢查Turso Dashboard用量/方案」的實際行動指引，取代原本錯誤的「併發衝突」說法。
+- 停止了背景一直在跑、實際上每一次寫入都注定失敗的`daily_pipeline.py --date 20260722`背景工作（continue下去沒有意義，Turso帳號額度沒解決之前任何寫入都會是BLOCKED）。
+
+⚠️ 這次事件的教訓：`KeyError('result')`這種完全不含上下文的裸例外，光靠「重現→猜測→寫防禦性程式碼→測試通過→checkin」的流程是危險的——寫的regression test其實是在驗證「我對bug成因的假設」，如果假設本身是錯的，test再怎麼過都只是驗證了錯誤的心智模型，不是驗證了真正的問題有沒有解決。真正該做的第一步是先看清楚原始錯誤資料（這裡是繞過函式庫、印出raw HTTP response），再決定要修什麼。下一步：使用者需要自行到Turso Dashboard確認帳號用量/方案狀態，額度問題解決（升級方案或等待額度重置）之前，`daily_pipeline.py`等寫入流程會持續失敗（但這是預期中的失敗，不是crash，儀表板讀取功能不受影響）。
