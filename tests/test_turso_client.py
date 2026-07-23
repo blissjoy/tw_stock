@@ -130,6 +130,53 @@ def test_turso_connection_against_real_libsql_client_full_round_trip(real_libsql
     assert cur.fetchall() == [("1101", "台泥"), ("2330", "台積電")]
 
 
+def test_turso_connection_ensure_schema_twice_does_not_crash(real_libsql_client_conn):
+    """實測發現的真實bug：多個process同時對Turso呼叫ensure_schema()時(例如daily_pipeline.py
+    背景在跑、使用者手動又跑一次)，schema.sql的CREATE TABLE/INDEX IF NOT EXISTS陳述式在物件
+    已存在時，libsql_client 0.3.1對伺服器錯誤回應處理不完善，會在其內部丟出未預期的
+    KeyError('result')，而不是正常表達「已存在，這是預期結果」。這裡直接對真實client連續
+    呼叫兩次ensure_schema，模擬「表格已存在」的情境，確認第二次不會crash。"""
+    conn = real_libsql_client_conn
+    ensure_schema(conn)
+    ensure_schema(conn)  # 不應該拋出例外
+
+    row = conn.execute("SELECT COUNT(*) FROM stocks").fetchone()
+    assert row == (0,)
+
+
+def test_executescript_swallows_error_on_if_not_exists_statement():
+    """統一驗證executescript()對「IF NOT EXISTS」陳述式的容錯邏輯：底層execute()丟例外時，
+    只要陳述式本身包含IF NOT EXISTS就應該被吞掉，不中斷整個schema建立流程。"""
+
+    class _RaisesOnExecute:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def execute(self, statement):
+            self.calls.append(statement)
+            raise KeyError("result")  # 模擬libsql_client 0.3.1的真實錯誤型態
+
+    raw = _RaisesOnExecute()
+    conn = TursoConnection(raw)
+
+    conn.executescript("CREATE TABLE IF NOT EXISTS t (a INT); CREATE INDEX IF NOT EXISTS idx ON t(a);")
+
+    assert len(raw.calls) == 2  # 兩個陳述式都有嘗試執行，只是錯誤被吞掉
+
+
+def test_executescript_reraises_error_on_non_idempotent_statement():
+    """非IF NOT EXISTS的陳述式如果真的出錯，不應該被靜默吞掉(避免掩蓋真正的錯誤)。"""
+
+    class _RaisesOnExecute:
+        def execute(self, statement):
+            raise RuntimeError("模擬真實的SQL錯誤")
+
+    conn = TursoConnection(_RaisesOnExecute())
+
+    with pytest.raises(RuntimeError, match="模擬真實的SQL錯誤"):
+        conn.executescript("INSERT INTO t (a) VALUES (1);")
+
+
 def test_turso_connection_batch_writes_many_rows_against_real_client(real_libsql_client_conn):
     """驗證executemany對真實client會走.batch()分chunk路徑（非逐列迴圈），且chunk邊界(500)
     前後的筆數都能正確寫入，不會漏掉最後一個不滿一個chunk的餘數。"""

@@ -114,8 +114,21 @@ class TursoConnection:
             return
         for statement in script.split(";"):
             statement = statement.strip()
-            if statement:
+            if not statement:
+                continue
+            try:
                 self._raw.execute(statement)
+            except Exception:  # noqa: BLE001
+                # schema.sql 全部是 CREATE TABLE/INDEX IF NOT EXISTS，本來就是設計成
+                # 「物件已存在也沒關係」的冪等操作。但實測發現：多個process同時對Turso
+                # 執行ensure_schema()時（例如daily_pipeline.py背景在跑，使用者手動又跑一次），
+                # libsql_client 0.3.1 對於伺服器端回傳的錯誤回應處理不完善，會在
+                # libsql_client/http.py 內部丟出未預期的 KeyError('result') 而不是正常的
+                # 錯誤訊息——與「表格是否真的已存在」無關，是這個(已停止維護)套件版本本身的
+                # bug。因為這裡的陳述式只可能是IF NOT EXISTS的DDL，物件已存在正是預期結果，
+                # 略過錯誤即可；非DDL的statement不會出現在schema.sql，不會被誤蓋掉真正的錯誤。
+                if "IF NOT EXISTS" not in statement.upper():
+                    raise
 
     def commit(self) -> None:
         if hasattr(self._raw, "commit"):
