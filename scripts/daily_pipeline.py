@@ -36,6 +36,7 @@ from src.data import finmind_client, storage, twse_client  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
+from src.presentation import pipeline_status  # noqa: E402
 from src.screener.daily_screener import run_screen_and_store  # noqa: E402
 
 
@@ -102,48 +103,60 @@ def fetch_today_tpex(conn, date_str: str, stock_info: list[dict]) -> int:
 def run_daily_pipeline(
     conn, date_str: str | None = None, min_days: int = 60, dry_run: bool = False, skip_tpex: bool = False,
 ) -> list[dict]:
-    """核心orchestration，刻意與「conn是Turso還是本機sqlite」無關，方便測試與dry-run重用。"""
+    """核心orchestration，刻意與「conn是Turso還是本機sqlite」無關，方便測試與dry-run重用。
+
+    開始/結束時會寫入`data/pipeline_status.json`（見`src/presentation/pipeline_status.py`），
+    不管是Windows工作排程器排程觸發、還是PySide6桌面版的手動抓取按鈕呼叫，都是同一個進入點、
+    同一份狀態檔，桌面版UI只需要輪詢這個檔案就能顯示「目前正在自動跑」，不用另外設計通知機制。
+    """
     storage.ensure_schema(conn)
 
     if date_str is None:
         date_str = date.today().strftime("%Y%m%d")
     iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
 
-    # 只呼叫一次FinMind的股票基本資料(涵蓋TWSE+TPEx)，同時供TWSE/TPEx兩條路徑取得真實
-    # 公司名稱/產業別；即使skip_tpex=True也需要這份名單來修正TWSE的name欄位，成本很低(單次請求)。
-    stock_info = finmind_client.fetch_stock_info()
-    stock_info_by_id = {r["stock_id"]: r for r in stock_info}
+    pipeline_status.write_status("running", date=iso_date)
+    try:
+        # 只呼叫一次FinMind的股票基本資料(涵蓋TWSE+TPEx)，同時供TWSE/TPEx兩條路徑取得真實
+        # 公司名稱/產業別；即使skip_tpex=True也需要這份名單來修正TWSE的name欄位，成本很低(單次請求)。
+        stock_info = finmind_client.fetch_stock_info()
+        stock_info_by_id = {r["stock_id"]: r for r in stock_info}
 
-    is_trading_day = fetch_today_twse(conn, date_str, stock_info_by_id)
-    if not is_trading_day:
-        print(f"{iso_date} TWSE無資料，判定為非交易日，跳過選股與通知。")
-        return []
+        is_trading_day = fetch_today_twse(conn, date_str, stock_info_by_id)
+        if not is_trading_day:
+            print(f"{iso_date} TWSE無資料，判定為非交易日，跳過選股與通知。")
+            pipeline_status.write_status("done", date=iso_date, candidate_count=0, note="非交易日")
+            return []
 
-    if not skip_tpex:
-        tpex_count = fetch_today_tpex(conn, date_str, stock_info)
-        print(f"TPEx：{tpex_count} 檔成功更新")
+        if not skip_tpex:
+            tpex_count = fetch_today_tpex(conn, date_str, stock_info)
+            print(f"TPEx：{tpex_count} 檔成功更新")
 
-    candidates = run_screen_and_store(conn, iso_date=iso_date, min_days=min_days)
+        candidates = run_screen_and_store(conn, iso_date=iso_date, min_days=min_days)
 
-    print(f"=== {iso_date} 候選清單（共{len(candidates)}檔）===")
-    for c in candidates:
-        print(f"  {c['stock_id']}：進場{c['entry_price']:.2f} 停損{c['stop_loss']:.2f}")
+        print(f"=== {iso_date} 候選清單（共{len(candidates)}檔）===")
+        for c in candidates:
+            print(f"  {c['stock_id']}：進場{c['entry_price']:.2f} 停損{c['stop_loss']:.2f}")
 
-    if dry_run:
-        print("--dry-run：略過實際發送LINE/Email通知。")
-    else:
-        # 兩個通知管道各自獨立try/except：例如Gmail憑證還沒設定時，LINE通知仍應正常發送，
-        # 不應該讓其中一個管道還沒設定/暫時失敗就讓整條pipeline中斷（候選清單已經寫進Turso了）。
-        try:
-            send_line_broadcast(format_candidates_message(iso_date, candidates))
-        except Exception as exc:  # noqa: BLE001
-            print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
-        try:
-            send_email(f"[每日選股] {iso_date}", format_candidates_email_body(iso_date, candidates))
-        except Exception as exc:  # noqa: BLE001
-            print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
+        if dry_run:
+            print("--dry-run：略過實際發送LINE/Email通知。")
+        else:
+            # 兩個通知管道各自獨立try/except：例如Gmail憑證還沒設定時，LINE通知仍應正常發送，
+            # 不應該讓其中一個管道還沒設定/暫時失敗就讓整條pipeline中斷（候選清單已經寫進Turso了）。
+            try:
+                send_line_broadcast(format_candidates_message(iso_date, candidates))
+            except Exception as exc:  # noqa: BLE001
+                print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
+            try:
+                send_email(f"[每日選股] {iso_date}", format_candidates_email_body(iso_date, candidates))
+            except Exception as exc:  # noqa: BLE001
+                print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
 
-    return candidates
+        pipeline_status.write_status("done", date=iso_date, candidate_count=len(candidates))
+        return candidates
+    except Exception:
+        pipeline_status.write_status("failed", date=iso_date)
+        raise
 
 
 def main() -> None:

@@ -1,0 +1,324 @@
+"""PySide6桌面版主視窗：跟`dashboard/app.py`(Streamlit)共用同一套底層——`src/presentation/
+chart_data.py`的圖表資料組裝、`src/patterns/chart_overlays.py`的切線/支撐壓力、
+`src/screener/daily_screener.py`的選股、`scripts/daily_pipeline.py`的`run_daily_pipeline()`——
+只是換一層UI框架，行為（均線/切線軌道線/支撐壓力可個別切換、候選清單點選、手動查詢、最新
+交易日K棒分析）刻意跟Streamlit版對齊。
+
+圖表用`QWebEngineView`顯示Plotly figure的`to_html()`輸出（`include_plotlyjs=True`整包內嵌，
+不用CDN），桌面版離線也能看圖，不用在Qt原生元件裡重畫一次K線/均線/切線邏輯。
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
+from src.data import storage
+from src.data.connection import get_default_connection
+from src.indicators.moving_average import FULL_PERIODS
+from src.patterns import chart_overlays, latest_day_summary
+from src.presentation import chart_data, pipeline_status
+from src.screener.daily_screener import run_screen_and_store
+
+
+class PipelineWorker(QThread):
+    """背景執行緒呼叫run_daily_pipeline()，避免手動抓取按鈕卡住UI主執行緒。
+
+    刻意在這裡另外開一條獨立連線，不重用MainWindow.conn——同一個sqlite3連線物件不應該被
+    主執行緒(畫面互動)跟背景執行緒(抓取寫入)同時使用，即使開連線時給了check_same_thread=False
+    也一樣；各自獨立連線，SQLite自己的檔案鎖機制就足夠處理寫入時的序列化，不需要在Python
+    這層另外加鎖。
+    """
+
+    finished_ok = Signal(int)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        from scripts.daily_pipeline import run_daily_pipeline
+
+        conn = None
+        try:
+            conn = get_default_connection()
+            candidates = run_daily_pipeline(conn, dry_run=False)
+            self.finished_ok.emit(len(candidates))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            if conn is not None:
+                conn.close()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("台股每日選股（本機版）")
+
+        self.conn = None
+        try:
+            self.conn = get_default_connection()
+            storage.ensure_schema(self.conn)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "資料庫連線失敗", str(exc))
+
+        self._pipeline_worker: PipelineWorker | None = None
+        self._current_stock_id: str | None = None
+        # QWebEngineView.setHtml()對內容大小有~2MB的隱性限制(Chromium的data: URL限制，超過
+        # 會loadFinished(False)、畫面完全空白且不會報錯)——Plotly圖表把plotly.js整包內嵌後
+        # 通常有4~5MB，遠超過這個限制。改成寫進暫存檔案再用load(QUrl.fromLocalFile(...))，
+        # 檔案大小沒有這個限制。同一個視窗重複使用同一個暫存檔案，不會每次渲染都留下新檔案。
+        self._chart_html_path = Path(tempfile.gettempdir()) / f"tw_stock_chart_{id(self)}.html"
+
+        self._build_ui()
+        self._reload_candidates()
+
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self._poll_pipeline_status)
+        self._status_timer.start(5000)
+        self._poll_pipeline_status()
+
+    # ------------------------------------------------------------------
+    # UI 組裝
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        central = QWidget()
+        self.setCentralWidget(central)
+        root_layout = QVBoxLayout(central)
+
+        top_bar = QHBoxLayout()
+        self.refresh_btn = QPushButton("🔄 立即重新篩選")
+        self.refresh_btn.setToolTip("只用資料庫裡目前已有的資料重算候選清單，不重新抓取資料，通常幾秒內完成")
+        self.refresh_btn.clicked.connect(self._on_refresh_clicked)
+        self.fetch_btn = QPushButton("▶ 手動抓取今日資料")
+        self.fetch_btn.setToolTip("抓取當天TWSE/TPEx資料並重新選股，較耗時(TPEx約需1小時內)，在背景執行不會卡住畫面")
+        self.fetch_btn.clicked.connect(self._on_fetch_clicked)
+        self.status_label = QLabel("狀態：閒置")
+        top_bar.addWidget(self.refresh_btn)
+        top_bar.addWidget(self.fetch_btn)
+        top_bar.addStretch()
+        top_bar.addWidget(self.status_label)
+        root_layout.addLayout(top_bar)
+
+        splitter = QSplitter()
+        splitter.setOrientation(Qt.Orientation.Vertical)
+        root_layout.addWidget(splitter)
+
+        self.candidates_table = QTableWidget()
+        self.candidates_table.setColumnCount(6)
+        self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "訊號", "進場價", "停損價", "備註"])
+        self.candidates_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.candidates_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.candidates_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.candidates_table.itemSelectionChanged.connect(self._on_candidate_selected)
+        splitter.addWidget(self.candidates_table)
+
+        bottom = QWidget()
+        bottom_layout = QVBoxLayout(bottom)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("個股查詢："))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("輸入股票代號（例如 2330）")
+        self.search_input.returnPressed.connect(self._on_search)
+        search_row.addWidget(self.search_input)
+        search_btn = QPushButton("查詢")
+        search_btn.clicked.connect(self._on_search)
+        search_row.addWidget(search_btn)
+        bottom_layout.addLayout(search_row)
+
+        controls_row = QHBoxLayout()
+
+        ma_group = QGroupBox("顯示均線")
+        ma_layout = QHBoxLayout(ma_group)
+        self.ma_checkboxes: dict[int, QCheckBox] = {}
+        for n in FULL_PERIODS:
+            cb = QCheckBox(f"MA{n}")
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._rerender_chart)
+            ma_layout.addWidget(cb)
+            self.ma_checkboxes[n] = cb
+        controls_row.addWidget(ma_group)
+
+        trend_group = QGroupBox("顯示切線／軌道線")
+        trend_layout = QHBoxLayout(trend_group)
+        self.trendline_checkboxes: dict[str, QCheckBox] = {}
+        for key, label in chart_data.TRENDLINE_LABELS.items():
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._rerender_chart)
+            trend_layout.addWidget(cb)
+            self.trendline_checkboxes[key] = cb
+        controls_row.addWidget(trend_group)
+
+        self.sr_checkbox = QCheckBox("顯示支撐壓力")
+        self.sr_checkbox.setChecked(True)
+        self.sr_checkbox.stateChanged.connect(self._rerender_chart)
+        controls_row.addWidget(self.sr_checkbox)
+        controls_row.addStretch()
+        bottom_layout.addLayout(controls_row)
+
+        self.chart_view = QWebEngineView()
+        bottom_layout.addWidget(self.chart_view, stretch=1)
+
+        self.summary_view = QTextEdit()
+        self.summary_view.setReadOnly(True)
+        self.summary_view.setMaximumHeight(120)
+        bottom_layout.addWidget(self.summary_view)
+
+        splitter.addWidget(bottom)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+
+    # ------------------------------------------------------------------
+    # 候選清單／圖表
+    # ------------------------------------------------------------------
+
+    def _reload_candidates(self) -> None:
+        if self.conn is None:
+            return
+        df, latest_date = chart_data.load_latest_candidates(self.conn)
+        self.candidates_table.setRowCount(0)
+        if latest_date is None:
+            self.setWindowTitle("台股每日選股（本機版）— 尚無候選清單")
+            return
+        self.setWindowTitle(f"台股每日選股（本機版）— {latest_date}，共{len(df)}檔")
+        self.candidates_table.setRowCount(len(df))
+        for row_idx, row in df.reset_index(drop=True).iterrows():
+            values = [
+                row["stock_id"], row["name"], row["signal_name"],
+                f"{row['entry_price']:.2f}", f"{row['stop_loss']:.2f}", row["note"] or "",
+            ]
+            for col_idx, value in enumerate(values):
+                self.candidates_table.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
+
+    def _on_candidate_selected(self) -> None:
+        rows = self.candidates_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        stock_id = self.candidates_table.item(rows[0].row(), 0).text()
+        self._current_stock_id = stock_id
+        self._rerender_chart()
+
+    def _on_search(self) -> None:
+        stock_id = self.search_input.text().strip()
+        if not stock_id:
+            return
+        self._current_stock_id = stock_id
+        self._rerender_chart()
+
+    def _rerender_chart(self) -> None:
+        if self.conn is None or not self._current_stock_id:
+            return
+        price_df = chart_data.load_price_history(self.conn, self._current_stock_id)
+        if price_df.empty:
+            self.chart_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
+            self.summary_view.setPlainText("")
+            return
+
+        holidays, holidays_ok = chart_data.load_holidays_for_chart(price_df)
+
+        selected_periods = tuple(n for n, cb in self.ma_checkboxes.items() if cb.isChecked())
+
+        trendlines = chart_overlays.compute_trendlines(price_df)
+        selected_trendline_keys = tuple(
+            key for key, cb in self.trendline_checkboxes.items() if cb.isChecked() and key in trendlines
+        )
+
+        sr_levels: list[dict] = []
+        show_sr = self.sr_checkbox.isChecked()
+        if show_sr:
+            all_levels = chart_overlays.compute_support_resistance_levels(price_df)
+            sr_levels = chart_overlays.nearest_support_resistance(all_levels, float(price_df["close"].iloc[-1]))
+
+        fig = chart_data.build_candlestick_figure(
+            price_df, title=self._current_stock_id, holidays=holidays, ma_periods=selected_periods,
+            trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
+            sr_levels=sr_levels, show_support_resistance=show_sr,
+        )
+        # include_plotlyjs=True：把plotly.js整包內嵌進HTML，桌面版離線也能看圖，不依賴CDN
+        # （這正是這次改回本機優先的用意，不應該又冒出一個外部網路依賴）。寫進暫存檔案再
+        # 用load()開啟，理由見__init__裡_chart_html_path的註解(setHtml對大內容會靜默失敗)。
+        self._chart_html_path.write_text(fig.to_html(include_plotlyjs=True, full_html=True), encoding="utf-8")
+        self.chart_view.load(QUrl.fromLocalFile(str(self._chart_html_path)))
+
+        summary = latest_day_summary.summarize_latest_day(price_df)
+        latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
+        lines = [
+            f"最新交易日分析（{latest_date_label}）",
+            f"K棒名稱：{summary['candle_name']}",
+            "型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"),
+            "量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"),
+            "⚠️ 型態訊號僅判斷幾何條件是否成立，尚未確認是否位於真正的高檔/低檔位置。",
+        ]
+        if not holidays_ok:
+            lines.append("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
+        self.summary_view.setPlainText("\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # 按鈕
+    # ------------------------------------------------------------------
+
+    def _on_refresh_clicked(self) -> None:
+        if self.conn is None:
+            return
+        run_screen_and_store(self.conn)
+        self._reload_candidates()
+        if self._current_stock_id:
+            self._rerender_chart()
+
+    def _on_fetch_clicked(self) -> None:
+        if self._pipeline_worker is not None and self._pipeline_worker.isRunning():
+            return
+        self.fetch_btn.setEnabled(False)
+        self._pipeline_worker = PipelineWorker()
+        self._pipeline_worker.finished_ok.connect(self._on_fetch_finished)
+        self._pipeline_worker.failed.connect(self._on_fetch_failed)
+        self._pipeline_worker.start()
+
+    def _on_fetch_finished(self, candidate_count: int) -> None:
+        self.fetch_btn.setEnabled(True)
+        self._reload_candidates()
+        QMessageBox.information(self, "完成", f"今日資料抓取完成，候選清單共{candidate_count}檔。")
+
+    def _on_fetch_failed(self, message: str) -> None:
+        self.fetch_btn.setEnabled(True)
+        QMessageBox.warning(self, "失敗", f"抓取失敗：{message}")
+
+    # ------------------------------------------------------------------
+    # 狀態列（跟排程觸發的run_daily_pipeline()共用同一份pipeline_status.json）
+    # ------------------------------------------------------------------
+
+    def _poll_pipeline_status(self) -> None:
+        status = pipeline_status.read_status()
+        if status is None:
+            self.status_label.setText("狀態：閒置")
+            return
+        state = status.get("status")
+        date_label = status.get("date", "")
+        if state == "running":
+            self.status_label.setText(f"狀態：目前正在自動抓取資料…（{date_label}）")
+        elif state == "failed":
+            self.status_label.setText(f"狀態：上次抓取失敗（{date_label}）")
+        else:
+            count = status.get("candidate_count", "?")
+            self.status_label.setText(f"狀態：閒置（上次更新 {date_label}，{count}檔候選）")

@@ -695,3 +695,64 @@ session意外中斷後恢復，使用者確認接續系統呈現層（GitHub Act
 - 停止了背景一直在跑、實際上每一次寫入都注定失敗的`daily_pipeline.py --date 20260722`背景工作（continue下去沒有意義，Turso帳號額度沒解決之前任何寫入都會是BLOCKED）。
 
 ⚠️ 這次事件的教訓：`KeyError('result')`這種完全不含上下文的裸例外，光靠「重現→猜測→寫防禦性程式碼→測試通過→checkin」的流程是危險的——寫的regression test其實是在驗證「我對bug成因的假設」，如果假設本身是錯的，test再怎麼過都只是驗證了錯誤的心智模型，不是驗證了真正的問題有沒有解決。真正該做的第一步是先看清楚原始錯誤資料（這裡是繞過函式庫、印出raw HTTP response），再決定要修什麼。下一步：使用者需要自行到Turso Dashboard確認帳號用量/方案狀態，額度問題解決（升級方案或等待額度重置）之前，`daily_pipeline.py`等寫入流程會持續失敗（但這是預期中的失敗，不是crash，儀表板讀取功能不受影響）。
+
+## 架構調整：改回本機優先，PySide6桌面版，雲端部署延後（2026-07-23）
+
+使用者在上面Turso寫入被封鎖的事件後表示：這類「額度用完但錯誤訊息完全看不出來」的雲端依賴
+本身就干擾開發，即使查證後發現正常「每天跑一次」的寫入量只佔Turso免費額度不到1%（WebFetch
+確認：5GB儲存／每月5億次讀取／每月1000萬次寫入，今天會撞到比較可能是400天全歷史種子一次
+上百萬筆+這次session大量重跑測試疊加），使用者仍決定先把系統做成能完全在本機獨立運作，
+雲端部署（GitHub Actions + Turso + Streamlit Cloud）延後到本機版本穩定後再說，並指名參考
+`ref-project/tw_stock_analyzer`（用PySide6做本機桌面UI）的做法。
+
+探索後發現「核心分析留底層、前端可換」這個目標大部分已經自然成立：`src/`（indicators/
+patterns/strategies/risk/screener/notify/data）完全沒有UI框架耦合；`storage.py`的所有函式
+本來就用「傳進來的conn」操作，不管是sqlite3.Connection還是TursoConnection都能用；
+`daily_pipeline.py`的`run_daily_pipeline(conn, ...)`已經是跟CLI/argparse脫鉤的純orchestration
+函式。唯一卡住的是`dashboard/app.py`裡的`load_latest_candidates`/`load_price_history`/
+`load_holidays_for_chart`/`build_candlestick_figure`這4個函式雖然本來就不依賴`st.*`，
+但定義位置卡在Streamlit檔案裡，其他前端沒辦法import。
+
+實作內容：
+- **新增`src/presentation/chart_data.py`**：把上述4個純函式從`dashboard/app.py`搬過來
+  （含均線/切線/支撐壓力的樣式常數），`dashboard/app.py`改成import，行為完全不變（445個
+  既有測試全過）。原本測這些函式的`tests/test_dashboard_app.py`同步搬成
+  `tests/test_chart_data.py`，monkeypatch對象從`dashboard_app.trading_calendar`改成
+  `chart_data.trading_calendar`。
+- **新增`src/data/connection.py`**：把`dashboard/app.py`裡「依LOCAL_DB_PATH環境變數決定
+  開本機sqlite還是連線Turso」的判斷邏輯抽成`get_default_connection()`，Streamlit/PySide6
+  兩個前端共用同一份，之後要切換DB只需要調整環境變數，不用改程式碼。
+- **新增`src/presentation/pipeline_status.py`**：`run_daily_pipeline()`開始/結束時寫入
+  `data/pipeline_status.json`（status: running/done/failed + date/candidate_count等欄位），
+  不管是Windows工作排程器排程觸發還是桌面版手動按鈕呼叫，都是同一個進入點、同一份狀態檔，
+  桌面版UI用QTimer輪詢顯示「目前正在自動跑」，不需要另外設計跨thread/跨process通知機制。
+  用try/finally包住`run_daily_pipeline()`本體，確保任何例外都會先寫入`failed`狀態再往外拋，
+  不會卡在`running`不放。
+- **新增`desktop/main.py` + `desktop/main_window.py`**（PySide6桌面版）：候選清單表格
+  （點選載入圖表）、個股查詢欄、均線/切線軌道線/支撐壓力勾選框（對應Streamlit版的
+  multiselect/checkbox）、「🔄立即重新篩選」、「▶手動抓取今日資料」（`QThread`背景執行
+  `run_daily_pipeline()`，避免卡住UI）、狀態列（輪詢`pipeline_status.json`）、最新交易日
+  K棒分析面板。圖表用`QWebEngineView`顯示`fig.to_html(include_plotlyjs=True)`（plotly.js
+  整包內嵌，桌面版離線也能看圖，不依賴CDN）。
+  - **手動抓取按鈕刻意不重用`MainWindow.conn`**：背景`QThread`裡另外呼叫一次
+    `get_default_connection()`開自己的連線，不跟UI主執行緒共用同一個sqlite3連線物件——
+    即使`check_same_thread=False`，多執行緒同時操作同一個連線物件仍不安全；各自獨立連線，
+    交給SQLite自己的檔案鎖機制處理寫入序列化即可。
+  - **踩到的坑**：`QWebEngineView.setHtml()`對內容大小有隱性的~2MB限制（Chromium的
+    data: URL限制），超過會靜默失敗——`loadFinished(False)`、畫面完全空白、不拋任何例外。
+    Plotly圖表把plotly.js整包內嵌後通常有4~5MB，遠超過這個限制，一開始畫面整個空白
+    也沒有任何錯誤訊息。用`page().loadFinished`訊號 + 先在獨立診斷腳本測「純HTML」
+    （正常）vs「真正的plotly圖表HTML」（`loadFinished: False`）才定位到問題，不是猜的。
+    修法：改成把HTML寫進暫存檔案，用`view.load(QUrl.fromLocalFile(path))`開啟，檔案大小
+    沒有這個限制。
+- **`.github/workflows/daily_pipeline.yml`**：註解掉`schedule`觸發（保留`workflow_dispatch`
+  可手動觸發），不刪除，之後恢復雲端部署時取消註解即可。
+- **README大幅改寫**：本機執行方式（PySide6桌面版為主、Streamlit為可選）、Windows工作
+  排程器設定步驟（`schtasks`指令範例 + GUI設定要點：錯過時間補跑、不論登入與否執行）、
+  原本的「上線部署步驟」改標為「（可選）之後恢復雲端部署」並標注暫停原因。
+- **驗證方式**：`pytest tests/ -q`全數通過(452個，含新增的pipeline_status/chart_data/
+  daily_pipeline狀態轉換測試)；本機用Playwright重新截圖確認Streamlit版重構後行為不變；
+  本機直接啟動PySide6桌面版，用`QMainWindow.grab()`截圖確認候選清單/圖表(含切線角色互換
+  標籤、支撐壓力線)/勾選框/最新交易日分析面板都跟Streamlit版一致；monkeypatch掉真正的
+  `run_daily_pipeline`後點擊「立即重新篩選」與「手動抓取今日資料」兩個按鈕，確認QThread
+  背景執行、訊號串接、按鈕重新啟用都正常，沒有crash或卡死。

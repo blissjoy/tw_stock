@@ -9,3 +9,8 @@ requests>=2.31
 libsql-client
 streamlit>=1.35
 plotly>=5.20
+
+# PySide6桌面版(desktop/)：2026-07-23架構調整，改回本機優先運作，不再強制依賴Turso/Streamlit
+# Cloud。本機已驗證6.11.1可正常運作，含QtWebEngine(desktop/main_window.py用QWebEngineView
+# 顯示Plotly圖表，重用跟Streamlit版相同的src/presentation/chart_data.py畫圖邏輯)。
+PySide6>=6.6.0

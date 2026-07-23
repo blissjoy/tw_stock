@@ -1,9 +1,14 @@
 name: 每日選股 pipeline
 
+# ⚠️ 排程已暫停(2026-07-23)：架構調整為本機優先運作(PySide6桌面版 + Windows工作排程器，
+# 見README「本機每日排程」)，這支workflow打的Turso目前帳號寫入額度用完、寫入被封鎖，留著
+# 排程只會每天默默失敗。保留workflow_dispatch可以手動觸發，之後恢復雲端部署
+# (GitHub Actions + Turso + Streamlit Cloud)時，只需要取消下面schedule的註解即可，
+# 不需要改其他程式碼(DB連線邏輯已經是環境變數切換，見src/data/connection.py)。
 on:
-  schedule:
-    # UTC 11:30 週一~五 = 台灣時間 19:30，晚於三大法人/融資融券資料通常齊全的時間點
-    - cron: "30 11 * * 1-5"
+  # schedule:
+  #   # UTC 11:30 週一~五 = 台灣時間 19:30，晚於三大法人/融資融券資料通常齊全的時間點
+  #   - cron: "30 11 * * 1-5"
   workflow_dispatch: {}
 
 jobs:

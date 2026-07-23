@@ -1,8 +1,8 @@
 import pandas as pd
 
-import dashboard.app as dashboard_app
-from dashboard.app import build_candlestick_figure, load_holidays_for_chart, load_latest_candidates, load_price_history
+import src.presentation.chart_data as chart_data
 from src.data.storage import init_db, upsert_daily_candidates, upsert_stock_prices, upsert_stocks
+from src.presentation.chart_data import build_candlestick_figure, load_holidays_for_chart, load_latest_candidates, load_price_history
 
 
 def _fresh_conn():
@@ -239,7 +239,7 @@ def test_load_holidays_for_chart_returns_empty_list_for_empty_df():
 def test_load_holidays_for_chart_returns_holidays_when_fetch_succeeds(monkeypatch):
     dates = pd.date_range("2026-01-01", periods=3)
     df = pd.DataFrame({"close": [1, 2, 3]}, index=dates)
-    monkeypatch.setattr(dashboard_app.trading_calendar, "holidays_between", lambda start, end: ["2026-01-01"])
+    monkeypatch.setattr(chart_data.trading_calendar, "holidays_between", lambda start, end: ["2026-01-01"])
 
     holidays, ok = load_holidays_for_chart(df)
     assert holidays == ["2026-01-01"]
@@ -255,7 +255,7 @@ def test_load_holidays_for_chart_fails_gracefully_when_fetch_raises(monkeypatch)
     def _raise(*args, **kwargs):
         raise RuntimeError("模擬TWSE暫時打不通")
 
-    monkeypatch.setattr(dashboard_app.trading_calendar, "holidays_between", _raise)
+    monkeypatch.setattr(chart_data.trading_calendar, "holidays_between", _raise)
 
     holidays, ok = load_holidays_for_chart(df)
     assert holidays == []

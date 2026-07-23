@@ -203,3 +203,56 @@ def test_run_daily_pipeline_continues_when_single_tpex_stock_fails(monkeypatch):
 
     row = conn.execute("SELECT market, name FROM stocks WHERE stock_id = '6488'").fetchone()
     assert row == ("TPEx", "環球晶")
+
+
+def test_run_daily_pipeline_writes_done_status_with_candidate_count(monkeypatch, tmp_path):
+    """PySide6桌面版的狀態列輪詢pipeline_status.json——成功跑完後應該看到status=done、
+    candidate_count正確，不是卡在running不放。"""
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
+
+    status = daily_pipeline.pipeline_status.read_status()
+    assert status["status"] == "done"
+    assert status["candidate_count"] == 0
+    assert status["date"] == "2026-07-22"
+
+
+def test_run_daily_pipeline_writes_done_status_when_non_trading_day(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260101", dry_run=True, skip_tpex=True)
+
+    status = daily_pipeline.pipeline_status.read_status()
+    assert status["status"] == "done"
+    assert status["candidate_count"] == 0
+
+
+def test_run_daily_pipeline_writes_failed_status_and_reraises_on_error(monkeypatch, tmp_path):
+    """例如FinMind整個服務打不通這種非預期例外，狀態檔要更新成failed(而不是卡在running)，
+    同時例外仍要往外拋，讓CLI呼叫端(排程)/桌面版的QThread都能各自感知失敗。"""
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    conn = _fresh_conn()
+
+    def _raise():
+        raise RuntimeError("模擬FinMind服務中斷")
+
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_info", _raise)
+
+    try:
+        daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
+        assert False, "應該要往外拋出例外"
+    except RuntimeError:
+        pass
+
+    status = daily_pipeline.pipeline_status.read_status()
+    assert status["status"] == "failed"

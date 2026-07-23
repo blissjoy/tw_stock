@@ -22,3 +22,6 @@ venv/
 # Local script run logs (e.g. scripts/backfill_history.py stdout redirected to a file)
 *.log
 backfill_log.txt
+
+# 每日pipeline執行狀態(供PySide6桌面版UI輪詢顯示「目前正在自動跑」)，純本機執行期狀態，不需要進版控
+data/pipeline_status.json
