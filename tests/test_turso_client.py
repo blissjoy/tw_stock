@@ -144,37 +144,74 @@ def test_turso_connection_ensure_schema_twice_does_not_crash(real_libsql_client_
     assert row == (0,)
 
 
-def test_executescript_swallows_error_on_if_not_exists_statement():
-    """統一驗證executescript()對「IF NOT EXISTS」陳述式的容錯邏輯：底層execute()丟例外時，
-    只要陳述式本身包含IF NOT EXISTS就應該被吞掉，不中斷整個schema建立流程。"""
+def test_executescript_retries_and_recovers_from_transient_keyerror(monkeypatch):
+    """實測發現的真實bug：多個process同時對Turso併發寫入時，libsql_client 0.3.1對伺服器端
+    衝突回應處理不完善，會丟出未預期的裸KeyError('result')——這跟statement文字本身是不是
+    「IF NOT EXISTS」無關(schema.sql開頭的`PRAGMA foreign_keys = ON;`就不含這段文字，一樣
+    會撞到)，純粹是瞬間併發衝突。這裡模擬「前兩次撞到衝突、第三次恢復」，確認會重試到成功，
+    不會在第一次失敗就整段放棄。"""
+    import src.data.turso_client as turso_client_module
+    monkeypatch.setattr(turso_client_module.time, "sleep", lambda _: None)
+
+    class _FailsTwiceThenSucceeds:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, statement):
+            self.calls += 1
+            if self.calls < 3:
+                raise KeyError("result")  # 模擬libsql_client 0.3.1的真實錯誤型態
+
+    raw = _FailsTwiceThenSucceeds()
+    conn = TursoConnection(raw)
+
+    conn.executescript("PRAGMA foreign_keys = ON;")  # 不應該拋出例外
+
+    assert raw.calls == 3  # 前兩次失敗都有重試，第三次成功後不再繼續嘗試
+
+
+def test_executescript_raises_after_retries_exhausted_on_persistent_keyerror(monkeypatch):
+    """如果KeyError不是瞬間衝突、而是持續發生(重試次數用完仍失敗)，不應該被靜默吞掉到底——
+    否則等於永遠看不出schema真的建立失敗了。"""
+    import src.data.turso_client as turso_client_module
+    monkeypatch.setattr(turso_client_module.time, "sleep", lambda _: None)
+
+    class _AlwaysRaises:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, statement):
+            self.calls += 1
+            raise KeyError("result")
+
+    raw = _AlwaysRaises()
+    conn = TursoConnection(raw)
+
+    with pytest.raises(KeyError):
+        conn.executescript("CREATE TABLE IF NOT EXISTS t (a INT);")
+
+    assert raw.calls == turso_client_module._SCHEMA_RETRY_ATTEMPTS
+
+
+def test_executescript_reraises_non_keyerror_immediately_without_retry():
+    """非KeyError的例外代表真正的SQL錯誤(不是套件在併發衝突下的已知bug訊號)，應該立即往外拋，
+    不要浪費時間重試、也不能被靜默吞掉(避免掩蓋真正的錯誤)。"""
 
     class _RaisesOnExecute:
         def __init__(self):
-            self.calls: list[str] = []
+            self.calls = 0
 
         def execute(self, statement):
-            self.calls.append(statement)
-            raise KeyError("result")  # 模擬libsql_client 0.3.1的真實錯誤型態
+            self.calls += 1
+            raise RuntimeError("模擬真實的SQL錯誤")
 
     raw = _RaisesOnExecute()
     conn = TursoConnection(raw)
 
-    conn.executescript("CREATE TABLE IF NOT EXISTS t (a INT); CREATE INDEX IF NOT EXISTS idx ON t(a);")
-
-    assert len(raw.calls) == 2  # 兩個陳述式都有嘗試執行，只是錯誤被吞掉
-
-
-def test_executescript_reraises_error_on_non_idempotent_statement():
-    """非IF NOT EXISTS的陳述式如果真的出錯，不應該被靜默吞掉(避免掩蓋真正的錯誤)。"""
-
-    class _RaisesOnExecute:
-        def execute(self, statement):
-            raise RuntimeError("模擬真實的SQL錯誤")
-
-    conn = TursoConnection(_RaisesOnExecute())
-
     with pytest.raises(RuntimeError, match="模擬真實的SQL錯誤"):
         conn.executescript("INSERT INTO t (a) VALUES (1);")
+
+    assert raw.calls == 1  # 沒有重試
 
 
 def test_turso_connection_batch_writes_many_rows_against_real_client(real_libsql_client_conn):

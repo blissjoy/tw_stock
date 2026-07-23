@@ -665,3 +665,13 @@ session意外中斷後恢復，使用者確認接續系統呈現層（GitHub Act
 - `dashboard/app.py`：`render_price_chart()`改用`nearest_support_resistance()`過濾預設顯示的支撐壓力；切線繪圖迴圈新增角色互換判斷（`_TRENDLINE_DEFAULT_ROLE`），若`line.role`跟原本方向不同，圖例文字改標「（已跌破，轉壓力）」/「（已突破，轉支撐）」並換用對應角色的顏色，不會讓使用者誤以為失效的舊切線還在生效。
 - `tests/test_chart_overlays.py`：新增6個測試，包括驗證「動態更新只看最新一組相鄰配對、不回頭搜尋」（構造合法→不合法→又合法的轉折點序列，確認取到的是最新一組而不是很久以前的舊配對）、驗證跌破後角色互換為壓力、驗證未跌破時角色維持支撐、以及`nearest_support_resistance()`的邊界情況。444個測試全過。
 - 本機用Playwright對2911實際截圖驗證：上升切線圖例正確顯示「上升切線（已跌破，轉壓力）」（紅色），支撐壓力只顯示離現價最近的「支撐6.80／壓力7.67」兩條，不再是原本雜亂的多條，符合使用者回報的期待。
+
+## 修正Turso併發crash的漏洞：`executescript()`的「IF NOT EXISTS」文字比對範圍不夠
+
+上一輪修過的併發crash（`KeyError('result')`，見前面章節）在使用者reboot Streamlit Cloud app時又發生了一次，這次原因跟上次不完全一樣：使用者reboot當下，我背景在跑的`daily_pipeline.py --date 20260722 --dry-run`（目標是Turso）仍在執行，兩邊撞在一起，重現了同一個底層套件bug——但這次撞到的是`schema.sql`最開頭的`PRAGMA foreign_keys = ON;`，這句不含"IF NOT EXISTS"文字，所以完全沒被上一輪的修法涵蓋到（上一輪的假設「schema.sql只可能是IF NOT EXISTS的DDL」本身就是錯的，忽略了開頭那句PRAGMA）。
+
+用文字比對陳述式內容來判斷「能不能吞掉這個錯誤」本來就是脆弱的做法——真正該判斷的是「這個KeyError本身是不是那個已知的套件bug訊號」，而不是「這句SQL長什麼樣子」。改用**重試**取代文字比對：`TursoConnection._execute_schema_statement_with_retry()`只要抓到`KeyError`（這正是libsql_client 0.3.1在併發衝突下的錯誤訊號特徵，跟statement內容無關）就重試最多3次、遞增間隔(1s/2s)；3次都失敗才真的往外拋。非`KeyError`的例外（代表真正的SQL錯誤）完全不重試、立即拋出，不會被誤蓋掉。
+
+`tests/test_turso_client.py`原本測「IF NOT EXISTS文字比對」的兩個測試改寫成對應新語意：驗證「前兩次撞到衝突、第三次恢復」會重試到成功、「持續失敗到重試次數用完」最終還是會拋出(不是永遠靜默吞掉)、以及非KeyError例外完全不重試立即拋出。445個測試全過。
+
+⚠️ 這次事件也再次印證README已經寫的警語「同一時間只能有一個行程對Turso寫入」是真實會發生的風險，不是理論上的邊角案例——重試機制能讓「短暫撞在一起」自動恢復，但如果背景寫入行程跑得夠久、恰好每次重試視窗都撞上，還是可能失敗，治本的做法還是避免同時對Turso跑兩個寫入行程。

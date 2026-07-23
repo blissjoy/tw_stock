@@ -21,12 +21,15 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 from src.data.config import get_turso_credentials
 
 _NAMED_PARAM_RE = re.compile(r":(\w+)")
 _BATCH_CHUNK_SIZE = 500  # 每次.batch()呼叫送幾筆，避免單次HTTP請求過大
+_SCHEMA_RETRY_ATTEMPTS = 3
+_SCHEMA_RETRY_DELAY_SECONDS = 1.0
 
 
 def _to_positional(sql: str, row: dict) -> tuple[str, tuple]:
@@ -116,19 +119,28 @@ class TursoConnection:
             statement = statement.strip()
             if not statement:
                 continue
+            self._execute_schema_statement_with_retry(statement)
+
+    def _execute_schema_statement_with_retry(self, statement: str) -> None:
+        """schema.sql 裡的每個statement（PRAGMA、CREATE TABLE/INDEX IF NOT EXISTS）套用起來
+        都是冪等的，重複執行是安全的。但實測發現：多個process同時對Turso執行ensure_schema()
+        時（例如daily_pipeline.py背景在跑，使用者手動又跑一次，或Streamlit Cloud冷啟動時
+        剛好撞上），libsql_client 0.3.1（已停止維護）對伺服器端在併發衝突下回傳的錯誤回應
+        處理不完善，會在libsql_client/http.py內部丟出未預期的裸KeyError('result')而不是
+        正常的錯誤訊息——這是套件本身在瞬間併發衝突下的bug，跟這句statement本身合不合法
+        無關（先前版本只放行statement文字裡包含"IF NOT EXISTS"的情況，但schema.sql開頭的
+        `PRAGMA foreign_keys = ON;`不含這段文字，一樣會撞到同一個底層bug，卻沒被涵蓋到）。
+        短暫重試就能恢復；重試次數用完仍失敗，代表不是這個瞬間衝突，照常往外拋出，不會
+        掩蓋真正的錯誤（真正的SQL語法錯誤不會是KeyError，會是libsql_client自己的例外類別）。
+        """
+        for attempt in range(_SCHEMA_RETRY_ATTEMPTS):
             try:
                 self._raw.execute(statement)
-            except Exception:  # noqa: BLE001
-                # schema.sql 全部是 CREATE TABLE/INDEX IF NOT EXISTS，本來就是設計成
-                # 「物件已存在也沒關係」的冪等操作。但實測發現：多個process同時對Turso
-                # 執行ensure_schema()時（例如daily_pipeline.py背景在跑，使用者手動又跑一次），
-                # libsql_client 0.3.1 對於伺服器端回傳的錯誤回應處理不完善，會在
-                # libsql_client/http.py 內部丟出未預期的 KeyError('result') 而不是正常的
-                # 錯誤訊息——與「表格是否真的已存在」無關，是這個(已停止維護)套件版本本身的
-                # bug。因為這裡的陳述式只可能是IF NOT EXISTS的DDL，物件已存在正是預期結果，
-                # 略過錯誤即可；非DDL的statement不會出現在schema.sql，不會被誤蓋掉真正的錯誤。
-                if "IF NOT EXISTS" not in statement.upper():
+                return
+            except KeyError:
+                if attempt == _SCHEMA_RETRY_ATTEMPTS - 1:
                     raise
+                time.sleep(_SCHEMA_RETRY_DELAY_SECONDS * (attempt + 1))
 
     def commit(self) -> None:
         if hasattr(self._raw, "commit"):
