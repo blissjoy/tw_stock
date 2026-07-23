@@ -210,7 +210,12 @@ class MainWindow(QMainWindow):
                 f"{row['entry_price']:.2f}", f"{row['stop_loss']:.2f}", row["note"] or "",
             ]
             for col_idx, value in enumerate(values):
-                self.candidates_table.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
+                item = QTableWidgetItem(str(value))
+                # 「備註」欄位內容常常比欄寬長、會被截斷看不到完整內容(尤其note，例如
+                # 「多頭架構+MA10/MA20多排向上+攻擊量...」這種說明文字)；設定tooltip讓
+                # 滑鼠移過去任一儲存格都能懸浮顯示完整文字，不用特別放寬欄寬。
+                item.setToolTip(str(value))
+                self.candidates_table.setItem(row_idx, col_idx, item)
 
     def _on_candidate_selected(self) -> None:
         rows = self.candidates_table.selectionModel().selectedRows()

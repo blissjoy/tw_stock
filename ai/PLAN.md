@@ -867,3 +867,17 @@ scratchpad寫prototype腳本（不碰正式程式碼），用Playwright對產生
 div_id與JS hook、customdata_json可以被解析且筆數正確)。469個測試全過。本機真實啟動
 PySide6桌面版(對2911)截圖確認整合正確：左上角資訊框正常顯示、圖表其餘功能(候選清單、
 均線/切線/支撐壓力勾選)都不受影響。
+
+## 候選清單「備註」欄位加上hover tooltip（2026-07-23）
+
+使用者反映候選清單的「備註」文字較長時會被截斷看不到完整內容。查證：`dashboard/app.py`
+的Streamlit版`st.dataframe`，直接用Playwright檢查其儲存格DOM的`title`屬性一律是`None`
+——`st.dataframe`底層是glide-data-grid，沒有提供任何per-cell hover tooltip機制可以利用，
+這是Streamlit這個元件本身的限制，非本專案能簡單修改。`desktop/main_window.py`的PySide6
+桌面版則完全沒設定過tooltip(單純沒做，不是框架限制)。
+
+修法：`_reload_candidates()`寫入每個`QTableWidgetItem`時呼叫`item.setToolTip(str(value))`，
+讓滑鼠移到候選清單任一儲存格都能懸浮顯示完整文字，不限於備註欄。驗證：程式面直接確認
+`item.toolTip() == item.text()`皆為True；OS原生tooltip彈出視窗本身無法被`window.grab()`
+截圖捕捉到(這是截圖方法的限制)，但`setToolTip()`是Qt最基本的標準API，不需要更多驗證。
+這個修正只套用在桌面版；Streamlit版因為前述元件限制暫時沒有對應方案。
