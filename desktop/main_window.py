@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
+from desktop.chart_render import render_chart_html
 from src.data import storage
 from src.data.connection import get_default_connection
 from src.indicators.moving_average import FULL_PERIODS
@@ -255,10 +256,13 @@ class MainWindow(QMainWindow):
             trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
             sr_levels=sr_levels, show_support_resistance=show_sr,
         )
-        # include_plotlyjs=True：把plotly.js整包內嵌進HTML，桌面版離線也能看圖，不依賴CDN
-        # （這正是這次改回本機優先的用意，不應該又冒出一個外部網路依賴）。寫進暫存檔案再
-        # 用load()開啟，理由見__init__裡_chart_html_path的註解(setHtml對大內容會靜默失敗)。
-        self._chart_html_path.write_text(fig.to_html(include_plotlyjs=True, full_html=True), encoding="utf-8")
+        # render_chart_html()疊加滑鼠十字線(貫穿價格/成交量兩個子圖)+左上角動態資訊框，
+        # 取代Plotly預設會跟著滑鼠跑的浮動tooltip，仿TradingView的畫法(desktop/chart_render.py
+        # 有完整說明，這個效果只有桌面版能用，Streamlit版沒有對應機制)。include_plotlyjs=True
+        # 把plotly.js整包內嵌，桌面版離線也能看圖。寫進暫存檔案再用load()開啟，理由見__init__裡
+        # _chart_html_path的註解(setHtml對大內容會靜默失敗)。
+        html = render_chart_html(fig, price_df)
+        self._chart_html_path.write_text(html, encoding="utf-8")
         self.chart_view.load(QUrl.fromLocalFile(str(self._chart_html_path)))
 
         summary = latest_day_summary.summarize_latest_day(price_df)

@@ -181,4 +181,19 @@ def build_candlestick_figure(
     if holidays:
         rangebreaks.append(dict(values=holidays))
     fig.update_xaxes(rangebreaks=rangebreaks)
+
+    # 淡灰色十字線(hover時顯示滑鼠對應的X/Y位置)，仿TradingView的畫法。這裡只設定Plotly
+    # 原生的spike line，兩個前端(Streamlit/PySide6)都能用；但實測發現原生x軸spike的
+    # "across"模式在上下堆疊子圖(價格/成交量)的情況下，垂直線只會畫在滑鼠所在那一格，
+    # 不會真的貫穿到另一個子圖——這是PySide6桌面版才需要的「垂直線貫穿兩個子圖」效果，
+    # desktop/chart_render.py會在桌面版另外用自訂JS覆蓋掉這裡的x軸spike設定來達成；
+    # Streamlit版沒有這個機制，維持這裡的原生效果(垂直線只在單一子圖內顯示)已經是不錯的
+    # 折衷，不需要為了它額外做什麼。
+    spike_style = dict(
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor="rgba(120,120,120,0.6)", spikethickness=1, spikedash="solid",
+    )
+    fig.update_xaxes(**spike_style)
+    fig.update_yaxes(**spike_style)
+    fig.update_layout(hovermode="x")
     return fig
