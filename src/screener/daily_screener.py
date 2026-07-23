@@ -97,9 +97,10 @@ def load_trailing_frames(conn, min_days: int = 60) -> dict[str, pd.DataFrame]:
 def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) -> list[dict]:
     """只用資料庫裡『目前已有』的資料重新跑一次選股並寫回daily_candidates，不對外抓取任何新資料。
 
-    這是刻意的設計：抓新資料(TWSE/TPEx)成本很高(TPEx經FinMind約4小時)，跟「用現有資料重算
-    訊號」(純本地運算，通常幾秒內)分開，才能讓 dashboard 提供「立即重新篩選」這種不需要等待
-    資料抓取的即時操作；scripts/daily_pipeline.py 抓完當天新資料後也呼叫同一份邏輯，避免重複實作。
+    這是刻意的設計：抓新資料(TWSE/TPEx)成本較高(TPEx經FinMind逐股抓取，實測約1小時內)，跟
+    「用現有資料重算訊號」(純本地運算，通常幾秒內)分開，才能讓 dashboard 提供「立即重新篩選」
+    這種不需要等待資料抓取的即時操作；scripts/daily_pipeline.py 抓完當天新資料後也呼叫同一份
+    邏輯，避免重複實作。
     """
     if iso_date is None:
         iso_date = date.today().isoformat()

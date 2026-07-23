@@ -144,6 +144,41 @@ def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):
     assert row == ("TPEx", "環球晶")
 
 
+def test_fetch_today_tpex_filters_out_non_4_digit_codes(monkeypatch):
+    """FinMind的TPEx股票清單裡混雜ETF/債券/權證等非4碼代號(例如00878B)，這些不是我們要
+    每日追蹤的普通股，應該被濾掉，不浪費請求額度去抓它們。"""
+    conn = _fresh_conn()
+    stock_info = [
+        {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
+        {"stock_id": "00878B", "name": "某ETF", "market": "TPEx", "industry": None},
+        {"stock_id": "73107P", "name": "某權證", "market": "TPEx", "industry": None},
+    ]
+    fetched_ids = []
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", lambda sid, s, e: (fetched_ids.append(sid), [_price_row(stock_id=sid)])[1])
+
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    assert fetched_ids == ["6488"]  # 只有4碼的普通股被抓
+
+
+def test_fetch_today_tpex_does_not_fetch_institutional_or_margin_data(monkeypatch):
+    """目前daily_screener沒有任何規則用到TPEx的法人/融資融券資料，這裡刻意不抓，
+    節省約2/3的請求量；用「一被呼叫就報錯」確認真的完全沒有呼叫到這兩個函式。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"}]
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_prices", lambda sid, s, e: [_price_row(stock_id=sid)])
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("不應該被呼叫")
+
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_institutional_investors", _fail_if_called)
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_margin_trading", _fail_if_called)
+
+    success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    assert success_count == 1
+
+
 def test_run_daily_pipeline_continues_when_single_tpex_stock_fails(monkeypatch):
     conn = _fresh_conn()
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])

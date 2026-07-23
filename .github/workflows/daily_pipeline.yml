@@ -9,9 +9,12 @@ on:
 jobs:
   daily-pipeline:
     runs-on: ubuntu-latest
-    # TPEx透過FinMind逐股抓取約需2400次請求，600次/小時額度下大約4小時，
-    # public repo 的 GitHub Actions 標準Linux runner無分鐘數上限，故此處放寬timeout
-    timeout-minutes: 360
+    # TPEx透過FinMind逐股抓取(只抓~640檔4碼普通股股價，濾掉ETF/債券/權證，且法人/融資券
+    # 目前沒有規則用到、不抓)，實測約1小時內完成；抓取端已在 finmind_client.py 內建
+    # 主動節流(_throttle)避免撞到402額度上限。這裡的timeout抓90分鐘當安全margin，
+    # 同時也讓「意外卡住」的執行(例如ensure_schema衝突曾經導致process卡住不退出)能在
+    # 合理時間內被GitHub Actions強制中止，而不是無意義地占用6小時。
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4

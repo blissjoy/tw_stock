@@ -603,3 +603,49 @@ session意外中斷後恢復，使用者確認接續系統呈現層（GitHub Act
 - 用Playwright實際截圖驗證了完整流程：海選清單（本機測試資料跑出20檔候選）→ 點選任一列 → 下方即時顯示該股票價格走勢圖，瀏覽器console無任何錯誤。
 
 **下一步**：全市場400天Turso種子資料回補仍在背景執行中（`seed_turso_from_local.py`，最後檢查進度：stock_prices已接近完成、institutional_investors進行中、margin_trading尚未開始）；本機開發驗證流程已建立，後續功能異動應先用`LOCAL_DB_PATH`本機驗證過，再推上GitHub讓Turso/Streamlit Cloud/GitHub Actions生效。
+
+---
+
+# 補特定一天資料 + 圖表功能擴充 + TPEx「4小時」問題實測破解（2026-07-22~23）
+
+## Turso 400天種子回補完成
+
+背景任務跑完：交易日範圍2024-11-26~2026-07-22（400天），stocks 1,854檔、stock_prices 661,771筆、institutional_investors 2,919,408筆、margin_trading 567,181筆，皆已確認寫入Turso。
+
+## 儀表板功能擴充：K線圖成交量子圖 + 均線 + 切線/軌道線 + 支撐壓力 + 最新交易日型態分析
+
+使用者要求K線圖下方加成交量、疊加均線（查證`ai/zhu-rules/均線/`後確認書中核心是MA5/10/20，可擴充MA60(季線)/MA120(半年線)/MA240(年線)，**不是**MA200，規則庫裡沒有這個天期）、朱老師的切線理論與支撐壓力、以及最新交易日的K棒/量價型態分析，且都要能個別切換顯示，使用者要求「一鍵到底做到好，沒問題直接做commit/push」。
+
+- `load_price_history()`：多抓`max(FULL_PERIODS)=240`天緩衝算均線，避免顯示視窗一開頭就是NaN。
+- `build_candlestick_figure()`：改用`plotly.subplots.make_subplots`兩列子圖(K棒+均線在上、成交量在下，共用x軸)。
+- **新增 `src/patterns/chart_overlays.py`**：直接重用`pivots.compute_turning_points`(轉折點) + `trendlines.py`的R-LINE-01/02/14/15(切線/軌道線畫法) + `support_resistance.py`的R-SR-01/02(支撐壓力角色判定)，組裝成圖表座標資料，不重新發明演算法。
+- **新增 `src/patterns/latest_day_summary.py`**：對最新一天分類單根K棒名稱、掃描晨星/夜星/烏雲罩頂/吞噬/母子/三法/一星二陽陰等多根K線組合、攻擊量/爆量/量縮背離/窒息量等量價訊號。`candle_patterns_2.py`要求的「是否位於高檔/低檔」外部趨勢位置模組還沒實作，沿用該檔案自己註明的權宜做法（傳全True，只判斷幾何型態），畫面上有加警語標註這一點。
+- 均線/切線軌道線/支撐壓力皆用`st.multiselect`/`st.checkbox`個別控制顯示，兩個圖表實例(候選清單點選/手動查詢)各自獨立。
+- 本機Playwright截圖驗證全部功能正確渲染、無console錯誤，430個測試全過，已commit+push。
+
+## 修好Turso併發crash + 補上「更新雲端」文件
+
+使用者手動跑`daily_pipeline.py --date 20260722`時，因為跟AI背景已經在跑的同一支腳本同時對Turso呼叫`ensure_schema()`，兩邊互相卡到，`libsql_client 0.3.1`對這種情況的錯誤回應處理不完善，丟出`KeyError('result')`而不是正常錯誤訊息。修法：`executescript()`的逐句迴圈對「IF NOT EXISTS」陳述式的例外直接吞掉(這類陳述式本來就設計成物件已存在也沒關係)，非DDL陳述式的例外照常往外拋，避免掩蓋真正的錯誤。用真實的`libsql_client`套件寫了回歸測試(連續呼叫兩次`ensure_schema`)重現並驗證修好。順便在README補上「更新雲端」章節，說明程式碼變更(`git push`)跟資料變更(`daily_pipeline.py`/`seed_turso_from_local.py`)是兩件不同的事，以及不要同時對Turso跑兩個寫入行程。
+
+## 🔍 TPEx「約需4小時」的說法從一開始就沒有真正被驗證過，實測後發現三個真實問題
+
+使用者質疑「ref-project的batch_fill_history.py抓近2000檔TWSE不到2分鐘，為什麼TPEx要4小時？」，逼出一次真正的實測（不是繼續憑理論推算）。查了ref-project後發現它是用`yfinance.download()`批次抓取（一次請求可以拿上千檔），但yfinance完全沒有台股專屬的三大法人/融資融券資料——這正是我們選擇FinMind的原因，兩者不是同一件事的替代方案。
+
+查證FinMind官方文件（`finmind.github.io/llms-full.txt`）確認：FinMind的`TaiwanStockPrice`/`TaiwanStockInstitutionalInvestorsBuySell`/`TaiwanStockMarginPurchaseShortSale`三個dataset**確實有**「不帶data_id、一次拿全市場當天資料」的批次查詢能力，但**限Backer/Sponsor付費方案**，免費/註冊會員只能逐股查詢——這才是TPEx逐股抓取的真正原因，不是我們的抓法有問題。
+
+實測（不是理論推算）發現的三個真實問題：
+1. **FinMind的TPEx股票清單有1,903筆**（不是先前以為的763筆），但只有約641筆是純4碼的普通股票，其餘是ETF(`00xxxB`)、債券(`710xxx`/`711xxx`)、權證(`73xxxP`)等，一直都沒有濾掉。
+2. **目前daily_screener(R-TREND-14)完全沒有用到法人/融資融券資料**，只用股價——一直在抓完全用不到的2/3資料量。
+3. **超過每小時額度時不是優雅變慢，而是直接對每個請求回傳`402 Payment Required`，且要等整個小時視窗真正過去才恢復**（親自測到：從第189次請求起連續失敗到停止測試），既有的3次重試+短backoff完全救不了，只會讓每一檔都在重試後才確定失敗、繼續浪費時間問下一檔——這才是「4小時」的真正來源：前~10分鐘正常，之後1千多檔全部in在重試失敗，而不是真的均勻變慢。
+
+## 修正：TPEx只抓4碼普通股股價 + FinMind client主動節流
+
+跟使用者確認：daily pipeline的TPEx只抓股價，法人/融資券之後有規則需要時再補（本機531MB歷史庫的完整資料不受影響）。
+
+- `src/data/finmind_client.py`：`_get()`送出請求前呼叫新增的`_throttle()`，用滑動視窗(deque記錄過去一小時的請求時間戳)確保永遠不超過`MAX_REQUESTS_PER_HOUR=550`(略低於官方600留安全margin)，超過時主動睡到最舊那筆請求age out為止，不再依賴事後重試。新增3個測試(monkeypatch `time.monotonic`/`time.sleep`模擬時間流逝)。
+- `scripts/daily_pipeline.py`的`fetch_today_tpex()`：改用`twse_client.STOCK_CODE_PATTERN`濾掉非4碼代號，且只抓`fetch_stock_prices`(移除法人/融資券的抓取與寫入)。新增2個測試驗證過濾與範圍縮減。
+- `.github/workflows/daily_pipeline.yml`：`timeout-minutes`從360降到90（實測後合理估計+安全margin，也讓萬一又發生process卡住的情況能在合理時間內被強制中止，不會無意義占用6小時）。
+- README.md / `src/screener/daily_screener.py` docstring 同步更新，不再寫「約4小時」。
+- 全套測試更新後438個全過。
+
+⚠️ 因為實測驗證本身用掉了不少FinMind額度，截至本節記錄時當下的一小時額度視窗還在冷卻中，**尚未能對修正後的程式碼跑一次完整的763→641檔TPEx真實計時驗證**，目前的「約1小時內」是根據修正後的請求量(641檔×1個dataset=641次請求，550次/小時節流下的理論值)換算，不是像先前一樣又是憑空估計——差別在於這次的每一項輸入數字(641檔、1次/檔、550次/小時節流速度)都已經個別驗證過，只是還沒把「完整跑一次」這最後一步的真實總時間也量到。下一步：額度視窗過去後找機會實際跑一次`daily_pipeline.py`（不加`--skip-tpex`）驗證真實總耗時是否符合預期。

@@ -8,10 +8,18 @@ Please update your user level."；`TaiwanSecuritiesTraderInfo`（分點基本資
 現階段呼叫會拋出 FinMindTierError 讓呼叫端明確知道是權限問題而不是程式或網路錯誤。
 
 免費/註冊帳號額度：未帶token 300次/小時，帶token 600次/小時（見 config.get_finmind_token）。
+
+⚠️ **實測發現(2026-07-23)**：超過額度時**不是**優雅變慢，而是直接開始對每一次請求回傳
+`402 Payment Required`，且要等額度所屬的那個小時視窗真正過去才會恢復——重試機制(即使
+有backoff)完全救不了，只會讓每一檔在3次重試後才確定失敗、繼續浪費時間問下一檔。因此
+`_get()`在送出請求前會**主動節流**，never讓自己在過去一小時內送出超過`MAX_REQUESTS_PER_HOUR`
+次請求，保守抓 550(略低於官方600上限留安全margin)。這比事後重試可靠很多：只要沒有其他
+process同時在用同一個token，就不會再撞到402。
 """
 
 from __future__ import annotations
 
+import collections
 import time
 
 import requests
@@ -19,14 +27,34 @@ import requests
 from src.data.config import get_finmind_token
 
 BASE_URL = "https://api.finmindtrade.com/api/v4/data"
+MAX_REQUESTS_PER_HOUR = 550  # 略低於官方600次/小時上限，留安全margin
+_RATE_WINDOW_SECONDS = 3600
+_request_timestamps: collections.deque = collections.deque()
 
 
 class FinMindTierError(RuntimeError):
     """帳號方案不足以呼叫該dataset（例如分點進出籌碼需要Sponsor付費方案）。"""
 
 
+def _throttle() -> None:
+    """在送出請求前檢查過去一小時內的請求數，超過MAX_REQUESTS_PER_HOUR就睡到最舊那筆
+    請求滿一小時為止，確保自己永遠不會主動撞到FinMind的402硬限制。"""
+    now = time.monotonic()
+    while _request_timestamps and now - _request_timestamps[0] > _RATE_WINDOW_SECONDS:
+        _request_timestamps.popleft()
+    if len(_request_timestamps) >= MAX_REQUESTS_PER_HOUR:
+        sleep_for = _RATE_WINDOW_SECONDS - (now - _request_timestamps[0]) + 0.1
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        now = time.monotonic()
+        while _request_timestamps and now - _request_timestamps[0] > _RATE_WINDOW_SECONDS:
+            _request_timestamps.popleft()
+    _request_timestamps.append(now)
+
+
 def _get(dataset: str, data_id: str | None = None, start_date: str | None = None,
          end_date: str | None = None, extra_params: dict | None = None, retries: int = 3) -> list[dict]:
+    _throttle()
     params: dict = {"dataset": dataset, "token": get_finmind_token()}
     if data_id is not None:
         params["data_id"] = data_id

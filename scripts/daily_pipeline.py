@@ -1,11 +1,15 @@
 """每日自動化 pipeline 進入點：GitHub Actions 排程呼叫這支腳本。
 
-流程：連線 Turso → 抓「今天」的 TWSE 全市場批次 + TPEx(透過FinMind逐股) 增量資料 → 寫入 →
-跑 daily_screener 算候選清單 → 寫入 daily_candidates 表 → 發送 LINE + Email 通知。
+流程：連線 Turso → 抓「今天」的 TWSE 全市場批次 + TPEx(透過FinMind逐股，只抓股價) 增量
+資料 → 寫入 → 跑 daily_screener 算候選清單 → 寫入 daily_candidates 表 → 發送 LINE + Email 通知。
 
-TPEx 透過 FinMind 逐股抓取的成本是「股票數 x 資料集數」，跟日期範圍長短無關（FinMind
-一次請求拿一檔股票的一段區間），就算只抓「今天」一天，全部上櫃股票仍需要約2400次請求，
-在600次/小時免費額度下約需4小時，這是每日自動化排程本身要跑好幾小時的原因（見 ai/PLAN.md）。
+⚠️ **實測修正(2026-07-23)**：TPEx這一步原本假設約需4小時，實測發現原因不只是額度，而是
+三個複合問題：①FinMind的TPEx股票清單裡有~1900筆，但只有~640筆是純4碼的普通股票，其餘是
+ETF/債券/權證，這裡先濾掉；②目前daily_screener只用得到股價，法人與融資融券還沒有任何規則
+在用，所以TPEx只抓股價(1個dataset)，需要時再另外補；③FinMind超過額度時不是優雅變慢，而是
+直接對每個請求回傳402、要等整個小時視窗過去才恢復，重試機制救不了——已在
+`src/data/finmind_client.py` 的 `_get()` 內建主動節流(_throttle)，送出前就先確保不超過
+每小時上限，不再依賴事後重試。三者合計後，TPEx預估縮短到約1小時內（640檔 x 1個dataset）。
 
 --local-db 參數可以指向本機sqlite檔案而不連線Turso，方便在還沒申請Turso帳號、或想在
 本機快速驗證整條管線邏輯時使用。
@@ -29,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import finmind_client, storage, twse_client  # noqa: E402
+from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
 from src.screener.daily_screener import run_screen_and_store  # noqa: E402
@@ -67,20 +72,20 @@ def fetch_today_twse(conn, date_str: str, stock_info_by_id: dict[str, dict]) -> 
 
 
 def fetch_today_tpex(conn, date_str: str, stock_info: list[dict]) -> int:
-    """透過FinMind抓TPEx全部上櫃股票當天增量資料，回傳成功更新的股票數。單檔失敗不中斷整批。
+    """透過FinMind抓TPEx普通股股價當天增量資料，回傳成功更新的股票數。單檔失敗不中斷整批。
 
     stock_info: finmind_client.fetch_stock_info() 的結果，同時提供TPEx股票清單與真實
-    名稱/產業別（此前的bug：這裡明明已經呼叫過這個API拿到真實名稱，卻只取了stock_id，
-    寫入stocks表時又用stock_id頂替了name）。
+    名稱/產業別。這裡只篩選純4碼的普通股票代號(排除ETF/債券/權證等，比照
+    src.data.twse_client.STOCK_CODE_PATTERN 對TWSE的既有做法一致)，且只抓股價一個
+    dataset——法人與融資融券目前沒有任何規則會用到，先不抓，之後有規則需要時再加回來
+    （見上方模組docstring的實測修正說明）。
     """
-    tpex_rows = [r for r in stock_info if r["market"] == "TPEx"]
+    tpex_rows = [r for r in stock_info if r["market"] == "TPEx" and STOCK_CODE_PATTERN.match(r["stock_id"])]
     success_count = 0
     for row in tpex_rows:
         stock_id = row["stock_id"]
         try:
             prices = finmind_client.fetch_stock_prices(stock_id, date_str, date_str)
-            institutional = finmind_client.fetch_institutional_investors(stock_id, date_str, date_str)
-            margin = finmind_client.fetch_margin_trading(stock_id, date_str, date_str)
 
             storage.upsert_stocks(conn, [{
                 "stock_id": stock_id, "name": row.get("name", stock_id), "market": "TPEx",
@@ -88,10 +93,6 @@ def fetch_today_tpex(conn, date_str: str, stock_info: list[dict]) -> int:
             }])
             if prices:
                 storage.upsert_stock_prices(conn, prices)
-            if institutional:
-                storage.upsert_institutional_investors(conn, institutional)
-            if margin:
-                storage.upsert_margin_trading(conn, margin)
             success_count += 1
         except Exception as exc:  # noqa: BLE001 - 單檔失敗不應中斷整批更新
             print(f"[TPEx/FinMind] {stock_id}: 失敗 - {exc}")
