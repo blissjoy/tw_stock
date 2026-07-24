@@ -1151,3 +1151,45 @@ KD(9,3,3)——查`src/indicators/macd.py`的`compute_macd(fast=12, slow=26, sig
 候選清單篩選勾選框位於「立即重新篩選」按鈕上方，勾選「均線多頭排列」後兩個前端一致地把
 候選數從25檔篩到18檔(桌面版QTableWidget的rowCount()跟Streamlit版的候選清單筆數互相對照
 驗證過，篩選邏輯在兩個前端算出同樣結果)。
+
+## 新增「個股分析」內嵌展開面板：顯示個股符合的規則庫訊號（2026-07-24）
+
+使用者要求在「顯示切線/軌道線」那一行控制項的最右邊加一個「個股分析」按鈕，點下去後開一個
+內嵌展開面板(不是彈出視窗)，內容先放：這隻股票目前符合規則庫中哪些訊號，依信心分數由高到
+低排序，且每條要附規則說明。
+
+範圍界定：規則庫共246條，但目前只有5條(R-TREND-14/SCREEN-11/SCREEN-15/CLASSIC-24/GAP-09)
+被接成`daily_screener.py`裡「輸入df、輸出候選dict或None」這種可即時判斷的screen_*函式，
+其餘241條大多是計算/輔助類函式(例如`compute_macd`、`ma_direction`)、沒有統一的「今天是否
+觸發」布林介面，也有些需要書外部資料(基本面/三大法人)——這次的「個股分析」只涵蓋已接上
+_SCREEN_FUNCTIONS的規則，範圍會隨之後接上更多規則自動擴大，不用改這裡的程式碼；跟候選
+清單本身用的是同一組規則，維持「有幾條規則、兩邊看到的都一樣」的一致性。
+
+修法：
+- 新增`src/rule_docs.py`：`load_rule_doc(rule_id)`從`ai/zhu-rules/`掃過所有.md檔案比對
+  `- **Rule ID**: ...`這一行建索引(`lru_cache`快取，只需要掃一次)，回傳該規則的名稱/解讀/
+  信心/原文與頁碼等欄位字典；查無此規則回傳None，不拋例外。
+- `daily_screener.py`新增`analyze_stock_signals(df, min_days=60)`：對單一股票的OHLCV
+  資料跑過`_SCREEN_FUNCTIONS`，把每個screen_fn回傳的signal_name(例如"R-CLASSIC-24突破
+  大量黑K買進（87%）")用正規表示式拆出rule_id/標題/信心分數，查`load_rule_docs()`補上
+  規則說明，最後依信心分數由高到低排序回傳清單。跟`screen_all_stocks`/`run_screen_and_store`
+  是批次跑「所有股票」寫回daily_candidates資料表不同，這是針對使用者當下正在看的單一
+  股票即時運算，不寫入資料庫。
+- `dashboard/app.py`：切線/軌道線控制項那一行從4欄擴成5欄，最後一欄放「📊 個股分析」
+  按鈕，按下去用`st.session_state`切換一個布林值；為True時在該行下方用`st.expander`
+  (預設展開)顯示`analyze_stock_signals()`的結果，每條規則顯示rule_id/標題/信心分數/
+  完整解讀/原文與頁碼/目前觸發狀態(note)。
+- `desktop/main_window.py`：controls_row最後加`self.analysis_btn`(可勾選的QPushButton，
+  `setCheckable(True)`)，`addStretch()`後再加這顆按鈕讓它被推到最右邊；新增
+  `self.analysis_view`(QTextEdit，預設隱藏，`setMaximumHeight(200)`)放在controls_row
+  跟chart_view之間，按鈕`toggled`訊號切換可見度並重新計算內容；`_rerender_chart()`切換
+  股票時如果面板正開著也一併刷新，不用使用者手動重新點按鈕才會同步。
+
+新增測試：`tests/test_rule_docs.py`(已知規則查得到欄位/未知規則回傳None)、
+`tests/test_daily_screener.py`新增3個`analyze_stock_signals`測試(天數不足回傳空清單、
+符合規則時信心分數與規則說明都正確帶出、多條規則時依信心分數降冪排序且查無規則說明時
+優雅回傳None不crash)，503個測試全過。
+
+對本機真實db視覺驗證：Streamlit版跟桌面版都截圖確認——按鈕位於「顯示切線/軌道線」那一行
+最右邊，點下去後在同一行下方展開面板，正確顯示"R-CLASSIC-24　突破大量黑K買進（信心87%）"
+的完整解讀內容、原文與頁碼、目前觸發狀態，兩個前端呈現一致。

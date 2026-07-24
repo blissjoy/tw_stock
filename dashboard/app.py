@@ -40,7 +40,7 @@ def main() -> None:
 
     from src.data import storage
     from src.data.connection import get_default_connection
-    from src.screener.daily_screener import run_screen_and_store
+    from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store
 
     try:
         for key, value in st.secrets.items():
@@ -87,7 +87,7 @@ def main() -> None:
         trendlines = chart_overlays.compute_trendlines(price_df)
         trendline_options = [chart_data.TRENDLINE_LABELS[key] for key in chart_data.TRENDLINE_LABELS if key in trendlines]
         label_to_key = {v: k for k, v in chart_data.TRENDLINE_LABELS.items()}
-        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+        col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
         with col1:
             if trendline_options:
                 selected_trendline_labels = st.multiselect(
@@ -102,7 +102,27 @@ def main() -> None:
             show_macd = st.checkbox("顯示MACD", value=True, key=f"{widget_key}_macd_checkbox")
         with col4:
             show_kd = st.checkbox("顯示KD", value=True, key=f"{widget_key}_kd_checkbox")
+        analysis_state_key = f"{widget_key}_show_analysis"
+        with col5:
+            if st.button("📊 個股分析", key=f"{widget_key}_analysis_btn"):
+                st.session_state[analysis_state_key] = not st.session_state.get(analysis_state_key, False)
         selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
+
+        if st.session_state.get(analysis_state_key, False):
+            with st.expander("📊 個股分析", expanded=True):
+                signal_matches = analyze_stock_signals(price_df)
+                if not signal_matches:
+                    st.write("目前沒有符合任何已接上規則庫的訊號。")
+                else:
+                    for m in signal_matches:
+                        st.markdown(f"**{m['rule_id']}　{m['title']}（信心{m['confidence']}%）**")
+                        if m["description"]:
+                            st.write(m["description"])
+                        if m.get("reference"):
+                            st.caption(f"原文與頁碼：{m['reference']}")
+                        if m.get("note"):
+                            st.caption(f"目前狀態：{m['note']}")
+                        st.divider()
         # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到6條、
         # 會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。
         sr_levels = []

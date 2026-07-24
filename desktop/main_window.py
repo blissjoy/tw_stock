@@ -39,7 +39,7 @@ from src.data.connection import get_default_connection
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src.presentation import chart_data, pipeline_status
-from src.screener.daily_screener import run_screen_and_store
+from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store
 
 
 class PipelineWorker(QThread):
@@ -203,7 +203,22 @@ class MainWindow(QMainWindow):
         self.kd_checkbox.stateChanged.connect(self._rerender_chart)
         controls_row.addWidget(self.kd_checkbox)
         controls_row.addStretch()
+
+        self.analysis_btn = QPushButton("📊 個股分析")
+        self.analysis_btn.setCheckable(True)
+        self.analysis_btn.setToolTip("顯示這檔股票目前符合規則庫中哪些訊號，依信心分數排序")
+        self.analysis_btn.toggled.connect(self._on_analysis_toggled)
+        controls_row.addWidget(self.analysis_btn)
         bottom_layout.addLayout(controls_row)
+
+        # 「個股分析」內嵌展開面板：預設隱藏，按下上面的按鈕才顯示/計算內容，跟切換均線/切線
+        # 那些checkbox不同(那些是「一定要顯示圖表」的常態設定)，這是選擇性才需要的額外資訊，
+        # 不用一直佔畫面空間。
+        self.analysis_view = QTextEdit()
+        self.analysis_view.setReadOnly(True)
+        self.analysis_view.setMaximumHeight(200)
+        self.analysis_view.setVisible(False)
+        bottom_layout.addWidget(self.analysis_view)
 
         self.chart_view = QWebEngineView()
         bottom_layout.addWidget(self.chart_view, stretch=1)
@@ -269,6 +284,8 @@ class MainWindow(QMainWindow):
         if price_df.empty:
             self.chart_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
             self.summary_view.setPlainText("")
+            if self.analysis_btn.isChecked():
+                self.analysis_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
             return
 
         holidays, holidays_ok = chart_data.load_holidays_for_chart(price_df)
@@ -313,6 +330,44 @@ class MainWindow(QMainWindow):
         if not holidays_ok:
             lines.append("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
         self.summary_view.setPlainText("\n".join(lines))
+
+        if self.analysis_btn.isChecked():
+            self._refresh_analysis_view()
+
+    def _on_analysis_toggled(self, checked: bool) -> None:
+        self.analysis_view.setVisible(checked)
+        if checked:
+            self._refresh_analysis_view()
+
+    def _refresh_analysis_view(self) -> None:
+        """填入「個股分析」面板內容：目前這檔股票符合規則庫中哪些訊號(依信心分數高到低)，
+        每條附上從ai/zhu-rules/查出的規則說明。跟_rerender_chart各自重新查一次價格資料，
+        不共用同一份df——避免兩邊狀態耦合(例如面板開著時切換股票，忘記同步更新)，運算成本
+        很低(SQL查詢+5條screen_*規則判斷)，不需要為了省這點重算而增加程式複雜度。
+        """
+        if self.conn is None or not self._current_stock_id:
+            self.analysis_view.setHtml("<p>請先從候選清單點選或查詢一檔股票。</p>")
+            return
+        price_df = chart_data.load_price_history(self.conn, self._current_stock_id)
+        if price_df.empty:
+            self.analysis_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
+            return
+        matches = analyze_stock_signals(price_df)
+        if not matches:
+            self.analysis_view.setHtml("<p>目前沒有符合任何已接上規則庫的訊號。</p>")
+            return
+        blocks = []
+        for m in matches:
+            block = f"<p><b>{m['rule_id']}　{m['title']}（信心{m['confidence']}%）</b><br>"
+            if m["description"]:
+                block += f"{m['description']}<br>"
+            if m.get("reference"):
+                block += f"<i>原文與頁碼：{m['reference']}</i><br>"
+            if m.get("note"):
+                block += f"目前狀態：{m['note']}"
+            block += "</p><hr>"
+            blocks.append(block)
+        self.analysis_view.setHtml("".join(blocks))
 
     # ------------------------------------------------------------------
     # 按鈕

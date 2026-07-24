@@ -45,6 +45,44 @@ def test_screen_bull_short_term_entry_returns_none_when_not_bull_trend(monkeypat
     assert daily_screener.screen_bull_short_term_entry(df, min_days=60) is None
 
 
+def test_analyze_stock_signals_returns_empty_when_nothing_matches():
+    df = _build_uptrend_df(n_days=30)  # 天數不足，任何規則都不會觸發
+    assert daily_screener.analyze_stock_signals(df, min_days=60) == []
+
+
+def test_analyze_stock_signals_includes_confidence_and_rule_description(monkeypatch):
+    df = _build_uptrend_df(n_days=70)
+    monkeypatch.setattr(
+        daily_screener, "daily_bull_trend_state",
+        lambda high, low, close, n=5: pd.Series(True, index=close.index),
+    )
+
+    matches = daily_screener.analyze_stock_signals(df, min_days=60)
+
+    assert len(matches) == 1
+    match = matches[0]
+    assert match["rule_id"] == "R-TREND-14"
+    assert match["title"] == "多頭短線進場"
+    assert match["confidence"] == 92
+    assert match["description"]  # 從ai/zhu-rules/查到的完整解讀文字，非空
+    assert match["reference"]
+
+
+def test_analyze_stock_signals_sorts_by_confidence_descending(monkeypatch):
+    def fake_low(df, min_days=60):
+        return {"signal_name": "R-FAKE-01假規則甲（60%）", "entry_price": 1.0, "stop_loss": 0.9, "note": None}
+
+    def fake_high(df, min_days=60):
+        return {"signal_name": "R-FAKE-02假規則乙（95%）", "entry_price": 1.0, "stop_loss": 0.9, "note": None}
+
+    monkeypatch.setattr(daily_screener, "_SCREEN_FUNCTIONS", (fake_low, fake_high))
+
+    matches = daily_screener.analyze_stock_signals(pd.DataFrame({"close": [1]}), min_days=0)
+
+    assert [m["rule_id"] for m in matches] == ["R-FAKE-02", "R-FAKE-01"]
+    assert matches[0]["description"] is None  # 查無此規則(假規則)，優雅回傳None不crash
+
+
 def _build_narrow_range_breakout_df(n_days: int = 60) -> pd.DataFrame:
     """前n_days-1天維持完全相同的高低價(狹幅盤整不擴張)，最後一天中長紅K放量突破。"""
     dates = pd.date_range("2026-01-01", periods=n_days, freq="B")

@@ -27,6 +27,7 @@ volume_price.py`的大量判斷)，不需要另外新寫底層演算法。依使
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 
 import pandas as pd
@@ -270,6 +271,43 @@ _SCREEN_FUNCTIONS = (
     screen_breakout_above_big_black_candle,
     screen_breakaway_gap_up,
 )
+
+
+_SIGNAL_NAME_PATTERN = re.compile(r"^(R-[A-Z]+-\d+)(.*)（(\d+)%）$")
+
+
+def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60) -> list[dict]:
+    """對「單一股票」的OHLCV資料，跑過目前已接上的所有screen_*規則，回傳「今天」(資料
+    最後一列)符合的訊號清單，依信心分數由高到低排序，每筆附上從ai/zhu-rules/查出的規則
+    完整說明——供UI的「個股分析」面板使用，不同於screen_all_stocks/run_screen_and_store
+    是批次跑「所有股票」寫回daily_candidates資料表，這裡是針對使用者當下正在看的單一
+    股票即時運算，不寫入資料庫。
+
+    目前只涵蓋已接上_SCREEN_FUNCTIONS的規則（不是全部246條規則庫），範圍會隨之後接上
+    更多規則自動擴大，這裡的程式碼不用跟著改。
+    """
+    from src.rule_docs import load_rule_doc
+
+    matches: list[dict] = []
+    for screen_fn in _SCREEN_FUNCTIONS:
+        result = screen_fn(df, min_days=min_days)
+        if result is None:
+            continue
+        name_match = _SIGNAL_NAME_PATTERN.match(result["signal_name"])
+        if not name_match:
+            continue
+        rule_id, title, confidence = name_match.group(1), name_match.group(2), int(name_match.group(3))
+        doc = load_rule_doc(rule_id)
+        matches.append({
+            "rule_id": rule_id,
+            "title": title,
+            "confidence": confidence,
+            "note": result.get("note"),
+            "description": doc.get("解讀") if doc else None,
+            "reference": doc.get("原文與頁碼") if doc else None,
+        })
+    matches.sort(key=lambda m: m["confidence"], reverse=True)
+    return matches
 
 
 def screen_all_stocks(stock_frames: dict[str, pd.DataFrame], min_days: int = 60) -> list[dict]:
