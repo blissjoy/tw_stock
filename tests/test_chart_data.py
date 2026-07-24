@@ -10,6 +10,7 @@ from src.presentation.chart_data import (
     load_candidates_for_date,
     load_holidays_for_chart,
     load_price_history,
+    resolve_stock_id,
 )
 
 
@@ -170,6 +171,45 @@ def test_load_price_history_returns_empty_for_unknown_stock():
     conn = _fresh_conn()
     df = load_price_history(conn, "9999")
     assert df.empty
+
+
+def test_resolve_stock_id_matches_exact_stock_id():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    assert resolve_stock_id(conn, "2330") == "2330"
+
+
+def test_resolve_stock_id_matches_exact_name():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    assert resolve_stock_id(conn, "台積電") == "2330"
+
+
+def test_resolve_stock_id_matches_partial_name():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    assert resolve_stock_id(conn, "台積") == "2330"
+
+
+def test_resolve_stock_id_prefers_exact_stock_id_over_name_match():
+    """股票代號剛好跟另一檔股票的名稱片段撞在一起時，代號完全相符應該優先。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    assert resolve_stock_id(conn, "2330") == "2330"
+
+
+def test_resolve_stock_id_returns_none_when_no_match():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    assert resolve_stock_id(conn, "不存在的股票") is None
+
+
+def test_resolve_stock_id_returns_none_for_blank_query():
+    conn = _fresh_conn()
+    assert resolve_stock_id(conn, "   ") is None
 
 
 def test_load_price_history_computes_full_ma_set_with_lookback_buffer():

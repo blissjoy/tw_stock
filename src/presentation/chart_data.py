@@ -160,6 +160,28 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
     return merged_df, target_date
 
 
+def resolve_stock_id(conn, query: str) -> str | None:
+    """依使用者輸入(可能是股票代號、完整名稱、或名稱片段，例如"2330"／"台積電"／"台積")
+    找出對應的stock_id，供「個股查詢」欄位使用。查詢優先順序：①股票代號完全相符
+    ②名稱完全相符 ③名稱片段(LIKE)相符，取第一筆(依stock_id排序)。都找不到回傳None，
+    呼叫端可以退回用原始輸入當stock_id(維持既有「查無股票代號 X 的價格資料」錯誤訊息
+    路徑，不特別區分「代號打錯」還是「這代號真的不存在」)。
+    """
+    query = query.strip()
+    if not query:
+        return None
+    row = conn.execute("SELECT stock_id FROM stocks WHERE stock_id = ?", (query,)).fetchone()
+    if row:
+        return row[0]
+    row = conn.execute("SELECT stock_id FROM stocks WHERE name = ?", (query,)).fetchone()
+    if row:
+        return row[0]
+    row = conn.execute(
+        "SELECT stock_id FROM stocks WHERE name LIKE ? ORDER BY stock_id LIMIT 1", (f"%{query}%",)
+    ).fetchone()
+    return row[0] if row else None
+
+
 def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
     """回傳指定股票最近days天的OHLCV+均線(MA5/10/20/60/120/240，欄位名MA{n})，依date遞增
     排序、index為date；查無資料回傳空DataFrame。

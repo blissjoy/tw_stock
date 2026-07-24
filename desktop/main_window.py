@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
         search_row = QHBoxLayout()
         search_row.addWidget(QLabel("個股查詢："))
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("輸入股票代號（例如 2330）")
+        self.search_input.setPlaceholderText("輸入股票代號或名稱（例如 2330 或 台積電）")
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
         search_btn = QPushButton("查詢")
@@ -303,10 +303,11 @@ class MainWindow(QMainWindow):
         self._rerender_chart()
 
     def _on_search(self) -> None:
-        stock_id = self.search_input.text().strip()
-        if not stock_id:
+        query = self.search_input.text().strip()
+        if not query:
             return
-        self._current_stock_id = stock_id
+        resolved = chart_data.resolve_stock_id(self.conn, query) if self.conn is not None else None
+        self._current_stock_id = resolved or query
         self._rerender_chart()
 
     def _rerender_chart(self) -> None:

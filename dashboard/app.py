@@ -1,6 +1,6 @@
 """Streamlit 儀表板：顯示每日選股結果（daily_candidates 表，預設最新一天、可用下拉選單
-切換查看歷史候選清單，可點選清單中任一列直接看該檔股票的價格走勢），也可以手動查詢任意
-股票代號。
+切換查看歷史候選清單，可點選清單中任一列直接看該檔股票的價格走勢），也可以手動輸入
+股票代號或名稱查詢任意股票。
 
 「🔄 立即重新篩選」按鈕呼叫 src/screener/daily_screener.run_screen_and_store()，只用
 資料庫裡『目前已有』的資料重算訊號，不會對外重新抓取TWSE/TPEx資料（那個很慢，交給
@@ -33,6 +33,7 @@ from src.presentation.chart_data import (  # noqa: E402
     load_candidates_for_date,
     load_holidays_for_chart,
     load_price_history,
+    resolve_stock_id,
 )
 
 
@@ -206,10 +207,11 @@ def main() -> None:
         render_price_chart(selected_stock_id, widget_key="drilldown")
         st.divider()
 
-    st.subheader("個股價格走勢查詢（手動輸入任意股票代號）")
-    stock_id = st.text_input("輸入股票代號（例如 2330）", value="")
-    if stock_id:
-        render_price_chart(stock_id.strip(), widget_key="manual")
+    st.subheader("個股價格走勢查詢（輸入股票代號或名稱）")
+    query = st.text_input("輸入股票代號或名稱（例如 2330 或 台積電）", value="")
+    if query:
+        stock_id = resolve_stock_id(conn, query) or query.strip()
+        render_price_chart(stock_id, widget_key="manual")
 
 
 if __name__ == "__main__":
