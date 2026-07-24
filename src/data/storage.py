@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
@@ -192,6 +193,28 @@ def delete_daily_candidates_for_date(conn: sqlite3.Connection, iso_date: str) ->
     重算』的正確狀態。"""
     conn.execute("DELETE FROM daily_candidates WHERE date = ?", (iso_date,))
     conn.commit()
+
+
+def upsert_daily_data_status(conn: sqlite3.Connection, iso_date: str, is_intraday: bool) -> None:
+    """記錄某天的資料是官方最終收盤價(is_intraday=False)還是盤中即時價備援(True)，見
+    schema.sql的daily_data_status說明。同一天重複寫入會覆蓋成最新一次抓取的實際狀態
+    (例如盤中先抓一次、收盤後再抓一次，flag會自動從True修正回False)。"""
+    conn.execute(
+        """
+        INSERT INTO daily_data_status (date, is_intraday, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET is_intraday = excluded.is_intraday, updated_at = excluded.updated_at
+        """,
+        (iso_date, int(is_intraday), datetime.now().isoformat()),
+    )
+    conn.commit()
+
+
+def get_daily_data_status(conn: sqlite3.Connection, iso_date: str) -> bool | None:
+    """回傳指定日期是否為盤中即時價(True)/官方收盤價(False)；查無紀錄回傳None(例如這個
+    功能上線前就存在的歷史資料，一律不特別標示，視為已收盤)。"""
+    row = conn.execute("SELECT is_intraday FROM daily_data_status WHERE date = ?", (iso_date,)).fetchone()
+    return bool(row[0]) if row is not None else None
 
 
 def get_latest_candidates(conn: sqlite3.Connection) -> list[dict]:

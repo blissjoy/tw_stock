@@ -83,6 +83,173 @@ def test_fetch_today_twse_falls_back_to_stock_id_when_name_unknown(monkeypatch):
     assert row == ("9999",)
 
 
+def test_fetch_today_twse_returns_final_false_when_official_endpoint_succeeds(monkeypatch):
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+
+    is_trading_day, is_intraday = daily_pipeline.fetch_today_twse(conn, "20260722", {"2330": {"name": "台積電", "industry": None}})
+
+    assert is_trading_day is True
+    assert is_intraday is False
+
+
+def test_fetch_today_twse_falls_back_to_yfinance_when_official_endpoint_has_no_data(monkeypatch):
+    """官方「每日收盤行情」端點在收盤前查詢會回傳空——這是2026-07-24發現的真實情境：
+    使用者盤中手動抓取時官方端點還沒有資料，改用yfinance盤中即時價當備援，讓「手動抓取」
+    在盤中也能拿到資料。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    stock_info_by_id = {"2330": {"name": "台積電", "industry": "半導體", "market": "TWSE"}}
+
+    captured = {}
+
+    def _fake_batch(stock_ids, start_date, end_date, on_progress=None):
+        captured["stock_ids"] = stock_ids
+        return {"2330": [_price_row(stock_id="2330")]}
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", _fake_batch)
+
+    is_trading_day, is_intraday = daily_pipeline.fetch_today_twse(conn, "20260724", stock_info_by_id)
+
+    assert is_trading_day is True
+    assert is_intraday is True
+    assert captured["stock_ids"] == ["2330"]
+    row = conn.execute("SELECT name FROM stocks WHERE stock_id = '2330'").fetchone()
+    assert row == ("台積電",)
+
+
+def test_fetch_today_twse_yfinance_fallback_excludes_non_twse_and_non_4_digit_codes(monkeypatch):
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    stock_info_by_id = {
+        "2330": {"name": "台積電", "industry": "半導體", "market": "TWSE"},
+        "6488": {"name": "環球晶", "industry": "半導體", "market": "TPEx"},  # 不同市場，不該被抓
+        "00878": {"name": "某ETF", "industry": None, "market": "TWSE"},  # 非4碼，不該被抓
+    }
+    captured = {}
+
+    def _fake_batch(stock_ids, start_date, end_date, on_progress=None):
+        captured["stock_ids"] = stock_ids
+        return {}
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", _fake_batch)
+
+    daily_pipeline.fetch_today_twse(conn, "20260724", stock_info_by_id)
+
+    assert captured["stock_ids"] == ["2330"]
+
+
+def test_fetch_today_twse_returns_false_when_both_sources_have_no_data(monkeypatch):
+    """官方端點跟yfinance備援都查無資料才真的判定為非交易日(而不是還沒收盤)。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
+    stock_info_by_id = {"2330": {"name": "台積電", "industry": "半導體", "market": "TWSE"}}
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *a, **k: {})
+
+    is_trading_day, is_intraday = daily_pipeline.fetch_today_twse(conn, "20260101", stock_info_by_id)
+
+    assert is_trading_day is False
+    assert is_intraday is False
+
+
+def test_fetch_today_twse_returns_false_when_yfinance_fallback_raises(monkeypatch):
+    """yfinance備援下載失敗(例如網路問題)不應該讓pipeline中斷，視同查無資料處理。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
+    stock_info_by_id = {"2330": {"name": "台積電", "industry": "半導體", "market": "TWSE"}}
+
+    def _raise(*a, **k):
+        raise RuntimeError("模擬yfinance網路逾時")
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", _raise)
+
+    is_trading_day, is_intraday = daily_pipeline.fetch_today_twse(conn, "20260101", stock_info_by_id)
+
+    assert is_trading_day is False
+    assert is_intraday is False
+
+
+def test_fetch_today_twse_forwards_progress_callback_only_on_fallback_path(monkeypatch):
+    conn = _fresh_conn()
+    progress_calls = []
+
+    # 官方端點成功時，直接回報單一批次完成(1,1)，不會去呼叫yfinance
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    daily_pipeline.fetch_today_twse(
+        conn, "20260722", {"2330": {"name": "台積電", "industry": None, "market": "TWSE"}},
+        on_progress=lambda done, total: progress_calls.append((done, total)),
+    )
+    assert progress_calls == [(1, 1)]
+
+
+def test_run_daily_pipeline_records_intraday_status_when_falling_back_to_yfinance(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_twse_prices_batch",
+        lambda stock_ids, start_date, end_date, on_progress=None: {"2330": [_price_row(stock_id="2330", d="2026-07-24")]},
+    )
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260724", dry_run=True, skip_tpex=True)
+
+    assert storage.get_daily_data_status(conn, "2026-07-24") is True
+
+
+def test_run_daily_pipeline_records_final_status_when_official_endpoint_succeeds(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
+
+    assert storage.get_daily_data_status(conn, "2026-07-22") is False
+
+
+def test_run_daily_pipeline_forwards_progress_callback_for_twse_and_tpex_stages(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"},
+        {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
+    ])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
+        lambda stock_ids, start_date, end_date, on_progress=None: (
+            on_progress(len(stock_ids), len(stock_ids)) if on_progress else None
+        ) or {"6488": [_price_row(stock_id="6488")]},
+    )
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+
+    stages = []
+    daily_pipeline.run_daily_pipeline(
+        conn, date_str="20260722", dry_run=True, skip_tpex=False,
+        on_progress=lambda stage, done, total: stages.append((stage, done, total)),
+    )
+
+    assert ("TWSE", 1, 1) in stages
+    assert ("TPEx", 1, 1) in stages
+
+
 def test_run_daily_pipeline_sends_notifications_when_not_dry_run(monkeypatch):
     conn = _fresh_conn()
     _stub_stock_info(monkeypatch, [])
@@ -135,7 +302,7 @@ def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):
     ])
     monkeypatch.setattr(
         daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
-        lambda stock_ids, start_date, end_date: {"6488": [_price_row(stock_id="6488", d="2026-07-22")]},
+        lambda stock_ids, start_date, end_date, on_progress=None: {"6488": [_price_row(stock_id="6488", d="2026-07-22")]},
     )
     monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
 
@@ -156,7 +323,7 @@ def test_fetch_today_tpex_filters_out_non_4_digit_codes(monkeypatch):
     ]
     fetched_ids = []
 
-    def _fake_batch(stock_ids, start_date, end_date):
+    def _fake_batch(stock_ids, start_date, end_date, on_progress=None):
         fetched_ids.extend(stock_ids)
         return {sid: [_price_row(stock_id=sid)] for sid in stock_ids}
 
@@ -181,7 +348,7 @@ def test_fetch_today_tpex_does_not_call_finmind_anymore(monkeypatch):
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_margin_trading", _fail_if_called)
     monkeypatch.setattr(
         daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
-        lambda stock_ids, start_date, end_date: {"6488": [_price_row(stock_id="6488")]},
+        lambda stock_ids, start_date, end_date, on_progress=None: {"6488": [_price_row(stock_id="6488")]},
     )
 
     success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
@@ -201,7 +368,7 @@ def test_run_daily_pipeline_continues_when_one_tpex_stock_has_no_data(monkeypatc
         {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
     ])
 
-    def _fake_batch(stock_ids, start_date, end_date):
+    def _fake_batch(stock_ids, start_date, end_date, on_progress=None):
         # 模擬9999查無資料(例如剛下市)，只有6488有資料回傳
         return {"6488": [_price_row(stock_id="6488", d="2026-07-22")]}
 

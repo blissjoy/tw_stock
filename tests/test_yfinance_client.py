@@ -117,3 +117,45 @@ def test_fetch_prices_batch_returns_empty_dict_when_download_returns_empty(monke
     result = yfinance_client.fetch_prices_batch(["5871"], "2026-07-22", "2026-07-23", market_suffix=".TWO")
 
     assert result == {}
+
+
+def test_fetch_twse_prices_batch_uses_tw_suffix(monkeypatch):
+    captured = {}
+
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+        captured["tickers"] = tickers
+        return _multi_ticker_df(tickers, ["2026-07-24"])
+
+    monkeypatch.setattr("yfinance.download", _fake_download)
+
+    result = yfinance_client.fetch_twse_prices_batch(["2330", "1101"], "2026-07-24", "2026-07-25")
+
+    assert captured["tickers"] == ["2330.TW", "1101.TW"]
+    assert set(result.keys()) == {"2330", "1101"}
+
+
+def test_fetch_prices_batch_reports_progress_after_each_batch(monkeypatch):
+    monkeypatch.setattr(yfinance_client, "BATCH_SIZE", 2)  # 縮小批次大小方便測試多批次的情境
+
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+        return _multi_ticker_df(tickers, ["2026-07-22"])
+
+    monkeypatch.setattr("yfinance.download", _fake_download)
+
+    progress_calls = []
+    yfinance_client.fetch_prices_batch(
+        ["1101", "1102", "1103", "1104", "1105"], "2026-07-22", "2026-07-23",
+        market_suffix=".TW", on_progress=lambda done, total: progress_calls.append((done, total)),
+    )
+
+    # 5檔、每批2檔：應該回報(2,5) (4,5) (5,5)三次，最後一批不足批次大小也要回報實際處理數
+    assert progress_calls == [(2, 5), (4, 5), (5, 5)]
+
+
+def test_fetch_prices_batch_works_without_progress_callback(monkeypatch):
+    """on_progress是選填參數，不傳時不應該crash(既有呼叫端沒有指定這個參數)。"""
+    monkeypatch.setattr("yfinance.download", lambda *a, **k: _multi_ticker_df(["5871.TWO"], ["2026-07-22"]))
+
+    result = yfinance_client.fetch_prices_batch(["5871"], "2026-07-22", "2026-07-23", market_suffix=".TWO")
+
+    assert set(result.keys()) == {"5871"}

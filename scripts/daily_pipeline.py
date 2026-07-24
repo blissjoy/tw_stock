@@ -28,6 +28,7 @@ import argparse
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -40,17 +41,56 @@ from src.presentation import pipeline_status  # noqa: E402
 from src.screener.daily_screener import run_screen_and_store  # noqa: E402
 
 
-def fetch_today_twse(conn, date_str: str, stock_info_by_id: dict[str, dict]) -> bool:
-    """抓TWSE當天全市場批次資料並寫入conn，回傳是否有資料(True代表是交易日)。
+def fetch_today_twse(
+    conn, date_str: str, stock_info_by_id: dict[str, dict],
+    on_progress: Callable[[int, int], None] | None = None,
+) -> tuple[bool, bool]:
+    """抓TWSE當天股價並寫入conn。回傳(is_trading_day, is_intraday)：
+    - is_trading_day：是否抓到任何股價資料(不論是否已收盤)，False代表非交易日或兩個
+      來源都失敗。
+    - is_intraday：True代表這批股價來自yfinance的盤中即時價備援，還不是官方最終收盤價。
 
-    stock_info_by_id: {stock_id: {"name":..., "industry":...}}，來自FinMind TaiwanStockInfo，
-    用來讓stocks表存真實公司名稱／產業別，而不是用stock_id頂替name（此前的bug：TWSE官方端點
-    回應本身雖有股票名稱欄位，但twse_client的parse函式沒有取用，這裡改用FinMind的名單補上；
-    查不到的代號(FinMind名單可能不是100%涵蓋)才退回用代號本身當name）。
+    優先嘗試TWSE官方「每日收盤行情」(MI_INDEX)端點——這是收盤後才會公布的最終定案數字，
+    可靠性最高；但官方端點在收盤前查詢一律回傳空(已用真實請求驗證過，見ai/PLAN.md)。查無
+    官方資料時改用yfinance批次下載盤中即時價當備援(比照fetch_today_tpex()既有的做法)，
+    讓「手動抓取」按鈕在盤中也能拿到資料做即時訊號判斷——代價是拿到的是還在變動的當下
+    價格，不是最終收盤價，數字可能在收盤前反覆changed。呼叫端(run_daily_pipeline)會把
+    is_intraday寫進daily_data_status表，兩個前端UI依此顯示「尚未收盤」提示。
+
+    stock_info_by_id: {stock_id: {"name":..., "industry":..., "market":...}}，來自FinMind
+    TaiwanStockInfo，一律用來讓stocks表存真實公司名稱／產業別（此前的bug：TWSE官方端點
+    回應本身雖有股票名稱欄位，但twse_client的parse函式沒有取用，這裡改用FinMind的名單
+    補上）；yfinance備援路徑還額外需要它篩出「market=TWSE且是純4碼普通股」的股票清單
+    (yfinance沒有股票清單這種基本資料，必須另外提供要下載哪些代號)。
+    on_progress：官方端點成功時是單一請求，直接回報(1,1)；yfinance備援路徑則逐批次
+    回報(見src/data/yfinance_client.py的fetch_prices_batch())。
     """
     prices = twse_client.fetch_stock_prices(date_str)
-    if not prices:
-        return False
+    is_intraday = False
+
+    if prices:
+        if on_progress is not None:
+            on_progress(1, 1)
+    else:
+        twse_ids = [
+            sid for sid, info in stock_info_by_id.items()
+            if info.get("market") == "TWSE" and STOCK_CODE_PATTERN.match(sid)
+        ]
+        if not twse_ids:
+            return False, False
+
+        iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        next_day = (date.fromisoformat(iso_date) + timedelta(days=1)).isoformat()
+        try:
+            prices_by_stock = yfinance_client.fetch_twse_prices_batch(twse_ids, iso_date, next_day, on_progress=on_progress)
+        except Exception as exc:  # noqa: BLE001 - 備援下載失敗不應該讓整條pipeline中斷
+            print(f"[TWSE/yfinance備援] 批次下載失敗：{exc}")
+            return False, False
+        if not prices_by_stock:
+            return False, False
+        prices = [row for rows in prices_by_stock.values() for row in rows]
+        is_intraday = True
+
     institutional = twse_client.fetch_institutional_investors(date_str)
     margin = twse_client.fetch_margin_trading(date_str)
 
@@ -69,10 +109,12 @@ def fetch_today_twse(conn, date_str: str, stock_info_by_id: dict[str, dict]) -> 
         storage.upsert_institutional_investors(conn, institutional)
     if margin:
         storage.upsert_margin_trading(conn, margin)
-    return True
+    return True, is_intraday
 
 
-def fetch_today_tpex(conn, date_str: str, stock_info: list[dict]) -> int:
+def fetch_today_tpex(
+    conn, date_str: str, stock_info: list[dict], on_progress: Callable[[int, int], None] | None = None,
+) -> int:
     """批次抓TPEx普通股股價當天增量資料，回傳成功更新的股票數。
 
     ⚠️ **改用yfinance批次下載(2026-07-23)**：原本透過FinMind逐股抓取(~640檔各自一次
@@ -97,7 +139,9 @@ def fetch_today_tpex(conn, date_str: str, stock_info: list[dict]) -> int:
     next_day = (date.fromisoformat(iso_date) + timedelta(days=1)).isoformat()
 
     try:
-        prices_by_stock = yfinance_client.fetch_tpex_prices_batch(list(info_by_id.keys()), iso_date, next_day)
+        prices_by_stock = yfinance_client.fetch_tpex_prices_batch(
+            list(info_by_id.keys()), iso_date, next_day, on_progress=on_progress,
+        )
     except Exception as exc:  # noqa: BLE001 - 整批下載失敗不應該讓整條pipeline中斷
         print(f"[TPEx/yfinance] 批次下載失敗，本次TPEx更新整批略過：{exc}")
         return 0
@@ -115,12 +159,16 @@ def fetch_today_tpex(conn, date_str: str, stock_info: list[dict]) -> int:
 
 def run_daily_pipeline(
     conn, date_str: str | None = None, min_days: int = 60, dry_run: bool = False, skip_tpex: bool = False,
+    on_progress: Callable[[str, int, int], None] | None = None,
 ) -> list[dict]:
     """核心orchestration，刻意與「conn是Turso還是本機sqlite」無關，方便測試與dry-run重用。
 
     開始/結束時會寫入`data/pipeline_status.json`（見`src/presentation/pipeline_status.py`），
     不管是Windows工作排程器排程觸發、還是PySide6桌面版的手動抓取按鈕呼叫，都是同一個進入點、
     同一份狀態檔，桌面版UI只需要輪詢這個檔案就能顯示「目前正在自動跑」，不用另外設計通知機制。
+
+    on_progress(stage, done, total)：stage是"TWSE"或"TPEx"，在對應的批次下載過程中被呼叫，
+    供呼叫端顯示下載進度(例如桌面版狀態列顯示「TPEx 500/1980」)。
     """
     storage.ensure_schema(conn)
 
@@ -135,14 +183,26 @@ def run_daily_pipeline(
         stock_info = finmind_client.fetch_stock_info()
         stock_info_by_id = {r["stock_id"]: r for r in stock_info}
 
-        is_trading_day = fetch_today_twse(conn, date_str, stock_info_by_id)
+        is_trading_day, is_intraday = fetch_today_twse(
+            conn, date_str, stock_info_by_id,
+            on_progress=(lambda done, total: on_progress("TWSE", done, total)) if on_progress else None,
+        )
         if not is_trading_day:
-            print(f"{iso_date} TWSE無資料，判定為非交易日，跳過選股與通知。")
+            print(f"{iso_date} TWSE官方收盤資料與yfinance盤中備援都查無資料，判定為非交易日，跳過選股與通知。")
             pipeline_status.write_status("done", date=iso_date, candidate_count=0, note="非交易日")
             return []
 
+        storage.upsert_daily_data_status(conn, iso_date, is_intraday)
+        if is_intraday:
+            # 注意：這裡刻意不用⚠這類emoji/特殊符號——Windows主控台預設編碼(cp950)無法
+            # 編碼這個字元，會直接讓print()丟UnicodeEncodeError整個中斷排程(已實測踩過)。
+            print(f"注意：{iso_date} TWSE尚未收盤，本次使用yfinance盤中即時價，收盤後建議重新抓取一次取得最終數字。")
+
         if not skip_tpex:
-            tpex_count = fetch_today_tpex(conn, date_str, stock_info)
+            tpex_count = fetch_today_tpex(
+                conn, date_str, stock_info,
+                on_progress=(lambda done, total: on_progress("TPEx", done, total)) if on_progress else None,
+            )
             print(f"TPEx：{tpex_count} 檔成功更新")
 
         candidates = run_screen_and_store(conn, iso_date=iso_date, min_days=min_days)
@@ -189,7 +249,13 @@ def main() -> None:
         from src.data import turso_client
         conn = turso_client.get_connection()
 
-    run_daily_pipeline(conn, date_str=args.date, min_days=args.min_days, dry_run=args.dry_run, skip_tpex=args.skip_tpex)
+    def _print_progress(stage: str, done: int, total: int) -> None:
+        print(f"  {stage} 下載進度：{done}/{total}")
+
+    run_daily_pipeline(
+        conn, date_str=args.date, min_days=args.min_days, dry_run=args.dry_run, skip_tpex=args.skip_tpex,
+        on_progress=_print_progress,
+    )
     conn.close()
 
 

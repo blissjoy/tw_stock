@@ -174,7 +174,7 @@ def main() -> None:
         st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
         if candidate_dates else None
     )
-    candidates_df, latest_date = load_candidates_for_date(conn, target_date=selected_date)
+    candidates_df, latest_date, is_intraday = load_candidates_for_date(conn, target_date=selected_date)
     candidates_df = apply_candidate_filters(conn, candidates_df, active_filters)
 
     selected_stock_id = None
@@ -182,6 +182,8 @@ def main() -> None:
         st.info("目前 Turso 資料庫裡還沒有任何每日選股紀錄，點上方「立即重新篩選」或等 GitHub Actions 排程跑完後就會顯示。")
     else:
         st.subheader(f"候選清單（{latest_date}，共 {len(candidates_df)} 檔）")
+        if is_intraday:
+            st.markdown("**:red[⚠ 尚未收盤，本頁為盤中即時資料，收盤後數字可能改變]**")
         if candidates_df.empty:
             st.write("這一天沒有符合條件的候選股。")
         else:

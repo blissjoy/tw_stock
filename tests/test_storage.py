@@ -2,11 +2,13 @@ import sqlite3
 
 from src.data.storage import (
     delete_daily_candidates_for_date,
+    get_daily_data_status,
     init_db,
     is_fetched,
     mark_fetched,
     upsert_broker_chips,
     upsert_daily_candidates,
+    upsert_daily_data_status,
     upsert_institutional_investors,
     upsert_margin_trading,
     upsert_securities_traders,
@@ -143,3 +145,23 @@ def test_delete_daily_candidates_for_date_is_noop_when_nothing_to_delete():
     delete_daily_candidates_for_date(conn, "2026-07-22")  # 不應該拋出例外
     count = conn.execute("SELECT COUNT(*) FROM daily_candidates").fetchone()[0]
     assert count == 0
+
+
+def test_get_daily_data_status_returns_none_when_no_record():
+    conn = _fresh_db()
+    assert get_daily_data_status(conn, "2026-07-24") is None
+
+
+def test_upsert_daily_data_status_round_trips_intraday_flag():
+    conn = _fresh_db()
+    upsert_daily_data_status(conn, "2026-07-24", is_intraday=True)
+    assert get_daily_data_status(conn, "2026-07-24") is True
+
+
+def test_upsert_daily_data_status_overwrites_previous_value_for_same_date():
+    """同一天先在盤中抓一次(is_intraday=True)、收盤後再抓一次(is_intraday=False)，
+    第二次應該覆蓋掉第一次的flag，不是疊加或保留舊值。"""
+    conn = _fresh_db()
+    upsert_daily_data_status(conn, "2026-07-24", is_intraday=True)
+    upsert_daily_data_status(conn, "2026-07-24", is_intraday=False)
+    assert get_daily_data_status(conn, "2026-07-24") is False

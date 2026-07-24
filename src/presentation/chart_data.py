@@ -95,9 +95,15 @@ def list_candidate_dates(conn) -> list[str]:
     return [row[0] for row in cur.fetchall()]
 
 
-def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.DataFrame, str | None]:
-    """回傳 (指定日期的候選清單DataFrame, 該日期字串)；target_date為None時取最新一天。
-    尚無任何紀錄(或指定日期查無資料)時回傳(空DataFrame, 對應日期字串或None)。
+def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.DataFrame, str | None, bool]:
+    """回傳 (指定日期的候選清單DataFrame, 該日期字串, is_intraday)；target_date為None時
+    取最新一天。尚無任何紀錄(或指定日期查無資料)時回傳(空DataFrame, 對應日期字串或None, False)。
+
+    is_intraday：這天的資料是否來自yfinance盤中即時價備援(True)而非TWSE官方最終收盤價
+    (False)，讀daily_data_status表(見schema.sql與scripts/daily_pipeline.py的
+    fetch_today_twse())；查無紀錄(例如這個功能上線前就有的歷史資料)一律視為False，不
+    特別標示。呼叫端(兩個前端)依此顯示「尚未收盤」提示，讓使用者知道這天的訊號可能還會
+    隨收盤價格微調而改變。
 
     同一檔股票如果同時符合多條規則(daily_candidates裡有多筆同stock_id、不同signal_name
     的紀錄，例如同時觸發R-TREND-14跟R-SCREEN-15)，這裡會合併成一列顯示，不是一條規則
@@ -121,7 +127,11 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
     if target_date is None:
         target_date = conn.execute("SELECT MAX(date) FROM daily_candidates").fetchone()[0]
         if target_date is None:
-            return pd.DataFrame(), None
+            return pd.DataFrame(), None, False
+
+    status_row = conn.execute("SELECT is_intraday FROM daily_data_status WHERE date = ?", (target_date,)).fetchone()
+    is_intraday = bool(status_row[0]) if status_row is not None else False
+
     cur = conn.execute(
         """
         SELECT dc.stock_id, s.name, dc.signal_name, dc.entry_price, dc.stop_loss,
@@ -139,7 +149,7 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
     columns = [d[0] for d in cur.description]
     raw_df = pd.DataFrame(cur.fetchall(), columns=columns)
     if raw_df.empty:
-        return raw_df, target_date
+        return raw_df, target_date, is_intraday
 
     raw_df["pct_change"] = (raw_df["today_close"] - raw_df["prev_close"]) / raw_df["prev_close"] * 100
 
@@ -157,7 +167,7 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
         })
     merged_df = pd.DataFrame(merged_rows, columns=["stock_id", "name", "signal_name", "entry_price", "stop_loss", "pct_change", "volume"])
     merged_df = merged_df.sort_values("stock_id").reset_index(drop=True)
-    return merged_df, target_date
+    return merged_df, target_date, is_intraday
 
 
 def resolve_stock_id(conn, query: str) -> str | None:

@@ -56,6 +56,7 @@ class PipelineWorker(QThread):
 
     finished_ok = Signal(int)
     failed = Signal(str)
+    progress = Signal(str, int, int)  # (stage："TWSE"或"TPEx", 已處理檔數, 總檔數)
 
     def run(self) -> None:
         from scripts.daily_pipeline import run_daily_pipeline
@@ -63,7 +64,10 @@ class PipelineWorker(QThread):
         conn = None
         try:
             conn = get_default_connection()
-            candidates = run_daily_pipeline(conn, dry_run=False)
+            candidates = run_daily_pipeline(
+                conn, dry_run=False,
+                on_progress=lambda stage, done, total: self.progress.emit(stage, done, total),
+            )
             self.finished_ok.emit(len(candidates))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -139,6 +143,11 @@ class MainWindow(QMainWindow):
         top_bar.addStretch()
         top_bar.addWidget(self.status_label)
         root_layout.addLayout(top_bar)
+
+        self.intraday_label = QLabel("⚠ 尚未收盤，本頁為盤中即時資料，收盤後數字可能改變")
+        self.intraday_label.setStyleSheet("color: red; font-weight: bold;")
+        self.intraday_label.setVisible(False)
+        root_layout.addWidget(self.intraday_label)
 
         splitter = QSplitter()
         splitter.setOrientation(Qt.Orientation.Vertical)
@@ -267,10 +276,11 @@ class MainWindow(QMainWindow):
         if self.conn is None:
             return
         target_date = self.date_combo.currentText() or None
-        df, latest_date = chart_data.load_candidates_for_date(self.conn, target_date=target_date)
+        df, latest_date, is_intraday = chart_data.load_candidates_for_date(self.conn, target_date=target_date)
         active_filters = [label for label, cb in self.filter_checkboxes.items() if cb.isChecked()]
         df = chart_data.apply_candidate_filters(self.conn, df, active_filters)
         self.candidates_table.setRowCount(0)
+        self.intraday_label.setVisible(is_intraday)
         if latest_date is None:
             self.setWindowTitle("台股每日選股（本機版）— 尚無候選清單")
             return
@@ -427,7 +437,11 @@ class MainWindow(QMainWindow):
         self._pipeline_worker = PipelineWorker()
         self._pipeline_worker.finished_ok.connect(self._on_fetch_finished)
         self._pipeline_worker.failed.connect(self._on_fetch_failed)
+        self._pipeline_worker.progress.connect(self._on_fetch_progress)
         self._pipeline_worker.start()
+
+    def _on_fetch_progress(self, stage: str, done: int, total: int) -> None:
+        self.status_label.setText(f"狀態：抓取中...{stage} {done}/{total}檔")
 
     def _on_fetch_finished(self, candidate_count: int) -> None:
         self.fetch_btn.setEnabled(True)
@@ -444,6 +458,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _poll_pipeline_status(self) -> None:
+        # 如果本視窗自己觸發的PipelineWorker正在跑，狀態列已經由_on_fetch_progress()顯示
+        # 更細緻的下載進度(例如「TPEx 500/1980檔」)，這裡就不要每5秒用pipeline_status.json
+        # 的籠統「目前正在自動抓取資料…」蓋過去——這個輪詢機制主要是給「排程觸發、桌面版
+        # 剛好開著」的情境用的，跟本視窗自己觸發的抓取搶著更新同一個label沒有意義。
+        if self._pipeline_worker is not None and self._pipeline_worker.isRunning():
+            return
         status = pipeline_status.read_status()
         if status is None:
             self.status_label.setText("狀態：閒置")

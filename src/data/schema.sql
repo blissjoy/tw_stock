@@ -118,3 +118,15 @@ CREATE TABLE IF NOT EXISTS daily_candidates (
     PRIMARY KEY (date, stock_id, signal_name)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_candidates_date ON daily_candidates(date);
+
+-- 每日資料來源狀態：is_intraday=1代表當天資料來自盤中即時價(TWSE官方「每日收盤行情」端點
+-- 收盤前查詢會是空的，改用yfinance批次下載的盤中即時價當備援，見scripts/daily_pipeline.py
+-- 的fetch_today_twse())，還不是官方最終定案的收盤價；=0代表已經是官方收盤後的最終數字。
+-- 兩個前端的候選清單UI依這個flag顯示「尚未收盤」提示，讓使用者知道這天的訊號可能還會隨
+-- 收盤價格微調而改變。同一天重新抓取(例如收盤後再按一次「手動抓取」)會依當時實際抓到的
+-- 來源覆蓋更新這個flag，是自我修正的，不需要另外清除舊紀錄。
+CREATE TABLE IF NOT EXISTS daily_data_status (
+    date            TEXT PRIMARY KEY,
+    is_intraday     INTEGER NOT NULL,
+    updated_at      TEXT NOT NULL
+);

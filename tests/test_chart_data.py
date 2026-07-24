@@ -20,9 +20,10 @@ def _fresh_conn():
 
 def test_load_candidates_for_date_returns_empty_when_no_records():
     conn = _fresh_conn()
-    df, latest_date = load_candidates_for_date(conn)
+    df, latest_date, is_intraday = load_candidates_for_date(conn)
     assert df.empty
     assert latest_date is None
+    assert is_intraday is False
 
 
 def test_load_candidates_for_date_defaults_to_most_recent_date():
@@ -33,12 +34,13 @@ def test_load_candidates_for_date_defaults_to_most_recent_date():
         {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": "測試", "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, latest_date = load_candidates_for_date(conn)
+    df, latest_date, is_intraday = load_candidates_for_date(conn)
     assert latest_date == "2026-07-22"
     assert len(df) == 1
     assert df.iloc[0]["stock_id"] == "2330"
     assert df.iloc[0]["name"] == "台積電"
     assert df.iloc[0]["signal_name"] == "R-TREND-14多頭短線進場"
+    assert is_intraday is False  # 沒有daily_data_status紀錄時預設視為已收盤
 
 
 def test_load_candidates_for_date_returns_specific_historical_date_when_given():
@@ -49,7 +51,7 @@ def test_load_candidates_for_date_returns_specific_historical_date_when_given():
         {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": "測試", "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, returned_date = load_candidates_for_date(conn, target_date="2026-07-21")
+    df, returned_date, _ = load_candidates_for_date(conn, target_date="2026-07-21")
 
     assert returned_date == "2026-07-21"
     assert len(df) == 1
@@ -63,7 +65,7 @@ def test_load_candidates_for_date_returns_empty_but_echoes_date_when_no_candidat
         {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, returned_date = load_candidates_for_date(conn, target_date="2026-07-23")
+    df, returned_date, _ = load_candidates_for_date(conn, target_date="2026-07-23")
 
     assert df.empty
     assert returned_date == "2026-07-23"  # 使用者選的日期本身仍要回傳，不是None
@@ -87,7 +89,7 @@ def test_load_candidates_for_date_merges_multiple_signals_for_same_stock_into_on
          "entry_price": 50.0, "stop_loss": 45.0, "note": "多頭架構＋攻擊量", "created_at": "2026-07-23T18:00:02"},
     ])
 
-    df, latest_date = load_candidates_for_date(conn)
+    df, latest_date, _ = load_candidates_for_date(conn)
 
     assert latest_date == "2026-07-23"
     assert len(df) == 2  # 2330合併成一列，1101單獨一列，總共2列不是3列
@@ -114,7 +116,7 @@ def test_load_candidates_for_date_computes_pct_change_and_volume_from_stock_pric
          "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, _ = load_candidates_for_date(conn)
+    df, _, _ = load_candidates_for_date(conn)
 
     row = df.iloc[0]
     assert row["volume"] == 8000
@@ -134,9 +136,39 @@ def test_load_candidates_for_date_pct_change_is_nan_when_no_prior_day_price():
          "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, _ = load_candidates_for_date(conn)
+    df, _, _ = load_candidates_for_date(conn)
 
     assert pd.isna(df.iloc[0]["pct_change"])
+
+
+def test_load_candidates_for_date_reports_intraday_true_when_status_flagged(monkeypatch):
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-24"}])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-24", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-24T10:00:00"},
+    ])
+    from src.data.storage import upsert_daily_data_status
+    upsert_daily_data_status(conn, "2026-07-24", is_intraday=True)
+
+    _, _, is_intraday = load_candidates_for_date(conn, target_date="2026-07-24")
+
+    assert is_intraday is True
+
+
+def test_load_candidates_for_date_reports_intraday_false_when_status_flagged_final():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-23"}])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-23T18:00:00"},
+    ])
+    from src.data.storage import upsert_daily_data_status
+    upsert_daily_data_status(conn, "2026-07-23", is_intraday=False)
+
+    _, _, is_intraday = load_candidates_for_date(conn, target_date="2026-07-23")
+
+    assert is_intraday is False
 
 
 def test_list_candidate_dates_returns_dates_descending():
