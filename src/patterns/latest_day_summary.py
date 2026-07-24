@@ -4,17 +4,22 @@
 下方顯示用。不重新實作任何底層判斷邏輯，只做組裝與整理。
 
 ⚠️ 範圍說明：candle_patterns_2.py 開頭已註明，「位於高檔/低檔」需要外部的趨勢位置模組
-（尚未實作），呼叫端可先傳全True的Series只看幾何型態——這裡沿用同樣做法。也就是說，這裡
-判斷的是「型態的幾何條件是否成立」，不是「確認真的發生在高檔或低檔」，摘要文字會清楚
-標註這一點，避免看起來像是完整的高低檔位置判斷。
+（尚未實作，指的是is_at_high/is_at_low這種「趨勢的哪個階段」的細緻判斷），呼叫端可先傳
+全True的Series只看幾何型態——這裡沿用同樣做法。也就是說，這裡判斷的是「型態的幾何條件是否
+成立」，不是「確認真的發生在高檔或低檔」，摘要文字會清楚標註這一點，避免看起來像是完整的
+高低檔位置判斷。
 
-也刻意只挑選書中最常被提及、且不需要外部趨勢狀態(is_bull_trend等由選股/趨勢判定模組
-才能提供的輸入)就能單純從OHLCV算出的規則子集，不是246條規則的全自動化。
+也刻意只挑選書中最常被提及、且不需要「趨勢位置」就能單純從OHLCV算出的規則子集，不是246條
+規則的全自動化。趨勢方向(多頭/空頭/盤整，跟「趨勢位置」是不同層次的判斷)2026-07-24已經
+接上`src.patterns.trend_state.classify_trend_state()`(串接R-TREND-01轉折點取點+
+R-TREND-03/04頭頭高底底高/頭頭低底底低判定)，摘要的`trend`欄位就是這裡算出來的。
 """
 
 from __future__ import annotations
 
 import pandas as pd
+
+from src.patterns.trend_state import classify_trend_state
 
 from src.indicators.candle_patterns_2 import (
     basic_reversal_at_high,
@@ -194,12 +199,14 @@ def detect_latest_day_volume_signals(df: pd.DataFrame) -> list[str]:
 
 def summarize_latest_day(df: pd.DataFrame) -> dict:
     """整理成儀表板要顯示的摘要dict：candle_name(單根K棒名稱)、patterns(型態清單)、
-    volume_signals(量價訊號清單)。df為空時回傳全空結果，不拋例外。
+    volume_signals(量價訊號清單)、trend(今天的多頭/空頭/盤整趨勢狀態)。df為空時回傳
+    全空結果，不拋例外。
     """
     if df.empty:
-        return {"candle_name": None, "patterns": [], "volume_signals": []}
+        return {"candle_name": None, "patterns": [], "volume_signals": [], "trend": None}
     return {
         "candle_name": classify_latest_candle_name(df),
         "patterns": detect_latest_day_candle_patterns(df),
         "volume_signals": detect_latest_day_volume_signals(df),
+        "trend": classify_trend_state(df["high"], df["low"], df["close"]),
     }

@@ -151,6 +151,7 @@ def main() -> None:
         summary = latest_day_summary.summarize_latest_day(price_df)
         latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
         st.markdown(f"**📋 最新交易日分析（{latest_date_label}）**")
+        st.write(f"目前趨勢：{summary['trend']}（頭頭高底底高/頭頭低底底低判定，見R-TREND-03/04）")
         st.write(f"K棒名稱：{summary['candle_name']}")
         st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
         st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))

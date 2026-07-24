@@ -116,10 +116,10 @@ def test_detect_latest_day_volume_signals_empty_when_too_short():
 
 def test_summarize_latest_day_returns_empty_structure_for_empty_df():
     result = summarize_latest_day(pd.DataFrame())
-    assert result == {"candle_name": None, "patterns": [], "volume_signals": []}
+    assert result == {"candle_name": None, "patterns": [], "volume_signals": [], "trend": None}
 
 
-def test_summarize_latest_day_combines_all_three_parts():
+def test_summarize_latest_day_combines_all_parts():
     rows = [_flat_row(100.0) for _ in range(5)] + [
         {"open": 100.0, "high": 115.0, "low": 95.0, "close": 107.0, "volume": 1300},
     ]
@@ -128,3 +128,4 @@ def test_summarize_latest_day_combines_all_three_parts():
     assert result["candle_name"] == "長紅K"
     assert isinstance(result["patterns"], list)
     assert isinstance(result["volume_signals"], list)
+    assert result["trend"] in ("多頭", "空頭", "盤整")
