@@ -47,7 +47,7 @@ from src.indicators.macd import compute_macd, macd_zero_axis_bear_signal, macd_z
 from src.indicators.moving_average import compute_ma_set, is_bearish_aligned, is_bullish_aligned, is_ma_converged, is_ma_tangled, sma
 from src.indicators.rsi import rsi, rsi_overbought_oversold_signal, rsi_short_long_cross_signal
 from src.indicators.volume_price import basic_volume, is_accumulation_volume
-from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_state
+from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_states_multi_horizon
 
 MIN_DAYS = 30  # 均線/MACD/KD/RSI/布林通道都需要暖身天數，資料不足就整批不評估(不逐一判斷各自門檻)
 
@@ -128,16 +128,22 @@ def scan_golden_tier(df: pd.DataFrame) -> list[dict]:
     if _last_bool(bollinger_sell_signal_3(close, bb["mid"], bb["lower"])):
         add("R-INDICATOR-23", "股價在中軌與下軌間向下運行，空頭市場持續做空")
 
-    # --- 趨勢狀態(第二階段：接上src/patterns/trend_state.py的簡易多頭/空頭/盤整分類器) ---
-    # trend_series用「今天」單一分類值填滿整個index：底下這幾個函式都是逐列比較
-    # trend=="多頭"/"空頭"，只有.iloc[-1]會被讀取(見_last_bool/_last_text)，不需要
-    # 逐日皆準確的趨勢序列，用常數Series填滿即可，不必為此另外把trend_state改寫成
-    # 逐日輸出版本。
-    trend_today = classify_trend_state(high, low, close)
-    if trend_today == TREND_BULL:
-        add("R-TREND-03", "頭頭高且底底高，多頭趨勢成立")
-    elif trend_today == TREND_BEAR:
-        add("R-TREND-04", "頭頭低且底底低，空頭趨勢成立")
+    # --- 趨勢狀態(第二階段：接上src/patterns/trend_state.py的多頭/空頭/盤整分類器) ---
+    # 依R-TREND-01書中定義的短(MA5)/中(MA10)/長(MA20)三種天期分別判斷、分別回報——用單一
+    # 天期代表「大趨勢」太草率(例如短線走空、長線仍是多頭很常見)，三者可能不一致，UI要
+    # 讓使用者看到全部三種，不是只挑一種。
+    trend_horizons = classify_trend_states_multi_horizon(high, low, close)
+    for label, (n, trend) in trend_horizons.items():
+        if trend == TREND_BULL:
+            add("R-TREND-03", f"{label}(MA{n}轉折波)：頭頭高且底底高，多頭趨勢成立")
+        elif trend == TREND_BEAR:
+            add("R-TREND-04", f"{label}(MA{n}轉折波)：頭頭低且底底低，空頭趨勢成立")
+
+    # 下面幾條依賴trend的規則(R-MA-15/KD依趨勢判讀/布林通道訊號①②)書中沒有另外要求區分
+    # 短中長天期，沿用短線(MA5)天期即可，跟本專案其他規則(R-TREND-14等)慣用的短線框架一致；
+    # trend_series用「今天」單一分類值填滿整個index，這幾個函式都只會讀.iloc[-1]
+    # (見_last_bool/_last_text)，不需要逐日皆準確的趨勢序列。
+    trend_today = trend_horizons["短線"][1]
 
     if golden_today or death_today:
         cross_event = "黃金交叉" if golden_today else "死亡交叉"

@@ -128,4 +128,11 @@ def test_summarize_latest_day_combines_all_parts():
     assert result["candle_name"] == "長紅K"
     assert isinstance(result["patterns"], list)
     assert isinstance(result["volume_signals"], list)
-    assert result["trend"] in ("多頭", "空頭", "盤整")
+    # trend是短/中/長三種天期各自的判斷結果(見trend_state.classify_trend_states_multi_horizon)，
+    # 不是單一字串
+    assert set(result["trend"].keys()) == {"短線", "中線", "長線"}
+    assert result["trend"]["短線"].n == 5
+    assert result["trend"]["中線"].n == 10
+    assert result["trend"]["長線"].n == 20
+    for horizon in result["trend"].values():
+        assert horizon.trend in ("多頭", "空頭", "盤整")

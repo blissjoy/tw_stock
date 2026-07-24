@@ -151,7 +151,13 @@ def main() -> None:
         summary = latest_day_summary.summarize_latest_day(price_df)
         latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
         st.markdown(f"**📋 最新交易日分析（{latest_date_label}）**")
-        st.write(f"目前趨勢：{summary['trend']}（頭頭高底底高/頭頭低底底低判定，見R-TREND-03/04）")
+        # 短/中/長三種天期分開顯示、各自標示判斷依據的均線天期(見R-TREND-01：轉折波取點
+        # 演算法5/10/20日短中長線)，不合併成單一「目前趨勢」——三者可能不一致(例如短線
+        # 走空、長線仍是多頭)，只看一種天期容易誤判。
+        trend_text = "　".join(
+            f"{label}(MA{n})：{trend}" for label, (n, trend) in summary["trend"].items()
+        )
+        st.write(f"目前趨勢：{trend_text}")
         st.write(f"K棒名稱：{summary['candle_name']}")
         st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
         st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))

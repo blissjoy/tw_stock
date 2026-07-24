@@ -2,7 +2,7 @@ import pandas as pd
 
 import src.patterns.trend_state as trend_state
 from src.indicators.pivots import TurningPoint
-from src.patterns.trend_state import classify_trend_state
+from src.patterns.trend_state import TREND_HORIZONS, classify_trend_state, classify_trend_states_multi_horizon
 
 
 def _fake_points(pairs):
@@ -81,3 +81,47 @@ def test_classify_trend_state_smoke_test_does_not_crash_on_realistic_data():
     result = classify_trend_state(high, low, close)
 
     assert result in ("多頭", "空頭", "盤整")
+
+
+def test_classify_trend_states_multi_horizon_calls_each_period_with_correct_n(monkeypatch):
+    """確認短/中/長三個天期分別用R-TREND-01書中定義的5/10/20日呼叫classify_trend_state，
+    這是使用者要求「要標示是以MA多少來判斷」的依據來源。"""
+    captured_ns = []
+
+    def _fake_classify(h, l, c, n=5):
+        captured_ns.append(n)
+        return f"trend-n{n}"
+
+    monkeypatch.setattr(trend_state, "classify_trend_state", _fake_classify)
+    close = pd.Series([100.0])
+
+    result = classify_trend_states_multi_horizon(close, close, close)
+
+    assert captured_ns == [5, 10, 20]
+    assert result["短線"] == (5, "trend-n5")
+    assert result["中線"] == (10, "trend-n10")
+    assert result["長線"] == (20, "trend-n20")
+
+
+def test_classify_trend_states_multi_horizon_can_disagree_across_periods(monkeypatch):
+    """短線走空、長線仍是多頭這種不一致的情境，三個天期應該各自獨立算出結果，
+    不會被互相覆蓋——這正是使用者要求分開顯示短/中/長趨勢的核心理由。"""
+    def _fake_turning_points(h, l, c, n=5):
+        if n == 5:
+            return _fake_points([("head", 110), ("bottom", 100), ("head", 105), ("bottom", 95)])  # 空頭
+        return _fake_points([("bottom", 90), ("head", 100), ("bottom", 95), ("head", 105)])  # 多頭
+
+    monkeypatch.setattr(trend_state, "compute_turning_points", _fake_turning_points)
+    close = pd.Series([100.0])
+
+    result = classify_trend_states_multi_horizon(close, close, close)
+
+    assert result["短線"].trend == "空頭"
+    assert result["中線"].trend == "多頭"
+    assert result["長線"].trend == "多頭"
+
+
+def test_trend_horizons_matches_book_defined_periods():
+    """R-TREND-01書中明確定義短線=5日、中線=10日、長線=20日，這組對應關係不應該被
+    誤改成其他數字。"""
+    assert TREND_HORIZONS == {"短線": 5, "中線": 10, "長線": 20}

@@ -11,15 +11,18 @@
 
 也刻意只挑選書中最常被提及、且不需要「趨勢位置」就能單純從OHLCV算出的規則子集，不是246條
 規則的全自動化。趨勢方向(多頭/空頭/盤整，跟「趨勢位置」是不同層次的判斷)2026-07-24已經
-接上`src.patterns.trend_state.classify_trend_state()`(串接R-TREND-01轉折點取點+
-R-TREND-03/04頭頭高底底高/頭頭低底底低判定)，摘要的`trend`欄位就是這裡算出來的。
+接上`src.patterns.trend_state.classify_trend_states_multi_horizon()`(串接R-TREND-01
+轉折點取點+R-TREND-03/04頭頭高底底高/頭頭低底底低判定)，摘要的`trend`欄位就是這裡算出
+來的——⚠️ 依使用者要求分成短(MA5)/中(MA10)/長(MA20)三種天期分別判斷，不是單一數字，因為
+用單一天期代表「大趨勢」太草率(例如短線走空、長線仍是多頭這種常見情境，只看一種天期會
+誤導)。
 """
 
 from __future__ import annotations
 
 import pandas as pd
 
-from src.patterns.trend_state import classify_trend_state
+from src.patterns.trend_state import classify_trend_states_multi_horizon
 
 from src.indicators.candle_patterns_2 import (
     basic_reversal_at_high,
@@ -199,8 +202,9 @@ def detect_latest_day_volume_signals(df: pd.DataFrame) -> list[str]:
 
 def summarize_latest_day(df: pd.DataFrame) -> dict:
     """整理成儀表板要顯示的摘要dict：candle_name(單根K棒名稱)、patterns(型態清單)、
-    volume_signals(量價訊號清單)、trend(今天的多頭/空頭/盤整趨勢狀態)。df為空時回傳
-    全空結果，不拋例外。
+    volume_signals(量價訊號清單)、trend(今天短/中/長三種天期各自的多頭/空頭/盤整趨勢
+    狀態，見trend_state.classify_trend_states_multi_horizon()——不是單一數字，短/中/長
+    可能不一致，例如短線走空但長線仍是多頭)。df為空時回傳全空結果，不拋例外。
     """
     if df.empty:
         return {"candle_name": None, "patterns": [], "volume_signals": [], "trend": None}
@@ -208,5 +212,5 @@ def summarize_latest_day(df: pd.DataFrame) -> dict:
         "candle_name": classify_latest_candle_name(df),
         "patterns": detect_latest_day_candle_patterns(df),
         "volume_signals": detect_latest_day_volume_signals(df),
-        "trend": classify_trend_state(df["high"], df["low"], df["close"]),
+        "trend": classify_trend_states_multi_horizon(df["high"], df["low"], df["close"]),
     }
