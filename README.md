@@ -25,17 +25,23 @@ python desktop/main.py
 ```
 
 預設直接讀寫本機 `data/tw_stock.db`（不需要另外設定環境變數）。畫面上：
-- 候選清單表格：點選任一列即在下方載入該檔股票的K線圖；儲存格內容較長被截斷時，滑鼠移過去
-  會懸浮顯示完整文字（例如「備註」欄的規則命中說明）。
-- 個股查詢欄：輸入任意股票代號手動查詢。
-- K線圖可疊加均線(MA5/10/20/60/120/240)/切線軌道線/支撐壓力，皆可用勾選框個別切換顯示，
-  搭配下方最新交易日的K棒型態與量價訊號分析。滑鼠移到圖表上會顯示淡灰色十字線（貫穿價格圖
-  與成交量圖），左上角動態顯示滑鼠對應K棒的日期/OHLC/成交量，取代預設會跟著滑鼠跑的浮動
-  提示框，仿TradingView超級圖表的畫法（`desktop/chart_render.py`；這個完整效果只有桌面版
-  才有，Streamlit版因為渲染架構限制沒有對應機制）。
+- 候選清單表格（股票代號/名稱/產業別/訊號(信心%)/進場價/停損價/漲跌幅(%)/成交量）：可用
+  日期下拉選單切換查看歷史候選清單；點選任一列即在下方載入該檔股票的K線圖；儲存格內容較長
+  被截斷時，滑鼠移過去會懸浮顯示完整文字。若當天資料是盤中抓的(TWSE官方收盤資料還沒公布，
+  改用yfinance即時價備援，見下方排程說明)，表格上方會有紅色粗體「尚未收盤」提示。
+- 個股查詢欄：輸入股票代號或名稱皆可查詢。
+- K線圖可疊加均線(MA5/10/20/60/120/240)/切線軌道線/支撐壓力/MACD/KD，皆可用勾選框個別
+  切換顯示，搭配下方最新交易日的K棒型態與量價訊號分析，以及「📊 個股分析」面板(顯示這檔
+  股票目前符合規則庫中哪些訊號，依信心分數排序)。滑鼠移到圖表上會顯示淡灰色十字線（貫穿
+  價格圖與成交量圖），左上角動態顯示滑鼠對應K棒的日期/OHLC/成交量，取代預設會跟著滑鼠跑的
+  浮動提示框，仿TradingView超級圖表的畫法（`desktop/chart_render.py`；這個完整效果只有
+  桌面版才有，Streamlit版因為渲染架構限制沒有對應機制）。
 - 「🔄 立即重新篩選」：只用資料庫現有資料重算候選清單，幾秒內完成。
 - 「▶ 手動抓取今日資料」：背景執行緒抓取當天TWSE/TPEx資料並重新選股（跟下面的排程共用
-  同一份`run_daily_pipeline()`），右上角狀態列會顯示「目前正在自動抓取資料…」，不會卡住畫面。
+  同一份`run_daily_pipeline()`），下載過程中畫面右上角會顯示進度(例如「TPEx 500/1980檔」)，
+  不會卡住畫面。
+- 畫面右上角平時顯示「資料更新至：{DB裡最新一次成功寫入股價的時間}」；排程或手動抓取正在
+  執行時（不論是本視窗自己觸發、還是Windows工作排程器在背景觸發），會改顯示「🔄 更新中...」。
 
 ### Streamlit網頁版（可選）
 
@@ -44,8 +50,10 @@ LOCAL_DB_PATH=data/tw_stock_dev.db streamlit run dashboard/app.py
 ```
 
 功能跟桌面版相同（兩者共用`src/presentation/chart_data.py`的圖表資料組裝邏輯），差別只在
-UI框架；沒有「手動抓取今日資料」按鈕與自動排程狀態列，因為網頁版原本設計是給雲端部署後、
-多裝置檢視用的，本機開發時仍然可以用來快速驗證UI改動。
+UI框架——也有「▶ 手動抓取今日資料」按鈕(同步阻塞呼叫，按下去要等抓取跑完，用進度條顯示
+下載進度)跟右上角的「資料更新至/更新中」提示，本機開發時可以用來快速驗證UI改動；沒有的
+只有桌面版才有意義的「自動抓取正在背景執行、不卡住視窗」這個體驗差異(Streamlit本來就是
+每次互動整個腳本重跑一次的架構，沒有真正的「背景執行緒」概念)。
 
 若指向的 sqlite 檔案是全新的，畫面會自動建表但候選清單是空的；可以先跑
 `scripts/seed_turso_from_local.py`（把 `--local-db` 換成任一本機 sqlite 檔案，
@@ -73,23 +81,41 @@ python scripts/daily_pipeline.py --date 20260722 --local-db data/tw_stock.db
 
 ## 本機每日排程（Windows工作排程器）
 
-不依賴GitHub Actions，改用Windows工作排程器在本機每天固定時間自動執行，跟桌面版的
-「▶ 手動抓取今日資料」按鈕共用同一份`run_daily_pipeline()`，兩者都會更新
-`data/pipeline_status.json`，桌面版開著的話會顯示「目前正在自動抓取資料…」。
+不依賴GitHub Actions，改用Windows工作排程器在本機固定時間自動執行，跟兩個前端的
+「▶ 手動抓取今日資料」按鈕共用同一份`run_daily_pipeline()`，三者都會更新
+`data/pipeline_status.json`，桌面版開著的話右上角會顯示「🔄 更新中...」。
 
-用系統管理員權限開啟終端機，執行（範例排在台灣時間每天19:30，週一到週五）：
+2026-07-24起`fetch_today_twse()`改成官方「每日收盤行情」端點優先、查無資料(收盤前查詢
+一律如此)時退回yfinance批次下載盤中即時價當備援(見`scripts/daily_pipeline.py`)，所以
+盤中排程也能正常拿到資料、算出即時訊號，不會像之前一樣被誤判成「非交易日」。因此排程改成
+盤中每小時跑一次(9:00~13:00)取得即時訊號，收盤時間點(13:30)與收盤後一小時(14:30)各再
+加跑一次以盡快拿到官方最終收盤價(daily_data_status表會記錄某次結果是盤中即時價還是官方
+收盤價，兩個前端UI會標示「尚未收盤」)。
+
+用系統管理員權限開啟終端機，依序執行（台灣時間，週一到週五）：
 
 ```powershell
-schtasks /create /tn "tw_stock_daily_pipeline" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 19:30 /rl highest
+schtasks /create /tn "tw_stock_pipeline_0900" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 09:00 /rl highest
+schtasks /create /tn "tw_stock_pipeline_1000" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 10:00 /rl highest
+schtasks /create /tn "tw_stock_pipeline_1100" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 11:00 /rl highest
+schtasks /create /tn "tw_stock_pipeline_1200" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 12:00 /rl highest
+schtasks /create /tn "tw_stock_pipeline_1300" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:00 /rl highest
+schtasks /create /tn "tw_stock_pipeline_1330" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:30 /rl highest
+schtasks /create /tn "tw_stock_pipeline_1430" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:30 /rl highest
 ```
 
-或用工作排程器GUI（`taskschd.msc`）手動建立，時間點跟上面一致，並記得勾選：
+或用工作排程器GUI（`taskschd.msc`）手動建立7個工作，時間點跟上面一致，並記得每個都勾選：
 - 「觸發程序」頁籤 → 進階設定 → **「如果錯過排定的啟動時間，儘快執行工作」**（涵蓋電腦當時
   剛好關機的情況，開機後會自動補跑）。
 - 「一般」頁籤 → **「不論使用者登入與否均執行」**（背景執行，不需要停留在登入畫面）。
 
-建立後可以先用 `schtasks /run /tn "tw_stock_daily_pipeline"` 手動觸發一次驗證是否正常執行，
+建立後可以先用 `schtasks /run /tn "tw_stock_pipeline_0900"` 手動觸發一次驗證是否正常執行，
 執行紀錄可以在工作排程器的「記錄」頁籤查看，或直接開啟`data/pipeline_status.json`確認。
+之後若要移除，逐一用`schtasks /delete /tn "tw_stock_pipeline_0900" /f`（其餘6個同理）。
+
+⚠️ 每小時跑一次全市場批次下載(TWSE+TPEx合計約2000多檔)，實測約需1分鐘內，不會對
+TWSE/yfinance造成明顯負擔；但如果之後有更高頻率的需求(例如每15分鐘)，應該重新評估
+是否會被來源端限流，這裡先以「使用者本身盤中操作需要的頻率」為準，不做更激進的排程。
 
 **其他重點**：
 - **選股邏輯**：目前為 MVP 起點，只接上已用真實資料回測驗證過的 R-TREND-14（多頭短線選股與

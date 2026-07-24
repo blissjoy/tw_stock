@@ -6,6 +6,7 @@ from src.presentation.chart_data import (
     apply_candidate_filters,
     build_candlestick_figure,
     compute_ma_bullish_flags,
+    get_latest_update_time,
     list_candidate_dates,
     load_candidates_for_date,
     load_holidays_for_chart,
@@ -28,7 +29,7 @@ def test_load_candidates_for_date_returns_empty_when_no_records():
 
 def test_load_candidates_for_date_defaults_to_most_recent_date():
     conn = _fresh_conn()
-    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體", "updated_at": "2026-07-22"}])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-21", "stock_id": "2330", "signal_name": "舊訊號", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-21T18:00:00"},
         {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": "測試", "created_at": "2026-07-22T18:00:00"},
@@ -39,8 +40,23 @@ def test_load_candidates_for_date_defaults_to_most_recent_date():
     assert len(df) == 1
     assert df.iloc[0]["stock_id"] == "2330"
     assert df.iloc[0]["name"] == "台積電"
+    assert df.iloc[0]["industry"] == "半導體"
     assert df.iloc[0]["signal_name"] == "R-TREND-14多頭短線進場"
     assert is_intraday is False  # 沒有daily_data_status紀錄時預設視為已收盤
+
+
+def test_get_latest_update_time_returns_none_when_no_stocks():
+    conn = _fresh_conn()
+    assert get_latest_update_time(conn) is None
+
+
+def test_get_latest_update_time_returns_max_updated_at():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-24T09:00:00"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-24T10:00:00"},
+    ])
+    assert get_latest_update_time(conn) == "2026-07-24T10:00:00"
 
 
 def test_load_candidates_for_date_returns_specific_historical_date_when_given():

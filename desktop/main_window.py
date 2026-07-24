@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -154,8 +155,8 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(splitter)
 
         self.candidates_table = QTableWidget()
-        self.candidates_table.setColumnCount(7)
-        self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "訊號(信心%)", "進場價", "停損價", "漲跌幅(%)", "成交量"])
+        self.candidates_table.setColumnCount(8)
+        self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "產業別", "訊號(信心%)", "進場價", "停損價", "漲跌幅(%)", "成交量"])
         self.candidates_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.candidates_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.candidates_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -291,8 +292,9 @@ class MainWindow(QMainWindow):
             pct_text = f"{pct_change:+.2f}" if pd.notna(pct_change) else "-"
             volume = row["volume"]
             volume_text = f"{int(volume):,}" if pd.notna(volume) else "-"
+            industry_text = row["industry"] if pd.notna(row["industry"]) else ""
             values = [
-                row["stock_id"], row["name"], row["signal_name"],
+                row["stock_id"], row["name"], industry_text, row["signal_name"],
                 f"{row['entry_price']:.2f}", f"{row['stop_loss']:.2f}", pct_text, volume_text,
             ]
             for col_idx, value in enumerate(values):
@@ -447,6 +449,7 @@ class MainWindow(QMainWindow):
         self.fetch_btn.setEnabled(True)
         self._refresh_date_list()
         self._reload_candidates()
+        self._poll_pipeline_status()  # 立即刷新狀態列成「資料更新至：...」，不等下一次5秒輪詢
         QMessageBox.information(self, "完成", f"今日資料抓取完成，候選清單共{candidate_count}檔。")
 
     def _on_fetch_failed(self, message: str) -> None:
@@ -465,15 +468,27 @@ class MainWindow(QMainWindow):
         if self._pipeline_worker is not None and self._pipeline_worker.isRunning():
             return
         status = pipeline_status.read_status()
-        if status is None:
-            self.status_label.setText("狀態：閒置")
-            return
-        state = status.get("status")
-        date_label = status.get("date", "")
+        state = status.get("status") if status else None
         if state == "running":
-            self.status_label.setText(f"狀態：目前正在自動抓取資料…（{date_label}）")
-        elif state == "failed":
-            self.status_label.setText(f"狀態：上次抓取失敗（{date_label}）")
+            # 排程觸發(Windows工作排程器)剛好在桌面版開著的時候跑，這裡是唯一會顯示
+            # 「更新中」的路徑；本視窗自己按按鈕觸發的情況已經被上面的guard擋掉，改由
+            # _on_fetch_progress()顯示更細緻的下載進度。
+            date_label = status.get("date", "")
+            self.status_label.setText(f"🔄 更新中...（{date_label}）")
+            return
+        if state == "failed":
+            date_label = status.get("date", "")
+            self.status_label.setText(f"⚠ 上次抓取失敗（{date_label}）")
+            return
+
+        # 閒置狀態：顯示DB裡目前最新一次成功寫入股價的時間戳，比pipeline_status.json的
+        # 「date」欄位更精確(date只到日期、不含時分，看不出來是幾點抓的)。
+        latest_update = chart_data.get_latest_update_time(self.conn) if self.conn is not None else None
+        if latest_update:
+            try:
+                formatted = datetime.fromisoformat(latest_update).strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                formatted = latest_update
+            self.status_label.setText(f"資料更新至：{formatted}")
         else:
-            count = status.get("candidate_count", "?")
-            self.status_label.setText(f"狀態：閒置（上次更新 {date_label}，{count}檔候選）")
+            self.status_label.setText("狀態：尚無資料")

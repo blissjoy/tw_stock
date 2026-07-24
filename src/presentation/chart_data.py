@@ -95,6 +95,17 @@ def list_candidate_dates(conn) -> list[str]:
     return [row[0] for row in cur.fetchall()]
 
 
+def get_latest_update_time(conn) -> str | None:
+    """回傳stocks表裡最新的updated_at時間戳(ISO8601字串)，代表DB目前最新一次成功寫入
+    股價資料的時間——TWSE/TPEx兩條抓取路徑(scripts/daily_pipeline.py的fetch_today_twse/
+    fetch_today_tpex)每次成功抓到資料都會upsert_stocks()更新這個欄位，不管是盤中即時價
+    備援還是官方收盤價，都算數。查無任何股票資料回傳None。供兩個前端畫面右上角顯示
+    「資料更新至：...」用。
+    """
+    row = conn.execute("SELECT MAX(updated_at) FROM stocks").fetchone()
+    return row[0] if row is not None else None
+
+
 def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.DataFrame, str | None, bool]:
     """回傳 (指定日期的候選清單DataFrame, 該日期字串, is_intraday)；target_date為None時
     取最新一天。尚無任何紀錄(或指定日期查無資料)時回傳(空DataFrame, 對應日期字串或None, False)。
@@ -134,7 +145,7 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
 
     cur = conn.execute(
         """
-        SELECT dc.stock_id, s.name, dc.signal_name, dc.entry_price, dc.stop_loss,
+        SELECT dc.stock_id, s.name, s.industry, dc.signal_name, dc.entry_price, dc.stop_loss,
                sp.close AS today_close, sp.volume AS today_volume,
                (SELECT sp2.close FROM stock_prices sp2
                 WHERE sp2.stock_id = dc.stock_id AND sp2.date < dc.date
@@ -159,13 +170,14 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
         merged_rows.append({
             "stock_id": stock_id,
             "name": first["name"],
+            "industry": first["industry"],
             "signal_name": "\n".join(group["signal_name"]),
             "entry_price": first["entry_price"],
             "stop_loss": first["stop_loss"],
             "pct_change": first["pct_change"],
             "volume": first["today_volume"],
         })
-    merged_df = pd.DataFrame(merged_rows, columns=["stock_id", "name", "signal_name", "entry_price", "stop_loss", "pct_change", "volume"])
+    merged_df = pd.DataFrame(merged_rows, columns=["stock_id", "name", "industry", "signal_name", "entry_price", "stop_loss", "pct_change", "volume"])
     merged_df = merged_df.sort_values("stock_id").reset_index(drop=True)
     return merged_df, target_date, is_intraday
 

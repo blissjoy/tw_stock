@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -29,18 +30,21 @@ from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_FILTERS,
     apply_candidate_filters,
     build_candlestick_figure,
+    get_latest_update_time,
     list_candidate_dates,
     load_candidates_for_date,
     load_holidays_for_chart,
     load_price_history,
     resolve_stock_id,
 )
+from src.presentation import pipeline_status  # noqa: E402
 
 
 def main() -> None:
     import streamlit as st
     from streamlit.errors import StreamlitSecretNotFoundError
 
+    from scripts.daily_pipeline import run_daily_pipeline
     from src.data import storage
     from src.data.connection import get_default_connection
     from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store
@@ -152,8 +156,24 @@ def main() -> None:
         st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))
         st.caption("⚠️ 型態訊號僅判斷幾何條件是否成立，尚未確認是否位於真正的高檔/低檔位置（趨勢位置模組尚未實作）。")
 
-    st.title("📈 台股每日選股")
-    st.caption("資料來源：TWSE / TPEx(透過FinMind) — 每日收盤後自動更新")
+    title_col, status_col = st.columns([4, 1])
+    with title_col:
+        st.title("📈 台股每日選股")
+        st.caption("資料來源：TWSE / TPEx(透過FinMind) — 盤中每小時自動更新，收盤後取得最終數字")
+    with status_col:
+        pipeline_running = (pipeline_status.read_status() or {}).get("status") == "running"
+        if pipeline_running:
+            st.markdown("**:orange[🔄 更新中...]**")
+        else:
+            latest_update = get_latest_update_time(conn)
+            if latest_update:
+                try:
+                    formatted = datetime.fromisoformat(latest_update).strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    formatted = latest_update
+                st.caption(f"資料更新至\n{formatted}")
+            else:
+                st.caption("尚無資料")
 
     st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件）")
     filter_cols = st.columns(len(CANDIDATE_FILTERS))
@@ -162,12 +182,31 @@ def main() -> None:
         if col.checkbox(label, key=f"filter_{label}")
     ]
 
-    if st.button("🔄 立即重新篩選"):
-        # 只用資料庫裡目前已有的資料重算訊號，不重新對外抓取TWSE/TPEx資料(那個很慢，交給
-        # 每日排程做)，所以這個按鈕通常幾秒內就能算完，可以隨時按而不用擔心額度或等待。
-        with st.spinner("正在用目前資料庫裡的最新資料重新計算選股訊號..."):
-            run_screen_and_store(conn)
-        st.success("已重新計算完成，候選清單已更新。")
+    button_col1, button_col2 = st.columns([1, 1])
+    with button_col1:
+        if st.button("🔄 立即重新篩選"):
+            # 只用資料庫裡目前已有的資料重算訊號，不重新對外抓取TWSE/TPEx資料(那個很慢，
+            # 交給下面的手動抓取按鈕或排程做)，所以這個按鈕通常幾秒內就能算完，可以隨時按
+            # 而不用擔心額度或等待。
+            with st.spinner("正在用目前資料庫裡的最新資料重新計算選股訊號..."):
+                run_screen_and_store(conn)
+            st.success("已重新計算完成，候選清單已更新。")
+    with button_col2:
+        if st.button("▶ 手動抓取今日資料"):
+            # 跟桌面版「▶ 手動抓取今日資料」按鈕呼叫同一份run_daily_pipeline()，行為一致
+            # (含TWSE官方端點優先、收盤前查無資料時退回yfinance盤中即時價備援)。Streamlit
+            # 沒有背景執行緒機制，這裡是同步阻塞呼叫，按下去要等整個抓取跑完(TWSE+TPEx合計
+            # 實測約1分鐘內)才會回應，用進度條讓使用者知道還在跑、跑到哪裡，不是卡住。
+            progress_bar = st.progress(0.0, text="準備開始...")
+
+            def _on_progress(stage: str, done: int, total: int) -> None:
+                progress_bar.progress(done / total if total else 0.0, text=f"{stage} 下載進度：{done}/{total}檔")
+
+            with st.spinner("正在抓取TWSE/TPEx今日資料並重新選股..."):
+                candidates = run_daily_pipeline(conn, dry_run=False, on_progress=_on_progress)
+            progress_bar.empty()
+            st.success(f"抓取完成，候選清單共{len(candidates)}檔。")
+            st.rerun()
 
     candidate_dates = list_candidate_dates(conn)
     selected_date = (
@@ -192,7 +231,7 @@ def main() -> None:
                 candidates_df, use_container_width=True, hide_index=True,
                 on_select="rerun", selection_mode="single-row", key="candidates_table",
                 column_config={
-                    "stock_id": "股票代號", "name": "名稱",
+                    "stock_id": "股票代號", "name": "名稱", "industry": "產業別",
                     "signal_name": "訊號(信心%)",  # 信心分數已經內含在signal_name字串裡(見daily_screener.py)，這裡只是把「(信心%)」這個提示放進欄位標題，不用每一列都重複寫「信心」兩個字
                     "entry_price": "進場價", "stop_loss": "停損價",
                     "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%.2f%%"),
