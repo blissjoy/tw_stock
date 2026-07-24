@@ -1415,3 +1415,51 @@ MAX(updated_at))、`industry`欄位正確帶出(2個)，537個測試全過。
 排程工作減為6個：10:00/11:00/12:00/13:00/13:30/14:30。只改`README.md`裡的指令範例跟
 說明文字，跟排程有關的程式碼(`scripts/daily_pipeline.py`)本身不區分「第幾次跑」，這裡
 單純是文件層級的調整。
+
+## 「趨勢狀態」分類器：解鎖第二批高信心度黃金層規則（2026-07-24）
+
+使用者發現R-MA-08(90)/R-INDICATOR-22(89)/R-INDICATOR-14(93)/R-INDICATOR-15(91)這幾條
+高信心度規則，追問「為什麼還沒接上」。查證後澄清：這幾條**其實已經接上**(2026-07-24稍早
+的「黃金層」批次)，只是接在「個股分析」面板(查詢單一股票才會顯示)，不是最上面的「候選
+清單」(候選清單背後的5條規則是有明確進場價/停損價公式的完整SOP，這4條是單點技術訊號，
+書中沒有配套進出場公式，刻意不升格成候選)。
+
+順著這個問題往下查，統計全規則庫246條裡信心度>=85的135條，扣掉已接上的17條(個股分析)+
+5條(候選清單)，還有118條完全沒接。單一最大的阻塞類別是一大批R-LINE/R-SR/R-CANDLE/
+R-VOLPRICE/R-GAP規則都需要先知道「現在算多頭還是空頭趨勢」，而這個判斷本身在此之前完全
+沒做——R-TREND-03(頭頭高底底高多頭趨勢判定，信心94，全規則庫最高)、R-TREND-04(鏡射對稱，
+信心94)、R-TREND-01(轉折波取點演算法，信心93)這三條規則本身就是「趨勢狀態」的原始定義。
+跟使用者確認後，這次先建這套趨勢分類器。
+
+查證發現R-TREND-01/03/04其實**已經有現成程式碼**：`src/indicators/pivots.py`的
+`compute_turning_points(high, low, close, n=5)`(依收盤價相對N日均線的位置，算出交替排列
+的轉折高低點序列)、`src/indicators/trend.py`的`is_bull_trend(heads, bottoms)`/
+`is_bear_trend(heads, bottoms)`(比較最近兩個頭跟最近兩個底)，只是從來沒有人把這兩塊接
+在一起變成「輸入OHLCV、輸出今天是多頭/空頭/盤整」的單一函式可用。
+
+修法：
+- 新增`src/patterns/trend_state.py`的`classify_trend_state(high, low, close, n=5)`：
+  呼叫`compute_turning_points()`取得轉折點序列，依type分成heads/bottoms兩個清單(保留
+  原始時間順序，這點很重要，`is_bull_trend`/`is_bear_trend`比較的是清單最後兩個元素)，
+  依序丟給`is_bull_trend`/`is_bear_trend`判斷，回傳"多頭"/"空頭"/"盤整"三選一的字串。
+  只解決「現在算多頭還是空頭」，不解決「現在處於趨勢的哪個階段(高檔/低檔/起漲/末升段)」
+  這個更細的「趨勢位置」問題——candle_patterns_2.py等一大批`is_at_high`/`is_at_low`/
+  `wave_pattern_bullish`參數的函式仍然卡住，這是下一塊、非本次範圍。
+- `src/screener/rule_scan.py`第二階段接上：R-TREND-03/04本身(直接回報"今天判定為多頭/
+  空頭趨勢")、R-MA-15(`interpret_cross`，把已經算好的黃金/死亡交叉事件配合趨勢狀態解讀
+  成"買進參考位置"這類意涵，只在今天真的有交叉事件時才評估)、R-INDICATOR-09
+  (`kd_cross_signal_by_trend`，KD交叉依趨勢判讀)、R-INDICATOR-22/23的布林通道訊號①②
+  (`bollinger_buy_signal_1/2`/`bollinger_sell_signal_1/2`，先前只接了訊號③)。這幾個
+  函式簽章要求`trend`是逐日Series，但這裡的呼叫端只在意「今天」(`.iloc[-1]`)，用
+  「今天的分類值」填滿整個index長度的常數Series即可，不需要把`classify_trend_state`
+  改寫成逐日輸出版本(不必要的複雜度)。
+
+新增`tests/test_trend_state.py`(6個測試：多頭/空頭/盤整分類邏輯、heads與bottoms保留
+時間順序沒有被打亂、不mock的真實資料端對端smoke test)；`tests/test_rule_scan.py`新增3個
+測試(完整wiring含新增的6條規則、單獨驗證空頭分支、R-MA-15只在「今天真的有交叉事件」且
+「趨勢不是盤整」時才觸發的兩種否定情境)。546個測試全過。
+
+對本機真實db驗證(股票2330，2026-07-24盤中)：Streamlit版與桌面版都截圖確認「個股分析」
+面板正確顯示R-TREND-04(頭頭低底底低空頭趨勢判定，信心94%，全規則庫最高)排在最前面，
+其次R-INDICATOR-09(KD依趨勢判讀，信心92%，"參考空點")、R-INDICATOR-15(RSI黃金死亡交叉，
+91%，"空頭下跌做空參考訊號")，兩個前端呈現一致，且判讀彼此邏輯自洽(都指向空頭)。

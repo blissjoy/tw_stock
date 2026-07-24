@@ -80,6 +80,12 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
     monkeypatch.setattr(rule_scan, "is_reversal_candle_at_low", lambda o, h, l, c, pc: true_series)
     monkeypatch.setattr(rule_scan, "is_hammer_candle", lambda o, h, l, c: true_series)
     monkeypatch.setattr(rule_scan, "is_inverted_hammer_candle", lambda o, h, l, c: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "classify_trend_state", lambda h, l, c: "多頭")  # 讓interpret_cross真的算出訊號，不用另外mock
+    monkeypatch.setattr(rule_scan, "kd_cross_signal_by_trend", lambda k, d, trend: text_series)
+    monkeypatch.setattr(rule_scan, "bollinger_buy_signal_1", lambda close, lower, trend: true_series)
+    monkeypatch.setattr(rule_scan, "bollinger_buy_signal_2", lambda close, mid, trend: true_series)
+    monkeypatch.setattr(rule_scan, "bollinger_sell_signal_1", lambda close, upper, trend: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "bollinger_sell_signal_2", lambda close, mid, trend: pd.Series(False, index=df.index))
 
     rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
 
@@ -87,10 +93,48 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
         "R-MA-08", "R-MA-09", "R-MA-12", "R-MA-16", "R-MA-13", "R-MA-14",
         "R-INDICATOR-02", "R-INDICATOR-03", "R-INDICATOR-11", "R-INDICATOR-14", "R-INDICATOR-15",
         "R-INDICATOR-22", "R-VOLPRICE-01", "R-CANDLE-05", "R-CANDLE-13", "R-CANDLE-25",
+        "R-TREND-03", "R-MA-15", "R-INDICATOR-09",
     ]
     for rule_id in expected:
         assert rule_id in rule_ids, f"{rule_id} 沒有被scan_golden_tier回報"
-    # is_low_dull/bollinger_sell_signal_3/is_inverted_hammer_candle刻意設為False，確認
-    # 「沒觸發就不列入」的分支也有正確走到(不是每條都無條件回報True)
+    # is_low_dull/bollinger_sell_signal_3/is_inverted_hammer_candle/bollinger_sell_signal_1&2
+    # 刻意設為False，確認「沒觸發就不列入」的分支也有正確走到(不是每條都無條件回報True)
     assert rule_ids.count("R-INDICATOR-11") == 1  # 只有高檔鈍化觸發，低檔鈍化沒有
     assert "R-INDICATOR-23" not in rule_ids
+    assert "R-TREND-04" not in rule_ids  # trend固定為"多頭"，不該同時冒出空頭趨勢
+
+
+def test_scan_golden_tier_reports_bear_trend_and_skips_bull(monkeypatch):
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "classify_trend_state", lambda h, l, c: "空頭")
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-TREND-04" in rule_ids
+    assert "R-TREND-03" not in rule_ids
+
+
+def test_scan_golden_tier_skips_ma15_when_trend_is_range(monkeypatch):
+    """盤整趨勢下即使發生黃金/死亡交叉，interpret_cross()回傳「無明確訊號」，
+    R-MA-15不應該被列入(這是interpret_cross()本身的語意，不是額外過濾邏輯)。"""
+    df = _trend_df(60, "up")
+    true_series = pd.Series(True, index=df.index)
+    monkeypatch.setattr(rule_scan, "classify_trend_state", lambda h, l, c: "盤整")
+    monkeypatch.setattr(rule_scan, "is_golden_cross", lambda a, b: true_series)
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-MA-15" not in rule_ids
+
+
+def test_scan_golden_tier_skips_ma15_when_no_cross_today(monkeypatch):
+    """今天沒有發生黃金/死亡交叉時，R-MA-15不該被評估(即使趨勢是多頭/空頭)。"""
+    df = _trend_df(60, "up")
+    false_series = pd.Series(False, index=df.index)
+    monkeypatch.setattr(rule_scan, "classify_trend_state", lambda h, l, c: "多頭")
+    monkeypatch.setattr(rule_scan, "is_golden_cross", lambda a, b: false_series)
+    monkeypatch.setattr(rule_scan, "is_death_cross", lambda a, b: false_series)
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-MA-15" not in rule_ids
