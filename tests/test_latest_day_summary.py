@@ -9,7 +9,12 @@ from src.patterns.latest_day_summary import (
 
 
 def _df(rows: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame(rows)
+    # trend_state.classify_trend_states_multi_horizon()要resample成週線/月線，需要
+    # DatetimeIndex(跟chart_data.load_price_history()回傳的真實資料一致的慣例)，
+    # 不能用預設的RangeIndex，否則.resample()會直接拋TypeError。
+    df = pd.DataFrame(rows)
+    df.index = pd.date_range("2026-01-01", periods=len(rows), freq="B")
+    return df
 
 
 def _flat_row(close: float = 100.0, volume: float = 1000.0) -> dict:
@@ -129,10 +134,35 @@ def test_summarize_latest_day_combines_all_parts():
     assert isinstance(result["patterns"], list)
     assert isinstance(result["volume_signals"], list)
     # trend是短/中/長三種天期各自的判斷結果(見trend_state.classify_trend_states_multi_horizon)，
-    # 不是單一字串
+    # 不是單一字串。resample成週線/月線需要DatetimeIndex，df沒有日期索引時
+    # (`_df()`用預設RangeIndex)，週/中/長三個天期會直接算出「盤整」而不是crash——
+    # 這裡只驗證結構正確，資料量/索引不足以支撐真正的趨勢判斷不在這個測試的範圍內。
     assert set(result["trend"].keys()) == {"短線", "中線", "長線"}
-    assert result["trend"]["短線"].n == 5
-    assert result["trend"]["中線"].n == 10
-    assert result["trend"]["長線"].n == 20
+    assert result["trend"]["短線"].timeframe == "日線"
+    assert result["trend"]["中線"].timeframe == "週線"
+    assert result["trend"]["長線"].timeframe == "月線"
     for horizon in result["trend"].values():
         assert horizon.trend in ("多頭", "空頭", "盤整")
+
+
+def test_summarize_latest_day_uses_trend_df_for_trend_classification_when_given():
+    """trend_df有給的話，trend欄位應該用trend_df(通常涵蓋更長歷史，見chart_data.py的
+    TREND_LOOKBACK_DAYS)算，不是用df本身(可能只是顯示窗口截出來的一小段)——
+    這是週線/月線需要足夠長日線歷史才能重新取樣出夠多根K棒的直接後果。"""
+    rows = [_flat_row(100.0) for _ in range(5)] + [
+        {"open": 100.0, "high": 115.0, "low": 95.0, "close": 107.0, "volume": 1300},
+    ]
+    df = _df(rows)
+
+    dates = pd.date_range("2024-01-01", periods=400, freq="B")
+    trend_rows = pd.DataFrame(
+        {"open": [100.0] * 400, "high": [101.0] * 400, "low": [99.0] * 400, "close": [100.0] * 400,
+         "volume": [1000] * 400},
+        index=dates,
+    )
+
+    result = summarize_latest_day(df, trend_df=trend_rows)
+
+    # candle_name/patterns/volume_signals仍然是df(最後一列)算出來的，不受trend_df影響
+    assert result["candle_name"] == "長紅K"
+    assert set(result["trend"].keys()) == {"短線", "中線", "長線"}

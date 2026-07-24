@@ -62,9 +62,16 @@ def _last_text(series: pd.Series) -> str | None:
     return str(value) if pd.notna(value) else None
 
 
-def scan_golden_tier(df: pd.DataFrame) -> list[dict]:
+def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> list[dict]:
     """對單一股票的OHLCV資料，回傳「今天」實際觸發的黃金層訊號清單，每筆為
-    {"rule_id": ..., "note": ...}；資料不足或都沒觸發時回傳空清單。"""
+    {"rule_id": ..., "note": ...}；資料不足或都沒觸發時回傳空清單。
+
+    trend_df：專門供短/中/長(日/週/月)趨勢分類器使用的、涵蓋更長歷史的OHLCV資料(見
+    `src/presentation/chart_data.py`的`TREND_LOOKBACK_DAYS`)——週線/月線重新取樣需要
+    足夠長的日線歷史才能取樣出夠多根K棒，若沿用`df`原本（可能只有~120天顯示窗口）的
+    資料，週線/月線幾乎必然因為資料不足被誤判成「盤整」。不傳時退回用`df`自己的
+    high/low/close(維持向下相容，多數測試/舊呼叫端不需要這麼長的歷史)。
+    """
     if len(df) < MIN_DAYS:
         return []
     open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
@@ -129,18 +136,22 @@ def scan_golden_tier(df: pd.DataFrame) -> list[dict]:
         add("R-INDICATOR-23", "股價在中軌與下軌間向下運行，空頭市場持續做空")
 
     # --- 趨勢狀態(第二階段：接上src/patterns/trend_state.py的多頭/空頭/盤整分類器) ---
-    # 依R-TREND-01書中定義的短(MA5)/中(MA10)/長(MA20)三種天期分別判斷、分別回報——用單一
-    # 天期代表「大趨勢」太草率(例如短線走空、長線仍是多頭很常見)，三者可能不一致，UI要
+    # 依R-INDICATOR-10書中定義的短(日線)/中(週線)/長(月線)三種天期分別判斷、分別回報——用
+    # 單一天期代表「大趨勢」太草率(例如日線走空、週線仍是多頭很常見)，三者可能不一致，UI要
     # 讓使用者看到全部三種，不是只挑一種。
-    trend_horizons = classify_trend_states_multi_horizon(high, low, close)
-    for label, (n, trend) in trend_horizons.items():
+    if trend_df is not None and not trend_df.empty:
+        trend_high, trend_low, trend_close = trend_df["high"], trend_df["low"], trend_df["close"]
+    else:
+        trend_high, trend_low, trend_close = high, low, close
+    trend_horizons = classify_trend_states_multi_horizon(trend_high, trend_low, trend_close)
+    for label, (timeframe, trend) in trend_horizons.items():
         if trend == TREND_BULL:
-            add("R-TREND-03", f"{label}(MA{n}轉折波)：頭頭高且底底高，多頭趨勢成立")
+            add("R-TREND-03", f"{label}({timeframe}轉折波)：頭頭高且底底高，多頭趨勢成立")
         elif trend == TREND_BEAR:
-            add("R-TREND-04", f"{label}(MA{n}轉折波)：頭頭低且底底低，空頭趨勢成立")
+            add("R-TREND-04", f"{label}({timeframe}轉折波)：頭頭低且底底低，空頭趨勢成立")
 
     # 下面幾條依賴trend的規則(R-MA-15/KD依趨勢判讀/布林通道訊號①②)書中沒有另外要求區分
-    # 短中長天期，沿用短線(MA5)天期即可，跟本專案其他規則(R-TREND-14等)慣用的短線框架一致；
+    # 短中長天期，沿用短線(日線)天期即可，跟本專案其他規則(R-TREND-14等)慣用的短線框架一致；
     # trend_series用「今天」單一分類值填滿整個index，這幾個函式都只會讀.iloc[-1]
     # (見_last_bool/_last_text)，不需要逐日皆準確的趨勢序列。
     trend_today = trend_horizons["短線"][1]

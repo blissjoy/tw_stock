@@ -363,12 +363,15 @@ class MainWindow(QMainWindow):
         self._chart_html_path.write_text(html, encoding="utf-8")
         self.chart_view.load(QUrl.fromLocalFile(str(self._chart_html_path)))
 
-        summary = latest_day_summary.summarize_latest_day(price_df)
+        # trend_df：短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比price_df
+        # (預設120天顯示窗口)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明。
+        trend_df = chart_data.load_price_history(self.conn, self._current_stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        summary = latest_day_summary.summarize_latest_day(price_df, trend_df=trend_df)
         latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
-        # 短/中/長三種天期分開顯示、各自標示判斷依據的均線天期(見R-TREND-01：轉折波取點
-        # 演算法5/10/20日短中長線)，不合併成單一「目前趨勢」——三者可能不一致(例如短線
-        # 走空、長線仍是多頭)，只看一種天期容易誤判。
-        trend_text = "　".join(f"{label}(MA{n})：{trend}" for label, (n, trend) in summary["trend"].items())
+        # 短/中/長三種天期分開顯示、各自標示判斷依據的K棒週期(見R-INDICATOR-10：做短線看
+        # 日線、中期看週線、長期看月線)，不合併成單一「目前趨勢」——三者可能不一致(例如
+        # 日線走空、週線仍是多頭)，只看一種天期容易誤判。
+        trend_text = "　".join(f"{label}({timeframe})：{trend}" for label, (timeframe, trend) in summary["trend"].items())
         lines = [
             f"最新交易日分析（{latest_date_label}）",
             f"目前趨勢：{trend_text}",
@@ -402,7 +405,10 @@ class MainWindow(QMainWindow):
         if price_df.empty:
             self.analysis_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
             return
-        matches = analyze_stock_signals(price_df)
+        # trend_df：短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比price_df
+        # (預設120天顯示窗口)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明。
+        trend_df = chart_data.load_price_history(self.conn, self._current_stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        matches = analyze_stock_signals(price_df, trend_df=trend_df)
         if not matches:
             self.analysis_view.setHtml("<p>目前沒有符合任何已接上規則庫的訊號。</p>")
             return

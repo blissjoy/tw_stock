@@ -277,7 +277,7 @@ _SIGNAL_NAME_PATTERN = re.compile(r"^(R-[A-Z]+-\d+)(.*)（(\d+)%）$")
 _CONFIDENCE_PREFIX_PATTERN = re.compile(r"^(\d+)/100")
 
 
-def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60) -> list[dict]:
+def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.DataFrame | None = None) -> list[dict]:
     """對「單一股票」的OHLCV資料，跑過①目前已接上的所有screen_*規則(整套進場SOP，含
     進場價/停損建議)、②`src.screener.rule_scan`的「黃金層」單點技術訊號(不含進場/停損
     建議)，回傳「今天」(資料最後一列)符合的訊號清單，依信心分數由高到低排序，每筆附上
@@ -287,6 +287,9 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60) -> list[dict]:
 
     目前只涵蓋這兩類已接上的規則（不是全部246條規則庫，範圍界定見rule_scan.py開頭的
     說明），範圍會隨之後接上更多規則自動擴大，這裡的程式碼不用跟著改。
+
+    trend_df：轉傳給`scan_golden_tier()`專門供短/中/長(日/週/月)趨勢分類器使用的長歷史
+    資料，見那裡的說明；不傳時退回用`df`自己的歷史。
     """
     from src.rule_docs import load_rule_doc
     from src.screener.rule_scan import scan_golden_tier
@@ -310,7 +313,7 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60) -> list[dict]:
             "reference": doc.get("原文與頁碼") if doc else None,
         })
 
-    for item in scan_golden_tier(df):
+    for item in scan_golden_tier(df, trend_df=trend_df):
         doc = load_rule_doc(item["rule_id"])
         confidence_match = _CONFIDENCE_PREFIX_PATTERN.match(doc["信心"]) if doc and "信心" in doc else None
         if confidence_match is None:

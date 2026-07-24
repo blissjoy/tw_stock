@@ -25,6 +25,13 @@ MA_COLORS = {
     60: "#16a085", 120: "#7f8c8d", 240: "#b8860b",
 }
 
+# 短/中/長(日/週/月)趨勢分類器(見src/patterns/trend_state.py)專用的歷史長度——跟畫K線圖
+# 用的顯示窗口(load_price_history預設120天)分開，因為週線/月線要重新取樣(resample)出夠多
+# 根K棒才能讓轉折點演算法找到2組頭與2組底，120天日線只夠取樣出4~5根月線K棒，遠遠不夠。
+# 750個交易日約3年，本機DB目前實際累積的歷史通常不到這個天數，屆時就是撈到多少算多少
+# (SQL LIMIT不會因為要求的天數超過現有資料而報錯)。
+TREND_LOOKBACK_DAYS = 750
+
 TRENDLINE_LABELS = {
     "up_tangent": "上升切線", "down_tangent": "下降切線",
     "up_channel": "上升軌道線", "down_channel": "下降軌道線",

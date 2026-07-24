@@ -57,7 +57,7 @@ def test_analyze_stock_signals_includes_confidence_and_rule_description(monkeypa
         lambda high, low, close, n=5: pd.Series(True, index=close.index),
     )
     import src.screener.rule_scan as rule_scan
-    monkeypatch.setattr(rule_scan, "scan_golden_tier", lambda df: [])  # 這裡只驗證_SCREEN_FUNCTIONS路徑，黃金層另有專屬測試
+    monkeypatch.setattr(rule_scan, "scan_golden_tier", lambda df, trend_df=None: [])  # 這裡只驗證_SCREEN_FUNCTIONS路徑，黃金層另有專屬測試
 
     matches = daily_screener.analyze_stock_signals(df, min_days=60)
 

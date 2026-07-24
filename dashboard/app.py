@@ -115,9 +115,14 @@ def main() -> None:
                 st.session_state[analysis_state_key] = not st.session_state.get(analysis_state_key, False)
         selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
 
+        # 短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比畫K線圖用的顯示窗口
+        # (price_df，預設120天)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明；下面
+        # 「個股分析」面板與「最新交易日分析」摘要都要用，這裡只查一次共用。
+        trend_df = load_price_history(conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+
         if st.session_state.get(analysis_state_key, False):
             with st.expander("📊 個股分析", expanded=True):
-                signal_matches = analyze_stock_signals(price_df)
+                signal_matches = analyze_stock_signals(price_df, trend_df=trend_df)
                 if not signal_matches:
                     st.write("目前沒有符合任何已接上規則庫的訊號。")
                 else:
@@ -148,14 +153,14 @@ def main() -> None:
         )
         st.dataframe(price_df.tail(20), use_container_width=True)
 
-        summary = latest_day_summary.summarize_latest_day(price_df)
+        summary = latest_day_summary.summarize_latest_day(price_df, trend_df=trend_df)
         latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
         st.markdown(f"**📋 最新交易日分析（{latest_date_label}）**")
-        # 短/中/長三種天期分開顯示、各自標示判斷依據的均線天期(見R-TREND-01：轉折波取點
-        # 演算法5/10/20日短中長線)，不合併成單一「目前趨勢」——三者可能不一致(例如短線
-        # 走空、長線仍是多頭)，只看一種天期容易誤判。
+        # 短/中/長三種天期分開顯示、各自標示判斷依據的K棒週期(見R-INDICATOR-10：做短線看
+        # 日線、中期看週線、長期看月線)，不合併成單一「目前趨勢」——三者可能不一致(例如
+        # 日線走空、週線仍是多頭)，只看一種天期容易誤判。
         trend_text = "　".join(
-            f"{label}(MA{n})：{trend}" for label, (n, trend) in summary["trend"].items()
+            f"{label}({timeframe})：{trend}" for label, (timeframe, trend) in summary["trend"].items()
         )
         st.write(f"目前趨勢：{trend_text}")
         st.write(f"K棒名稱：{summary['candle_name']}")

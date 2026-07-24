@@ -13,9 +13,10 @@
 規則的全自動化。趨勢方向(多頭/空頭/盤整，跟「趨勢位置」是不同層次的判斷)2026-07-24已經
 接上`src.patterns.trend_state.classify_trend_states_multi_horizon()`(串接R-TREND-01
 轉折點取點+R-TREND-03/04頭頭高底底高/頭頭低底底低判定)，摘要的`trend`欄位就是這裡算出
-來的——⚠️ 依使用者要求分成短(MA5)/中(MA10)/長(MA20)三種天期分別判斷，不是單一數字，因為
-用單一天期代表「大趨勢」太草率(例如短線走空、長線仍是多頭這種常見情境，只看一種天期會
-誤導)。
+來的——⚠️ 依使用者要求分成短(日線)/中(週線)/長(月線)三種天期分別判斷，不是單一數字，因為
+用單一天期代表「大趨勢」太草率(例如日線走空、週線仍是多頭這種常見情境，只看一種天期會
+誤導)；三種天期的定義依R-INDICATOR-10「做短線看日線、中期看週線、長期看月線」，不是同一張
+日線圖套用不同均線天期(詳見trend_state.py開頭的修正說明)。
 """
 
 from __future__ import annotations
@@ -200,17 +201,22 @@ def detect_latest_day_volume_signals(df: pd.DataFrame) -> list[str]:
     return hits
 
 
-def summarize_latest_day(df: pd.DataFrame) -> dict:
+def summarize_latest_day(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> dict:
     """整理成儀表板要顯示的摘要dict：candle_name(單根K棒名稱)、patterns(型態清單)、
     volume_signals(量價訊號清單)、trend(今天短/中/長三種天期各自的多頭/空頭/盤整趨勢
     狀態，見trend_state.classify_trend_states_multi_horizon()——不是單一數字，短/中/長
-    可能不一致，例如短線走空但長線仍是多頭)。df為空時回傳全空結果，不拋例外。
+    可能不一致，例如日線走空但週線仍是多頭)。df為空時回傳全空結果，不拋例外。
+
+    trend_df：專門供趨勢分類器使用的長歷史OHLCV資料(週線/月線重新取樣需要，見
+    `src/screener/rule_scan.py`的`scan_golden_tier()`同名參數說明)；不傳時退回用`df`
+    自己的high/low/close。
     """
     if df.empty:
         return {"candle_name": None, "patterns": [], "volume_signals": [], "trend": None}
+    trend_source = trend_df if trend_df is not None and not trend_df.empty else df
     return {
         "candle_name": classify_latest_candle_name(df),
         "patterns": detect_latest_day_candle_patterns(df),
         "volume_signals": detect_latest_day_volume_signals(df),
-        "trend": classify_trend_states_multi_horizon(df["high"], df["low"], df["close"]),
+        "trend": classify_trend_states_multi_horizon(trend_source["high"], trend_source["low"], trend_source["close"]),
     }

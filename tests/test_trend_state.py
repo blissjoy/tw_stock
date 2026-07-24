@@ -2,7 +2,11 @@ import pandas as pd
 
 import src.patterns.trend_state as trend_state
 from src.indicators.pivots import TurningPoint
-from src.patterns.trend_state import TREND_HORIZONS, classify_trend_state, classify_trend_states_multi_horizon
+from src.patterns.trend_state import (
+    TREND_TURNING_POINT_N,
+    classify_trend_state,
+    classify_trend_states_multi_horizon,
+)
 
 
 def _fake_points(pairs):
@@ -83,45 +87,76 @@ def test_classify_trend_state_smoke_test_does_not_crash_on_realistic_data():
     assert result in ("多頭", "空頭", "盤整")
 
 
-def test_classify_trend_states_multi_horizon_calls_each_period_with_correct_n(monkeypatch):
-    """確認短/中/長三個天期分別用R-TREND-01書中定義的5/10/20日呼叫classify_trend_state，
-    這是使用者要求「要標示是以MA多少來判斷」的依據來源。"""
-    captured_ns = []
+def _make_daily_series(n_days: int = 400):
+    """造一段跨越足夠長時間(預設約1.5年交易日)的日線close，讓resample成週線/月線後
+    仍有夠多根K棒可用。"""
+    dates = pd.date_range("2024-01-01", periods=n_days, freq="B")
+    close = pd.Series([100 + i * 0.1 for i in range(n_days)], index=dates)
+    return close + 1, close - 1, close  # high, low, close
+
+
+def test_classify_trend_states_multi_horizon_uses_fixed_n_and_resamples_by_timeframe(monkeypatch):
+    """依R-INDICATOR-10「做短線看日線、中期看週線、長期看月線」的定義，短/中/長三個天期
+    都用同一個N=5呼叫classify_trend_state(演算法參數不變)，差別在於餵進去的high/low/close
+    是重新取樣過的週線/月線資料(比原始日線筆數少)，不是像R-TREND-01那樣改N。"""
+    captured = []
 
     def _fake_classify(h, l, c, n=5):
-        captured_ns.append(n)
-        return f"trend-n{n}"
+        captured.append((len(c), n))
+        return "多頭"
 
     monkeypatch.setattr(trend_state, "classify_trend_state", _fake_classify)
-    close = pd.Series([100.0])
+    high, low, close = _make_daily_series()
 
-    result = classify_trend_states_multi_horizon(close, close, close)
+    result = classify_trend_states_multi_horizon(high, low, close)
 
-    assert captured_ns == [5, 10, 20]
-    assert result["短線"] == (5, "trend-n5")
-    assert result["中線"] == (10, "trend-n10")
-    assert result["長線"] == (20, "trend-n20")
+    assert [n for _, n in captured] == [TREND_TURNING_POINT_N] * 3
+    daily_len, weekly_len, monthly_len = (length for length, _ in captured)
+    assert daily_len == len(close)
+    assert weekly_len < daily_len  # 週線筆數應該遠少於日線
+    assert monthly_len < weekly_len  # 月線筆數應該又比週線更少
+    assert result["短線"].timeframe == "日線"
+    assert result["中線"].timeframe == "週線"
+    assert result["長線"].timeframe == "月線"
 
 
 def test_classify_trend_states_multi_horizon_can_disagree_across_periods(monkeypatch):
-    """短線走空、長線仍是多頭這種不一致的情境，三個天期應該各自獨立算出結果，
+    """日線走空、週線仍是多頭這種不一致的情境，三個天期應該各自獨立算出結果，
     不會被互相覆蓋——這正是使用者要求分開顯示短/中/長趨勢的核心理由。"""
-    def _fake_turning_points(h, l, c, n=5):
-        if n == 5:
-            return _fake_points([("head", 110), ("bottom", 100), ("head", 105), ("bottom", 95)])  # 空頭
-        return _fake_points([("bottom", 90), ("head", 100), ("bottom", 95), ("head", 105)])  # 多頭
+    call_order = []
 
-    monkeypatch.setattr(trend_state, "compute_turning_points", _fake_turning_points)
-    close = pd.Series([100.0])
+    def _fake_classify(h, l, c, n=5):
+        call_order.append(len(c))
+        return "空頭" if len(call_order) == 1 else "多頭"  # 第一次呼叫(日線)走空，其餘走多
 
-    result = classify_trend_states_multi_horizon(close, close, close)
+    monkeypatch.setattr(trend_state, "classify_trend_state", _fake_classify)
+    high, low, close = _make_daily_series()
+
+    result = classify_trend_states_multi_horizon(high, low, close)
 
     assert result["短線"].trend == "空頭"
     assert result["中線"].trend == "多頭"
     assert result["長線"].trend == "多頭"
 
 
-def test_trend_horizons_matches_book_defined_periods():
-    """R-TREND-01書中明確定義短線=5日、中線=10日、長線=20日，這組對應關係不應該被
-    誤改成其他數字。"""
-    assert TREND_HORIZONS == {"短線": 5, "中線": 10, "長線": 20}
+def test_classify_trend_states_multi_horizon_smoke_test_does_not_crash_on_realistic_data():
+    """不mock，直接用真實的日線資料端對端驗證重新取樣+轉折點串接沒有斷掉、回傳合法值。"""
+    high, low, close = _make_daily_series()
+
+    result = classify_trend_states_multi_horizon(high, low, close)
+
+    assert set(result.keys()) == {"短線", "中線", "長線"}
+    for label, expected_timeframe in [("短線", "日線"), ("中線", "週線"), ("長線", "月線")]:
+        assert result[label].timeframe == expected_timeframe
+        assert result[label].trend in ("多頭", "空頭", "盤整")
+
+
+def test_classify_trend_states_multi_horizon_falls_back_to_range_when_resampled_data_too_short():
+    """只給很短的日線歷史(例如剛好120天)時，重新取樣出來的月線可能只有4~5根K棒，遠不足以
+    找到2組頭與2組底——這時應該安全回傳「盤整」而不是crash，呼叫端(chart_data.py的
+    TREND_LOOKBACK_DAYS說明)要留意這個資料量不足的情境。"""
+    high, low, close = _make_daily_series(n_days=20)
+
+    result = classify_trend_states_multi_horizon(high, low, close)
+
+    assert result["長線"].trend == "盤整"
