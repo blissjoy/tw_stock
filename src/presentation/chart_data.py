@@ -89,56 +89,75 @@ def apply_candidate_filters(conn, candidates_df: pd.DataFrame, active_filter_lab
     return candidates_df[mask].reset_index(drop=True)
 
 
-def load_latest_candidates(conn) -> tuple[pd.DataFrame, str | None]:
-    """回傳 (最新一天的候選清單DataFrame, 該日期字串)；尚無任何紀錄時回傳(空DataFrame, None)。
+def list_candidate_dates(conn) -> list[str]:
+    """回傳daily_candidates裡所有有紀錄的日期，由新到舊排序，供候選清單的日期選單使用。"""
+    cur = conn.execute("SELECT DISTINCT date FROM daily_candidates ORDER BY date DESC")
+    return [row[0] for row in cur.fetchall()]
+
+
+def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.DataFrame, str | None]:
+    """回傳 (指定日期的候選清單DataFrame, 該日期字串)；target_date為None時取最新一天。
+    尚無任何紀錄(或指定日期查無資料)時回傳(空DataFrame, 對應日期字串或None)。
 
     同一檔股票如果同時符合多條規則(daily_candidates裡有多筆同stock_id、不同signal_name
     的紀錄，例如同時觸發R-TREND-14跟R-SCREEN-15)，這裡會合併成一列顯示，不是一條規則
-    一列——signal_name/note欄位都用「\n」換行字元分隔多條規則的內容(而不是逗號/頓號
-    這類同一行內的分隔符)，讓桌面版(desktop/main_window.py開了word wrap +
-    resizeRowsToContents)能在同一格內分成好幾行顯示，一條規則一行，比擠在同一行裡
-    好讀。⚠️ Streamlit的`st.dataframe`不支援儲存格內換行(實測\n會被吃成空白、
-    HTML的<br>則會顯示成字面文字)，這是該元件本身的限制；用\n分隔在那邊會退化成
-    單行、規則之間用空白隔開，不是bug，是目前Streamlit這個次要前端能接受的降級效果。
+    一列——signal_name欄位用「\n」換行字元分隔多條規則的內容(而不是逗號/頓號這類同一行內
+    的分隔符)，讓桌面版(desktop/main_window.py開了word wrap + resizeRowsToContents)
+    能在同一格內分成好幾行顯示，一條規則一行，比擠在同一行裡好讀。⚠️ Streamlit的
+    `st.dataframe`不支援儲存格內換行(實測\n會被吃成空白、HTML的<br>則會顯示成字面文字)，
+    這是該元件本身的限制；用\n分隔在那邊會退化成單行、規則之間用空白隔開，不是bug，是
+    目前Streamlit這個次要前端能接受的降級效果。
     entry_price/stop_loss取合併前第一筆的值：目前已接上的規則都是用同一天的收盤價/同一套
     停損公式(bull_short_term_stop_loss)，理論上同一檔股票不管觸發幾條規則，算出來的值
     本來就會相同；之後如果加入用不同公式的規則導致同一天算出不同的進場價/停損價，這裡
     仍然只顯示第一筆，不特別提示「多個不同數值」，避免為了目前用不到的情境過度設計UI。
+
+    漲跌幅/成交量：跟訊號本身無關、是「當天這檔股票實際的價量表現」，用stock_prices表
+    當天的收盤價與前一個交易日(依date字串排序取最近一筆更早的資料，非日曆天)的收盤價
+    算出百分比，不用stock_prices.spread欄位——spread是否有值取決於資料來源(yfinance
+    補的historical資料一律是NULL，見src/data/yfinance_client.py)，不可靠，直接用兩天
+    收盤價自己算才能保證每一列都有值。
     """
-    latest_date = conn.execute("SELECT MAX(date) FROM daily_candidates").fetchone()[0]
-    if latest_date is None:
-        return pd.DataFrame(), None
+    if target_date is None:
+        target_date = conn.execute("SELECT MAX(date) FROM daily_candidates").fetchone()[0]
+        if target_date is None:
+            return pd.DataFrame(), None
     cur = conn.execute(
         """
-        SELECT dc.stock_id, s.name, dc.signal_name, dc.entry_price, dc.stop_loss, dc.note
-        FROM daily_candidates dc LEFT JOIN stocks s ON dc.stock_id = s.stock_id
+        SELECT dc.stock_id, s.name, dc.signal_name, dc.entry_price, dc.stop_loss,
+               sp.close AS today_close, sp.volume AS today_volume,
+               (SELECT sp2.close FROM stock_prices sp2
+                WHERE sp2.stock_id = dc.stock_id AND sp2.date < dc.date
+                ORDER BY sp2.date DESC LIMIT 1) AS prev_close
+        FROM daily_candidates dc
+        LEFT JOIN stocks s ON dc.stock_id = s.stock_id
+        LEFT JOIN stock_prices sp ON sp.stock_id = dc.stock_id AND sp.date = dc.date
         WHERE dc.date = ? ORDER BY dc.stock_id, dc.created_at
         """,
-        (latest_date,),
+        (target_date,),
     )
     columns = [d[0] for d in cur.description]
     raw_df = pd.DataFrame(cur.fetchall(), columns=columns)
     if raw_df.empty:
-        return raw_df, latest_date
+        return raw_df, target_date
+
+    raw_df["pct_change"] = (raw_df["today_close"] - raw_df["prev_close"]) / raw_df["prev_close"] * 100
 
     merged_rows = []
     for stock_id, group in raw_df.groupby("stock_id", sort=False):
         first = group.iloc[0]
-        # note在DB裡是NULL時，pandas讀回來會變成float NaN(不是Python None)，而NaN在布林
-        # 判斷下是truthy的(bool(float('nan')) is True)——用pd.notna()才能正確排除掉，
-        # 否則合併結果會混進字面上的"nan"字樣。
-        notes = [f"{row.signal_name}：{row.note}" for row in group.itertuples() if pd.notna(row.note)]
         merged_rows.append({
             "stock_id": stock_id,
             "name": first["name"],
             "signal_name": "\n".join(group["signal_name"]),
             "entry_price": first["entry_price"],
             "stop_loss": first["stop_loss"],
-            "note": "\n".join(notes),
+            "pct_change": first["pct_change"],
+            "volume": first["today_volume"],
         })
-    merged_df = pd.DataFrame(merged_rows, columns=["stock_id", "name", "signal_name", "entry_price", "stop_loss", "note"])
+    merged_df = pd.DataFrame(merged_rows, columns=["stock_id", "name", "signal_name", "entry_price", "stop_loss", "pct_change", "volume"])
     merged_df = merged_df.sort_values("stock_id").reset_index(drop=True)
-    return merged_df, latest_date
+    return merged_df, target_date
 
 
 def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:

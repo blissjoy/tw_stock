@@ -6,8 +6,9 @@ from src.presentation.chart_data import (
     apply_candidate_filters,
     build_candlestick_figure,
     compute_ma_bullish_flags,
+    list_candidate_dates,
+    load_candidates_for_date,
     load_holidays_for_chart,
-    load_latest_candidates,
     load_price_history,
 )
 
@@ -16,14 +17,14 @@ def _fresh_conn():
     return init_db(":memory:")
 
 
-def test_load_latest_candidates_returns_empty_when_no_records():
+def test_load_candidates_for_date_returns_empty_when_no_records():
     conn = _fresh_conn()
-    df, latest_date = load_latest_candidates(conn)
+    df, latest_date = load_candidates_for_date(conn)
     assert df.empty
     assert latest_date is None
 
 
-def test_load_latest_candidates_returns_only_the_most_recent_date():
+def test_load_candidates_for_date_defaults_to_most_recent_date():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     upsert_daily_candidates(conn, [
@@ -31,7 +32,7 @@ def test_load_latest_candidates_returns_only_the_most_recent_date():
         {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": "測試", "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, latest_date = load_latest_candidates(conn)
+    df, latest_date = load_candidates_for_date(conn)
     assert latest_date == "2026-07-22"
     assert len(df) == 1
     assert df.iloc[0]["stock_id"] == "2330"
@@ -39,7 +40,35 @@ def test_load_latest_candidates_returns_only_the_most_recent_date():
     assert df.iloc[0]["signal_name"] == "R-TREND-14多頭短線進場"
 
 
-def test_load_latest_candidates_merges_multiple_signals_for_same_stock_into_one_row():
+def test_load_candidates_for_date_returns_specific_historical_date_when_given():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-21", "stock_id": "2330", "signal_name": "舊訊號", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-21T18:00:00"},
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": "測試", "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    df, returned_date = load_candidates_for_date(conn, target_date="2026-07-21")
+
+    assert returned_date == "2026-07-21"
+    assert len(df) == 1
+    assert df.iloc[0]["signal_name"] == "舊訊號"
+
+
+def test_load_candidates_for_date_returns_empty_but_echoes_date_when_no_candidates_that_day():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    df, returned_date = load_candidates_for_date(conn, target_date="2026-07-23")
+
+    assert df.empty
+    assert returned_date == "2026-07-23"  # 使用者選的日期本身仍要回傳，不是None
+
+
+def test_load_candidates_for_date_merges_multiple_signals_for_same_stock_into_one_row():
     """同一檔股票同一天同時觸發多條規則時，應該合併成一列顯示，不是一條規則一列
     （這是2026-07-23接上R-SCREEN-11/15後才會出現的情境：同一檔股票可能同時符合
     R-TREND-14跟R-SCREEN-15）。"""
@@ -57,14 +86,12 @@ def test_load_latest_candidates_merges_multiple_signals_for_same_stock_into_one_
          "entry_price": 50.0, "stop_loss": 45.0, "note": "多頭架構＋攻擊量", "created_at": "2026-07-23T18:00:02"},
     ])
 
-    df, latest_date = load_latest_candidates(conn)
+    df, latest_date = load_candidates_for_date(conn)
 
     assert latest_date == "2026-07-23"
     assert len(df) == 2  # 2330合併成一列，1101單獨一列，總共2列不是3列
     row_2330 = df[df["stock_id"] == "2330"].iloc[0]
     assert row_2330["signal_name"] == "R-TREND-14多頭短線進場\nR-SCREEN-15緩漲軌道突破做多"
-    assert "R-TREND-14多頭短線進場：多頭架構＋攻擊量" in row_2330["note"]
-    assert "R-SCREEN-15緩漲軌道突破做多：軌道突破＋大量長紅K" in row_2330["note"]
     assert row_2330["entry_price"] == 104.0
     assert row_2330["stop_loss"] == 99.0
 
@@ -72,20 +99,55 @@ def test_load_latest_candidates_merges_multiple_signals_for_same_stock_into_one_
     assert row_1101["signal_name"] == "R-TREND-14多頭短線進場"  # 只觸發一條規則時，格式維持不變
 
 
-def test_load_latest_candidates_skips_null_note_when_merging():
-    """合併note時，若其中一條規則的note是None，不應該把"None"字樣混進合併結果裡。"""
+def test_load_candidates_for_date_computes_pct_change_and_volume_from_stock_prices():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-21", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+         "volume": 5000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 106.0, "low": 100.0, "close": 105.0,
+         "volume": 8000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    df, _ = load_candidates_for_date(conn)
+
+    row = df.iloc[0]
+    assert row["volume"] == 8000
+    assert row["pct_change"] == 5.0  # (105-100)/100*100
+
+
+def test_load_candidates_for_date_pct_change_is_nan_when_no_prior_day_price():
+    """新上市或本機資料庫還沒有前一個交易日資料時，漲跌幅算不出來，應該是NaN不是crash或0。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 106.0, "low": 100.0, "close": 105.0,
+         "volume": 8000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    df, _ = load_candidates_for_date(conn)
+
+    assert pd.isna(df.iloc[0]["pct_change"])
+
+
+def test_list_candidate_dates_returns_dates_descending():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     upsert_daily_candidates(conn, [
-        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
-         "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-23T18:00:00"},
-        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-SCREEN-15緩漲軌道突破做多",
-         "entry_price": 104.0, "stop_loss": 99.0, "note": "軌道突破", "created_at": "2026-07-23T18:00:01"},
+        {"date": "2026-07-21", "stock_id": "2330", "signal_name": "A", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-21T18:00:00"},
+        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "B", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-23T18:00:00"},
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "C", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, _ = load_latest_candidates(conn)
-
-    assert df.iloc[0]["note"] == "R-SCREEN-15緩漲軌道突破做多：軌道突破"
+    assert list_candidate_dates(conn) == ["2026-07-23", "2026-07-22", "2026-07-21"]
 
 
 def test_load_price_history_returns_ascending_order_and_respects_limit():

@@ -1,5 +1,6 @@
-"""Streamlit 儀表板：顯示每日選股結果（daily_candidates 表最新一天，可點選清單中任一列
-直接看該檔股票的價格走勢），也可以手動查詢任意股票代號。
+"""Streamlit 儀表板：顯示每日選股結果（daily_candidates 表，預設最新一天、可用下拉選單
+切換查看歷史候選清單，可點選清單中任一列直接看該檔股票的價格走勢），也可以手動查詢任意
+股票代號。
 
 「🔄 立即重新篩選」按鈕呼叫 src/screener/daily_screener.run_screen_and_store()，只用
 資料庫裡『目前已有』的資料重算訊號，不會對外重新抓取TWSE/TPEx資料（那個很慢，交給
@@ -28,8 +29,9 @@ from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_FILTERS,
     apply_candidate_filters,
     build_candlestick_figure,
+    list_candidate_dates,
+    load_candidates_for_date,
     load_holidays_for_chart,
-    load_latest_candidates,
     load_price_history,
 )
 
@@ -166,14 +168,19 @@ def main() -> None:
             run_screen_and_store(conn)
         st.success("已重新計算完成，候選清單已更新。")
 
-    candidates_df, latest_date = load_latest_candidates(conn)
+    candidate_dates = list_candidate_dates(conn)
+    selected_date = (
+        st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
+        if candidate_dates else None
+    )
+    candidates_df, latest_date = load_candidates_for_date(conn, target_date=selected_date)
     candidates_df = apply_candidate_filters(conn, candidates_df, active_filters)
 
     selected_stock_id = None
     if latest_date is None:
         st.info("目前 Turso 資料庫裡還沒有任何每日選股紀錄，點上方「立即重新篩選」或等 GitHub Actions 排程跑完後就會顯示。")
     else:
-        st.subheader(f"最新候選清單（{latest_date}，共 {len(candidates_df)} 檔）")
+        st.subheader(f"候選清單（{latest_date}，共 {len(candidates_df)} 檔）")
         if candidates_df.empty:
             st.write("這一天沒有符合條件的候選股。")
         else:
@@ -184,7 +191,9 @@ def main() -> None:
                 column_config={
                     "stock_id": "股票代號", "name": "名稱",
                     "signal_name": "訊號(信心%)",  # 信心分數已經內含在signal_name字串裡(見daily_screener.py)，這裡只是把「(信心%)」這個提示放進欄位標題，不用每一列都重複寫「信心」兩個字
-                    "entry_price": "進場價", "stop_loss": "停損價", "note": "備註",
+                    "entry_price": "進場價", "stop_loss": "停損價",
+                    "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%.2f%%"),
+                    "volume": st.column_config.NumberColumn("成交量", format="%d"),
                 },
             )
             if event.selection.rows:

@@ -14,9 +14,11 @@ import html
 import tempfile
 from pathlib import Path
 
+import pandas as pd
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -91,6 +93,7 @@ class MainWindow(QMainWindow):
         self._chart_html_path = Path(tempfile.gettempdir()) / f"tw_stock_chart_{id(self)}.html"
 
         self._build_ui()
+        self._refresh_date_list()
         self._reload_candidates()
 
         self._status_timer = QTimer(self)
@@ -108,7 +111,12 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(central)
 
         filter_bar = QHBoxLayout()
-        filter_bar.addWidget(QLabel("候選清單篩選條件："))
+        filter_bar.addWidget(QLabel("候選清單日期："))
+        self.date_combo = QComboBox()
+        self.date_combo.currentIndexChanged.connect(self._reload_candidates)
+        filter_bar.addWidget(self.date_combo)
+        filter_bar.addSpacing(20)
+        filter_bar.addWidget(QLabel("篩選條件："))
         self.filter_checkboxes: dict[str, QCheckBox] = {}
         for label in chart_data.CANDIDATE_FILTERS:
             cb = QCheckBox(label)
@@ -137,13 +145,13 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(splitter)
 
         self.candidates_table = QTableWidget()
-        self.candidates_table.setColumnCount(6)
-        self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "訊號(信心%)", "進場價", "停損價", "備註"])
+        self.candidates_table.setColumnCount(7)
+        self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "訊號(信心%)", "進場價", "停損價", "漲跌幅(%)", "成交量"])
         self.candidates_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.candidates_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.candidates_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        # 同一檔股票符合多條規則時，訊號/備註欄位的內容用「\n」分隔多行(見
-        # src/presentation/chart_data.py的load_latest_candidates())；開word wrap
+        # 同一檔股票符合多條規則時，訊號欄位的內容用「\n」分隔多行(見
+        # src/presentation/chart_data.py的load_candidates_for_date())；開word wrap
         # 讓Qt正確把每個\n斷行顯示，而不是被裁掉或擠在一行，_reload_candidates()填完
         # 資料後還要呼叫resizeRowsToContents()讓列高跟著撐開，不然多行內容會被壓在
         # 原本單行的列高裡看不全。
@@ -237,10 +245,29 @@ class MainWindow(QMainWindow):
     # 候選清單／圖表
     # ------------------------------------------------------------------
 
+    def _refresh_date_list(self) -> None:
+        """重新讀取daily_candidates裡目前有哪些日期，填入日期下拉選單。盡量保留使用者
+        目前選取的日期(例如按了「手動抓取今日資料」後選單多了新的一天，但使用者原本在看
+        某個歷史日期時不應該被強制跳回最新一天)，找不到才退回選最新一天(index 0，因為
+        list_candidate_dates()本身就是新到舊排序)。用blockSignals避免repopulate過程
+        觸發currentIndexChanged造成遞迴呼叫_reload_candidates()。
+        """
+        if self.conn is None:
+            return
+        current_selection = self.date_combo.currentText() or None
+        dates = chart_data.list_candidate_dates(self.conn)
+        self.date_combo.blockSignals(True)
+        self.date_combo.clear()
+        self.date_combo.addItems(dates)
+        if current_selection and current_selection in dates:
+            self.date_combo.setCurrentText(current_selection)
+        self.date_combo.blockSignals(False)
+
     def _reload_candidates(self) -> None:
         if self.conn is None:
             return
-        df, latest_date = chart_data.load_latest_candidates(self.conn)
+        target_date = self.date_combo.currentText() or None
+        df, latest_date = chart_data.load_candidates_for_date(self.conn, target_date=target_date)
         active_filters = [label for label, cb in self.filter_checkboxes.items() if cb.isChecked()]
         df = chart_data.apply_candidate_filters(self.conn, df, active_filters)
         self.candidates_table.setRowCount(0)
@@ -250,18 +277,22 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"台股每日選股（本機版）— {latest_date}，共{len(df)}檔")
         self.candidates_table.setRowCount(len(df))
         for row_idx, row in df.reset_index(drop=True).iterrows():
+            pct_change = row["pct_change"]
+            pct_text = f"{pct_change:+.2f}" if pd.notna(pct_change) else "-"
+            volume = row["volume"]
+            volume_text = f"{int(volume):,}" if pd.notna(volume) else "-"
             values = [
                 row["stock_id"], row["name"], row["signal_name"],
-                f"{row['entry_price']:.2f}", f"{row['stop_loss']:.2f}", row["note"] or "",
+                f"{row['entry_price']:.2f}", f"{row['stop_loss']:.2f}", pct_text, volume_text,
             ]
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                # 「備註」欄位內容常常比欄寬長、會被截斷看不到完整內容(尤其note，例如
-                # 「多頭架構+MA10/MA20多排向上+攻擊量...」這種說明文字)；設定tooltip讓
-                # 滑鼠移過去任一儲存格都能懸浮顯示完整文字，不用特別放寬欄寬。
+                # 部分欄位內容常常比欄寬長、會被截斷看不到完整內容(尤其訊號欄位同時符合多條
+                # 規則時)；設定tooltip讓滑鼠移過去任一儲存格都能懸浮顯示完整文字，不用特別
+                # 放寬欄寬。
                 item.setToolTip(str(value))
                 self.candidates_table.setItem(row_idx, col_idx, item)
-        self.candidates_table.resizeRowsToContents()  # 讓多行的訊號/備註欄位撐開列高，完整顯示
+        self.candidates_table.resizeRowsToContents()  # 讓多行的訊號欄位撐開列高，完整顯示
 
     def _on_candidate_selected(self) -> None:
         rows = self.candidates_table.selectionModel().selectedRows()
@@ -383,6 +414,7 @@ class MainWindow(QMainWindow):
         if self.conn is None:
             return
         run_screen_and_store(self.conn)
+        self._refresh_date_list()
         self._reload_candidates()
         if self._current_stock_id:
             self._rerender_chart()
@@ -398,6 +430,7 @@ class MainWindow(QMainWindow):
 
     def _on_fetch_finished(self, candidate_count: int) -> None:
         self.fetch_btn.setEnabled(True)
+        self._refresh_date_list()
         self._reload_candidates()
         QMessageBox.information(self, "完成", f"今日資料抓取完成，候選清單共{candidate_count}檔。")
 
