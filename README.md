@@ -88,14 +88,14 @@ python scripts/daily_pipeline.py --date 20260722 --local-db data/tw_stock.db
 2026-07-24起`fetch_today_twse()`改成官方「每日收盤行情」端點優先、查無資料(收盤前查詢
 一律如此)時退回yfinance批次下載盤中即時價當備援(見`scripts/daily_pipeline.py`)，所以
 盤中排程也能正常拿到資料、算出即時訊號，不會像之前一樣被誤判成「非交易日」。因此排程改成
-盤中每小時跑一次(9:00~13:00)取得即時訊號，收盤時間點(13:30)與收盤後一小時(14:30)各再
-加跑一次以盡快拿到官方最終收盤價(daily_data_status表會記錄某次結果是盤中即時價還是官方
-收盤價，兩個前端UI會標示「尚未收盤」)。
+盤中每小時跑一次(10:00~13:00，9點開盤當下還沒有值得抓的資料所以不排)取得即時訊號，
+收盤時間點(13:30)與收盤後一小時(14:30)各再加跑一次以盡快拿到官方最終收盤價
+(daily_data_status表會記錄某次結果是盤中即時價還是官方收盤價，兩個前端UI會標示
+「尚未收盤」)。
 
 用系統管理員權限開啟終端機，依序執行（台灣時間，週一到週五）：
 
 ```powershell
-schtasks /create /tn "tw_stock_pipeline_0900" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 09:00 /rl highest
 schtasks /create /tn "tw_stock_pipeline_1000" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 10:00 /rl highest
 schtasks /create /tn "tw_stock_pipeline_1100" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 11:00 /rl highest
 schtasks /create /tn "tw_stock_pipeline_1200" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 12:00 /rl highest
@@ -104,14 +104,14 @@ schtasks /create /tn "tw_stock_pipeline_1330" /tr "python D:\tw_stock\scripts\da
 schtasks /create /tn "tw_stock_pipeline_1430" /tr "python D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:30 /rl highest
 ```
 
-或用工作排程器GUI（`taskschd.msc`）手動建立7個工作，時間點跟上面一致，並記得每個都勾選：
+或用工作排程器GUI（`taskschd.msc`）手動建立6個工作，時間點跟上面一致，並記得每個都勾選：
 - 「觸發程序」頁籤 → 進階設定 → **「如果錯過排定的啟動時間，儘快執行工作」**（涵蓋電腦當時
   剛好關機的情況，開機後會自動補跑）。
 - 「一般」頁籤 → **「不論使用者登入與否均執行」**（背景執行，不需要停留在登入畫面）。
 
-建立後可以先用 `schtasks /run /tn "tw_stock_pipeline_0900"` 手動觸發一次驗證是否正常執行，
+建立後可以先用 `schtasks /run /tn "tw_stock_pipeline_1000"` 手動觸發一次驗證是否正常執行，
 執行紀錄可以在工作排程器的「記錄」頁籤查看，或直接開啟`data/pipeline_status.json`確認。
-之後若要移除，逐一用`schtasks /delete /tn "tw_stock_pipeline_0900" /f`（其餘6個同理）。
+之後若要移除，逐一用`schtasks /delete /tn "tw_stock_pipeline_1000" /f`（其餘5個同理）。
 
 ⚠️ 每小時跑一次全市場批次下載(TWSE+TPEx合計約2000多檔)，實測約需1分鐘內，不會對
 TWSE/yfinance造成明顯負擔；但如果之後有更高頻率的需求(例如每15分鐘)，應該重新評估
