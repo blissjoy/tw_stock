@@ -177,6 +177,17 @@ def run_daily_pipeline(
     iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
 
     pipeline_status.write_status("running", date=iso_date)
+
+    def _on_progress(stage: str, done: int, total: int) -> None:
+        # 心跳：每次進度回報順便重寫一次running狀態，讓updated_at持續往前推進——2026-07-24
+        # 的事故發現process被強制中止(kill/當機)時，Python的except/finally完全沒機會
+        # 執行，狀態檔案會永久停在最初寫入的"running"、UI因此永遠顯示「更新中」。有了心跳，
+        # pipeline_status.is_stale()才能正確判斷「updated_at已經很久沒更新=process可能
+        # 已經非正常終止」，不用等process自己回報失敗。
+        pipeline_status.write_status("running", date=iso_date, stage=stage, progress=f"{done}/{total}")
+        if on_progress is not None:
+            on_progress(stage, done, total)
+
     try:
         # 只呼叫一次FinMind的股票基本資料(涵蓋TWSE+TPEx)，同時供TWSE/TPEx兩條路徑取得真實
         # 公司名稱/產業別；即使skip_tpex=True也需要這份名單來修正TWSE的name欄位，成本很低(單次請求)。
@@ -185,7 +196,7 @@ def run_daily_pipeline(
 
         is_trading_day, is_intraday = fetch_today_twse(
             conn, date_str, stock_info_by_id,
-            on_progress=(lambda done, total: on_progress("TWSE", done, total)) if on_progress else None,
+            on_progress=lambda done, total: _on_progress("TWSE", done, total),
         )
         if not is_trading_day:
             print(f"{iso_date} TWSE官方收盤資料與yfinance盤中備援都查無資料，判定為非交易日，跳過選股與通知。")
@@ -201,7 +212,7 @@ def run_daily_pipeline(
         if not skip_tpex:
             tpex_count = fetch_today_tpex(
                 conn, date_str, stock_info,
-                on_progress=(lambda done, total: on_progress("TPEx", done, total)) if on_progress else None,
+                on_progress=lambda done, total: _on_progress("TPEx", done, total),
             )
             print(f"TPEx：{tpex_count} 檔成功更新")
 

@@ -475,11 +475,22 @@ class MainWindow(QMainWindow):
         status = pipeline_status.read_status()
         state = status.get("status") if status else None
         if state == "running":
+            date_label = status.get("date", "")
+            if pipeline_status.is_stale(status):
+                # process被強制中止(kill/當機/斷電)時，Python的except/finally完全沒機會
+                # 執行，狀態檔案會永久停在最後一次心跳的"running"——is_stale()判斷太久
+                # 沒更新，這裡不能再顯示「更新中」誤導使用者，要明確標示可能已經中斷。
+                self.status_label.setText(f"⚠ 上次自動更新可能已中斷（{date_label}，請重新手動抓取）")
+                return
             # 排程觸發(Windows工作排程器)剛好在桌面版開著的時候跑，這裡是唯一會顯示
             # 「更新中」的路徑；本視窗自己按按鈕觸發的情況已經被上面的guard擋掉，改由
-            # _on_fetch_progress()顯示更細緻的下載進度。
-            date_label = status.get("date", "")
-            self.status_label.setText(f"🔄 更新中...（{date_label}）")
+            # _on_fetch_progress()顯示更細緻的下載進度。心跳機制(見daily_pipeline.py的
+            # _on_progress())順便也把stage/progress寫進狀態檔，排程觸發的執行一樣能在
+            # 這裡顯示細緻進度，不是只有本視窗自己觸發才看得到。
+            stage = status.get("stage")
+            progress = status.get("progress")
+            detail = f" {stage} {progress}檔" if stage and progress else ""
+            self.status_label.setText(f"🔄 更新中...（{date_label}）{detail}")
             return
         if state == "failed":
             date_label = status.get("date", "")

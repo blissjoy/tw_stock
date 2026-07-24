@@ -250,6 +250,40 @@ def test_run_daily_pipeline_forwards_progress_callback_for_twse_and_tpex_stages(
     assert ("TPEx", 1, 1) in stages
 
 
+def test_run_daily_pipeline_writes_heartbeat_status_on_each_progress_tick(monkeypatch, tmp_path):
+    """對應2026-07-24的事故：process被強制中止時，狀態檔案的updated_at要能持續往前推進
+    (不是只有開始/結束才寫入)，pipeline_status.is_stale()才能正確判斷「太久沒更新=可能
+    已經非正常終止」。這裡驗證每次TWSE/TPEx進度回報都會順便重寫一次running狀態，且附上
+    stage/progress方便UI顯示。"""
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+
+    observed_statuses = []
+
+    def _fake_batch(stock_ids, start_date, end_date, on_progress=None):
+        if on_progress:
+            on_progress(len(stock_ids), len(stock_ids))
+            # 進度回報當下(TPEx批次下載途中)，狀態檔案應該已經被心跳寫成running+stage資訊，
+            # 不是要等到整個pipeline結束才第一次看到TPEx這個階段。
+            observed_statuses.append(daily_pipeline.pipeline_status.read_status())
+        return {"6488": [_price_row(stock_id="6488")]}
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", _fake_batch)
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False)
+
+    assert len(observed_statuses) == 1
+    mid_run_status = observed_statuses[0]
+    assert mid_run_status["status"] == "running"
+    assert mid_run_status["stage"] == "TPEx"
+    assert mid_run_status["progress"] == "1/1"
+
+
 def test_run_daily_pipeline_sends_notifications_when_not_dry_run(monkeypatch):
     conn = _fresh_conn()
     _stub_stock_info(monkeypatch, [])

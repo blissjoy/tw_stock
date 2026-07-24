@@ -168,9 +168,16 @@ def main() -> None:
         st.title("📈 台股每日選股")
         st.caption("資料來源：TWSE / TPEx(透過FinMind) — 盤中每小時自動更新，收盤後取得最終數字")
     with status_col:
-        pipeline_running = (pipeline_status.read_status() or {}).get("status") == "running"
-        if pipeline_running:
-            st.markdown("**:orange[🔄 更新中...]**")
+        status = pipeline_status.read_status() or {}
+        if status.get("status") == "running" and pipeline_status.is_stale(status):
+            # process被強制中止(kill/當機/斷電)時，Python的except/finally完全沒機會執行，
+            # 狀態檔案會永久停在最後一次心跳的"running"——is_stale()判斷太久沒更新，這裡
+            # 不能再顯示「更新中」誤導使用者，要明確標示可能已經中斷。
+            st.markdown("**:red[⚠ 上次自動更新可能已中斷，請重新手動抓取]**")
+        elif status.get("status") == "running":
+            stage, progress = status.get("stage"), status.get("progress")
+            detail = f"　{stage} {progress}檔" if stage and progress else ""
+            st.markdown(f"**:orange[🔄 更新中...{detail}]**")
         else:
             latest_update = get_latest_update_time(conn)
             if latest_update:

@@ -13,6 +13,12 @@ from src.data.config import get_gmail_credentials
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
+# 2026-07-24排查yfinance批次下載無限期掛住的事故時，順便檢查了pipeline其餘會打網路的
+# 步驟——smtplib.SMTP_SSL()原本沒有指定timeout，預設是不限時間等待，同樣有無限期卡住的
+# 風險(只是目前.env還沒填齊GMAIL_APP_PASSWORD/NOTIFY_EMAIL_TO，get_gmail_credentials()
+# 會在打網路前就先丟RuntimeError，還沒真的踩到)；比照line_notify.py既有的timeout=10，
+# 這裡也補上，避免之後補齊憑證後才第一次踩到同一類問題。
+SMTP_TIMEOUT_SECONDS = 15
 
 
 def format_candidates_email_body(date: str, candidates: list[dict]) -> str:
@@ -35,6 +41,6 @@ def send_email(subject: str, body: str) -> None:
     msg["From"] = address
     msg["To"] = to_addr
 
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
         server.login(address, app_password)
         server.sendmail(address, [to_addr], msg.as_string())
