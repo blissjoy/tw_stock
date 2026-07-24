@@ -46,7 +46,7 @@ def test_screen_bull_short_term_entry_returns_none_when_not_bull_trend(monkeypat
 
 
 def test_analyze_stock_signals_returns_empty_when_nothing_matches():
-    df = _build_uptrend_df(n_days=30)  # 天數不足，任何規則都不會觸發
+    df = _build_uptrend_df(n_days=20)  # 天數不足_SCREEN_FUNCTIONS(60)與黃金層掃描(30)兩邊的門檻
     assert daily_screener.analyze_stock_signals(df, min_days=60) == []
 
 
@@ -56,6 +56,8 @@ def test_analyze_stock_signals_includes_confidence_and_rule_description(monkeypa
         daily_screener, "daily_bull_trend_state",
         lambda high, low, close, n=5: pd.Series(True, index=close.index),
     )
+    import src.screener.rule_scan as rule_scan
+    monkeypatch.setattr(rule_scan, "scan_golden_tier", lambda df: [])  # 這裡只驗證_SCREEN_FUNCTIONS路徑，黃金層另有專屬測試
 
     matches = daily_screener.analyze_stock_signals(df, min_days=60)
 

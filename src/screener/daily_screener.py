@@ -274,19 +274,22 @@ _SCREEN_FUNCTIONS = (
 
 
 _SIGNAL_NAME_PATTERN = re.compile(r"^(R-[A-Z]+-\d+)(.*)（(\d+)%）$")
+_CONFIDENCE_PREFIX_PATTERN = re.compile(r"^(\d+)/100")
 
 
 def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60) -> list[dict]:
-    """對「單一股票」的OHLCV資料，跑過目前已接上的所有screen_*規則，回傳「今天」(資料
-    最後一列)符合的訊號清單，依信心分數由高到低排序，每筆附上從ai/zhu-rules/查出的規則
-    完整說明——供UI的「個股分析」面板使用，不同於screen_all_stocks/run_screen_and_store
-    是批次跑「所有股票」寫回daily_candidates資料表，這裡是針對使用者當下正在看的單一
-    股票即時運算，不寫入資料庫。
+    """對「單一股票」的OHLCV資料，跑過①目前已接上的所有screen_*規則(整套進場SOP，含
+    進場價/停損建議)、②`src.screener.rule_scan`的「黃金層」單點技術訊號(不含進場/停損
+    建議)，回傳「今天」(資料最後一列)符合的訊號清單，依信心分數由高到低排序，每筆附上
+    從ai/zhu-rules/查出的規則完整說明——供UI的「個股分析」面板使用，不同於
+    screen_all_stocks/run_screen_and_store是批次跑「所有股票」寫回daily_candidates
+    資料表，這裡是針對使用者當下正在看的單一股票即時運算，不寫入資料庫。
 
-    目前只涵蓋已接上_SCREEN_FUNCTIONS的規則（不是全部246條規則庫），範圍會隨之後接上
-    更多規則自動擴大，這裡的程式碼不用跟著改。
+    目前只涵蓋這兩類已接上的規則（不是全部246條規則庫，範圍界定見rule_scan.py開頭的
+    說明），範圍會隨之後接上更多規則自動擴大，這裡的程式碼不用跟著改。
     """
     from src.rule_docs import load_rule_doc
+    from src.screener.rule_scan import scan_golden_tier
 
     matches: list[dict] = []
     for screen_fn in _SCREEN_FUNCTIONS:
@@ -306,6 +309,21 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60) -> list[dict]:
             "description": doc.get("解讀") if doc else None,
             "reference": doc.get("原文與頁碼") if doc else None,
         })
+
+    for item in scan_golden_tier(df):
+        doc = load_rule_doc(item["rule_id"])
+        confidence_match = _CONFIDENCE_PREFIX_PATTERN.match(doc["信心"]) if doc and "信心" in doc else None
+        if confidence_match is None:
+            continue  # 理論上不會發生(rule_docs涵蓋全部246條)，查無信心分數就不列入
+        matches.append({
+            "rule_id": item["rule_id"],
+            "title": doc.get("名稱", item["rule_id"]),
+            "confidence": int(confidence_match.group(1)),
+            "note": item["note"],
+            "description": doc.get("解讀"),
+            "reference": doc.get("原文與頁碼"),
+        })
+
     matches.sort(key=lambda m: m["confidence"], reverse=True)
     return matches
 

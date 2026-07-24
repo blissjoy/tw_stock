@@ -1193,3 +1193,54 @@ _SCREEN_FUNCTIONS的規則，範圍會隨之後接上更多規則自動擴大，
 對本機真實db視覺驗證：Streamlit版跟桌面版都截圖確認——按鈕位於「顯示切線/軌道線」那一行
 最右邊，點下去後在同一行下方展開面板，正確顯示"R-CLASSIC-24　突破大量黑K買進（信心87%）"
 的完整解讀內容、原文與頁碼、目前觸發狀態，兩個前端呈現一致。
+
+## 「個股分析」擴大掃描範圍：接上「黃金層」約17條不需趨勢判斷的規則庫訊號（2026-07-24）
+
+使用者對「個股分析」提出更高要求：「列出來的資料是所有有符合的rule嗎？不是只有目前接上
+的那些，而是到rule庫裡做全掃描，只要有符合就全部要列」。先用Explore agent對
+`src/indicators/`、`src/patterns/`、`src/strategies/`、`src/screener/screening_rules.py`
+共25個檔案的所有`@implements_rule`函式做完整普查(418個函式)，發現規模遠比預期大：
+「純OHLCV可判斷」的約365個，但其中大部分是sma/bias_ratio/ma_weight這種底層計算式(永遠
+有數值、不是「有沒有觸發」的二元訊號)；真正的「訊號」函式還牽涉大量需要先算出「趨勢
+狀態(多頭/空頭)/轉折點(頭部/底部)」的中間輸入(如`is_at_high`/`wave_pattern_bullish`)，
+這些函式的docstring明確寫「外部注入」或「趨勢位置模組（尚未實作）」——本專案完全沒有
+一套自動判斷「現在算多頭還是空頭」的共用邏輯，這部分要先建好共用趨勢判斷子系統才能接，
+工程量遠超本次範圍。另外約53個函式需要三大法人籌碼/基本面/新聞面/當日tick等本專案完全
+沒有抓取的資料，也排除。
+
+跟使用者確認後，這次只先接「黃金層」——完全不需要趨勢/轉折點中間輸入、能直接從
+OHLCV+基礎指標(均線/MACD/KD/RSI/布林通道/量能/K棒幾何)判斷「今天有沒有觸發」的規則，
+共17條(R-MA-08/09/12/13/14/16、R-INDICATOR-02/03/11/14/15/22/23、R-VOLPRICE-01、
+R-CANDLE-05/13/25)。刻意排除`is_stop_fall_volume`這種需要「後續不再創新低」才能事後
+確認的規則(跟R-GAP-09當初修正的原則一致：只用今天以前的資料判斷今天，不用未來資料)。
+
+修法：
+- 新增`src/screener/rule_scan.py`的`scan_golden_tier(df)`：對單一股票的OHLCV資料，
+  依序呼叫上述17條規則各自對應的既有函式(全部重用`src/indicators/`已寫好且已有專屬
+  測試的函式，這裡只負責「串接呼叫+把結果轉成match」，不重新實作任何指標計算)，回傳
+  今天實際觸發的`[{"rule_id":..., "note":...}, ...]`清單。
+- `daily_screener.analyze_stock_signals()`改成合併兩種來源：①原本的`_SCREEN_FUNCTIONS`
+  (整套進場SOP，含進場價/停損建議)；②`scan_golden_tier()`(單點技術訊號，不含進場建議)。
+  黃金層項目的title/confidence改成從`rule_docs`的「名稱」「信心」欄位解析(新增
+  `_CONFIDENCE_PREFIX_PATTERN`解析"92/100 高（...）"這種文字取出開頭數字)，不像
+  `_SCREEN_FUNCTIONS`是從signal_name字串裡直接解析——兩條路徑最後合併進同一份清單、
+  一起依信心分數排序，UI端完全不用區分來源。
+- 修正一個桌面版才有的bug：`desktop/main_window.py`的`_refresh_analysis_view()`原本
+  直接把note/description文字塞進`QTextEdit.setHtml()`，但`scan_golden_tier`的note常有
+  原始的"<"/">"符號(例如"MA5<MA10<MA20")，QTextEdit會把它剖析成HTML標籤、內容被吃掉一截
+  (實測畫面只顯示到"目前狀態：MA5"就斷掉)——改用`html.escape()`包住所有動態文字欄位才
+  修好。Streamlit版沒有這個問題(`st.write`/`st.caption`預設`unsafe_allow_html=False`，
+  不會把文字內容當HTML剖析)。
+
+新增`src/screener/rule_scan.py`與`tests/test_rule_scan.py`(5個測試：資料不足回傳空清單、
+上漲趨勢資料觸發多頭類訊號、下跌趨勢資料觸發空頭類訊號、盤整資料觸發均線糾結、monkeypatch
+逐一驗證17條規則的串接邏輯都正確接對)；更新`tests/test_daily_screener.py`既有2個測試
+(改用monkeypatch關掉黃金層掃描，讓測試只驗證`_SCREEN_FUNCTIONS`路徑本身，避免真實股價
+資料同時觸發黃金層訊號讓斷言變得不穩定)。508個測試全過。
+
+對本機真實db驗證(股票009807)：Streamlit版與桌面版都截圖確認——「個股分析」面板正確顯示
+5筆符合的訊號(R-MA-09均線空頭排列90%、R-CLASSIC-24突破大量黑K買進87%、R-CANDLE-05高檔
+變盤線62%、R-MA-16均線糾結58%、R-CANDLE-13低檔變盤線55%)，依信心分數降冪排序，兩個
+前端呈現一致(修正桌面版HTML跳脫bug後)。R-MA-09(空頭排列)與R-CLASSIC-24(突破大量黑K買進，
+偏多訊號)同時出現看似矛盾，這是「黃金層」刻意不含趨勢判斷的預期結果——不同規則各自反映
+不同時間尺度/面向的技術現象，非bug。

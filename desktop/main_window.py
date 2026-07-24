@@ -10,6 +10,7 @@ chart_data.py`的圖表資料組裝、`src/patterns/chart_overlays.py`的切線/
 
 from __future__ import annotations
 
+import html
 import tempfile
 from pathlib import Path
 
@@ -356,15 +357,20 @@ class MainWindow(QMainWindow):
         if not matches:
             self.analysis_view.setHtml("<p>目前沒有符合任何已接上規則庫的訊號。</p>")
             return
+        # ⚠️ QTextEdit.setHtml()一定會把內容當HTML剖析，rule_scan.py的note文字裡常有
+        # "MA5<MA10<MA20"這種原始"<"/">"符號(見rule_scan.py)，不escape的話會被誤判成
+        # HTML標籤、內容被吃掉一截(實測"目前狀態：MA5<MA10<MA20..."只會顯示到"MA5"就斷掉)。
+        # Streamlit版沒有這個問題是因為st.write/st.caption預設unsafe_allow_html=False，
+        # 不會把文字內容當HTML剖析；這裡是QTextEdit本身的行為，只有桌面版需要escape。
         blocks = []
         for m in matches:
-            block = f"<p><b>{m['rule_id']}　{m['title']}（信心{m['confidence']}%）</b><br>"
+            block = f"<p><b>{html.escape(m['rule_id'])}　{html.escape(m['title'])}（信心{m['confidence']}%）</b><br>"
             if m["description"]:
-                block += f"{m['description']}<br>"
+                block += f"{html.escape(m['description'])}<br>"
             if m.get("reference"):
-                block += f"<i>原文與頁碼：{m['reference']}</i><br>"
+                block += f"<i>原文與頁碼：{html.escape(m['reference'])}</i><br>"
             if m.get("note"):
-                block += f"目前狀態：{m['note']}"
+                block += f"目前狀態：{html.escape(m['note'])}"
             block += "</p><hr>"
             blocks.append(block)
         self.analysis_view.setHtml("".join(blocks))
