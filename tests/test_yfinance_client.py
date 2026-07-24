@@ -1,4 +1,7 @@
+import time
+
 import pandas as pd
+import pytest
 
 import src.data.yfinance_client as yfinance_client
 
@@ -29,7 +32,7 @@ def _single_ticker_df(dates: list[str]) -> pd.DataFrame:
 def test_fetch_prices_batch_extracts_each_ticker_from_multiindex(monkeypatch):
     df_batch = _multi_ticker_df(["2330.TW", "5871.TW"], ["2026-07-22"])
 
-    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
         assert tickers == ["2330.TW", "5871.TW"]
         return df_batch
 
@@ -45,7 +48,7 @@ def test_fetch_prices_batch_extracts_each_ticker_from_multiindex(monkeypatch):
 def test_fetch_tpex_prices_batch_uses_two_suffix(monkeypatch):
     captured = {}
 
-    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
         captured["tickers"] = tickers
         return _multi_ticker_df(tickers, ["2026-07-22", "2026-07-23"])
 
@@ -68,7 +71,7 @@ def test_fetch_tpex_prices_batch_uses_two_suffix(monkeypatch):
 def test_fetch_prices_batch_skips_ticker_with_no_data(monkeypatch):
     df_batch = _multi_ticker_df(["5871.TWO"], ["2026-07-22"])
 
-    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
         return df_batch
 
     monkeypatch.setattr("yfinance.download", _fake_download)
@@ -89,7 +92,7 @@ def test_fetch_prices_batch_drops_rows_with_nan_close(monkeypatch):
         index=idx, columns=columns,
     )
 
-    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
         return df_batch
 
     monkeypatch.setattr("yfinance.download", _fake_download)
@@ -101,7 +104,7 @@ def test_fetch_prices_batch_drops_rows_with_nan_close(monkeypatch):
 
 
 def test_fetch_prices_batch_handles_single_ticker_non_multiindex(monkeypatch):
-    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
         return _single_ticker_df(["2026-07-22"])
 
     monkeypatch.setattr("yfinance.download", _fake_download)
@@ -122,7 +125,7 @@ def test_fetch_prices_batch_returns_empty_dict_when_download_returns_empty(monke
 def test_fetch_twse_prices_batch_uses_tw_suffix(monkeypatch):
     captured = {}
 
-    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
         captured["tickers"] = tickers
         return _multi_ticker_df(tickers, ["2026-07-24"])
 
@@ -137,7 +140,7 @@ def test_fetch_twse_prices_batch_uses_tw_suffix(monkeypatch):
 def test_fetch_prices_batch_reports_progress_after_each_batch(monkeypatch):
     monkeypatch.setattr(yfinance_client, "BATCH_SIZE", 2)  # 縮小批次大小方便測試多批次的情境
 
-    def _fake_download(tickers, start, end, interval, progress, auto_adjust):
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
         return _multi_ticker_df(tickers, ["2026-07-22"])
 
     monkeypatch.setattr("yfinance.download", _fake_download)
@@ -159,3 +162,49 @@ def test_fetch_prices_batch_works_without_progress_callback(monkeypatch):
     result = yfinance_client.fetch_prices_batch(["5871"], "2026-07-22", "2026-07-23", market_suffix=".TWO")
 
     assert set(result.keys()) == {"5871"}
+
+
+def test_download_with_hard_timeout_raises_when_download_hangs(monkeypatch):
+    """對應2026-07-24排程首次真實觸發時踩到的事故：yf.download()自己的timeout=10參數
+    不保證真的會讓函式返回(觀察到CPU降到0%、連線卡在CloseWait狀態12分鐘以上)。
+    _download_with_hard_timeout()額外包一層自己控制的硬性逾時，逾時要拋出
+    BatchDownloadTimeout，不能讓呼叫端也跟著卡住。"""
+    monkeypatch.setattr(yfinance_client, "HARD_TIMEOUT_SECONDS", 0.2)
+
+    def _hanging_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
+        time.sleep(5)  # 模擬掛住，遠超過0.2秒的硬性逾時
+
+    monkeypatch.setattr("yfinance.download", _hanging_download)
+
+    with pytest.raises(yfinance_client.BatchDownloadTimeout):
+        yfinance_client._download_with_hard_timeout(["1101.TW"], "2026-07-22", "2026-07-23")
+
+
+def test_download_with_hard_timeout_reraises_underlying_exception(monkeypatch):
+    """yf.download()本身丟出例外(例如網路錯誤)時，應該原樣往外拋，不是被吞掉或誤判成逾時。"""
+    def _raise(tickers, start, end, interval, progress, auto_adjust, timeout=10):
+        raise RuntimeError("模擬yfinance網路錯誤")
+
+    monkeypatch.setattr("yfinance.download", _raise)
+
+    with pytest.raises(RuntimeError, match="模擬yfinance網路錯誤"):
+        yfinance_client._download_with_hard_timeout(["1101.TW"], "2026-07-22", "2026-07-23")
+
+
+def test_fetch_prices_batch_skips_hung_batch_and_keeps_other_batches(monkeypatch):
+    """兩批下載，第一批卡住逾時、第二批正常——第一批被跳過不拋例外，第二批的結果不受影響，
+    對應yfinance批次下載其中一批卡住時，不該讓整次抓取全部失敗。"""
+    monkeypatch.setattr(yfinance_client, "BATCH_SIZE", 1)
+    monkeypatch.setattr(yfinance_client, "HARD_TIMEOUT_SECONDS", 0.2)
+
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
+        if tickers[0] == "1101.TW":
+            time.sleep(5)
+        return _multi_ticker_df(tickers, ["2026-07-22"])
+
+    monkeypatch.setattr("yfinance.download", _fake_download)
+
+    result = yfinance_client.fetch_prices_batch(["1101", "1102"], "2026-07-22", "2026-07-23", market_suffix=".TW")
+
+    assert "1101" not in result  # 這一批逾時被跳過
+    assert "1102" in result  # 另一批正常成功，不受影響
