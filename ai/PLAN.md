@@ -1806,3 +1806,89 @@ Python模組，只有完整重啟`streamlit run`(Ctrl+C後重新執行指令)才
 分數179~180，排在只觸發1條規則的87~92分股票之前)；桌面版(PySide6 offscreen)截圖確認
 同一視窗大小下可視列數從原本個位數大幅增加到約15列、「訊號」欄多條規則正確換行成2行
 且欄寬明顯比其他欄位寬。
+
+## 圖表左上角標題重疊、Y軸刻度太粗、MACD/KD無hover與參數標示、回補歷史資料解決月線資料不足(2026-07-25)
+
+使用者一次回報4個問題(明確要求「一次改成功，不要多次反覆要求」)：
+1. Streamlit process不是使用者自己啟動的，要我重跑——查證後確認是這個session稍早驗證
+   用途留下的舊process(啟動於上一次chart_data.py修正「之前」)，不是使用者的操作，重新
+   啟動並確認port 8501正常監聽。
+2. K線圖左上角資訊框3列擠在一起：第1列日期/OHLCV、第2列股票代號(缺名稱)、第3列legend
+   (均線/切線清單)，第2、3列重疊看不清楚。
+3. 價格Y軸固定約500元一格太粗，格線該依股票實際「升降單位」(0.5元或1元一檔)決定。
+4. MACD/KD子圖mouse hover沒有顯示當天數值，也沒有標示目前使用的參數。
+5. (稍早已回報過的)長期(月線)常顯示「轉折點不足」——這次要求直接背景下載更多歷史資料
+   解決，完成後回報。
+
+逐項修法：
+
+**問題2(標題重疊+補股票名稱)**：查證發現桌面版原本有兩層各自獨立定位的元素疊在一起——
+①`desktop/chart_render.py`注入的JS資訊框(固定CSS像素定位)②Plotly自己的`layout.title`
+(paper座標，跟著圖表整體高度等比例縮放)，兩者沒有對齊機制，圖表疊加MACD/KD子圖變高時
+title的實際像素位置就跟著飄動，容易撞到資訊框或legend。改法：
+- `src/presentation/chart_data.py`新增`get_stock_name(conn, stock_id)`，兩個前端組合
+  title文字時改用「代號+名稱」(例如"2330 台積電")，不是只有代號。
+- `build_candlestick_figure()`的title改成明確定位：`yanchor="top", y=1`(釘在最上緣往下
+  長)；legend改成`yanchor="bottom", y=1.01`(貼齊繪圖區頂端往上長)，兩者往相反方向從
+  各自錨點延伸，才不會疊在一起；`margin.t`從40拉高到70(有title時)給足夠空間。
+- 桌面版乾脆不用Plotly自己的title機制(呼叫端不再傳title給`build_candlestick_figure`，
+  `render_chart_html()`裡`fig.update_layout(title=dict(text=""))`清空)，改成跟原本的
+  資訊框一樣的固定CSS像素定位方式，新增第二列`stock_label`(代號+名稱)，畫在資訊框
+  正下方——兩層都用同一種定位機制、同一個高度基準，不會再隨圖表高度改變而錯位。
+  `margin.t`再拉高到80容納兩個固定列+legend。
+
+**問題3(Y軸刻度)**：新增`_twse_tick_size(price)`依台灣證交所公告的價格級距回傳實際升降
+單位(<10:0.01／10~50:0.05／50~100:0.1／100~500:0.5／500~1000:1／>=1000:5)，
+`_price_axis_dtick(df)`取該股票實際升降單位的整數倍當Y軸`dtick`，目標約10條格線，格線
+因此都落在真正可能成交的價位上，不是像Plotly預設那樣抓一個跟股票本身無關的間距。
+
+**問題4(MACD/KD參數與hover)**：`build_candlestick_figure()`用annotation在MACD/KD子圖
+右上角標示固定參數("MACD(12,26,9)"／"KD(N=9,D=3)"，對應`load_price_history()`實際呼叫
+`compute_macd()`/`compute_kd()`時完全沒覆寫過的預設參數)，左上角顯示「最新一天」的
+實際數值(靜態預設值，Streamlit版沒有hover機制、這組數字就是唯一也足夠的呈現方式)；
+hover-value那則annotation用`name`欄位標記("macd-hover-value"/"kd-hover-value")，讓
+JS能在不知道annotations清單實際順序的情況下找到正確index更新文字。
+
+桌面版`chart_render.py`的hover機制另外擴充：一開始嘗試比照價格資訊框的做法，對OSC/K
+trace各自附上customdata、用`evt.points[].customdata`分辨，結果發現滑鼠停在價格圖(row1)
+時MACD/KD框完全不會動——查證後確認Plotly的`hovermode="x"`在上下堆疊的多個子圖(各自
+獨立y軸)下，只會回傳「滑鼠當下實際所在那個子圖」的hover points，不會自動收集其他子圖
+的對應點，即使x軸是shared/linked的也一樣。改法：不管滑鼠實際在哪個子圖，只取第一個
+有`pointNumber`的point，這個數字是該筆資料在原始df裡的位置索引；因為price/macd/kd
+三份customdata都是用同一份`price_df`、依相同順序組出來的，同一個index天生對應同一天，
+直接用index去查三份陣列，三個資訊框(價格/MACD/KD)才能不管滑鼠停在哪個子圖都一次同步
+更新，不需要真的從對應子圖拿到hover point。
+
+**問題5(月線資料不足，背景回補)**：查證`scripts/backfill_history.py`確認TWSE官方批次
+端點按日期逐日查詢、沒有回溯年限限制，本機db只到2年純粹是先前backfill執行時選擇的
+`--start`/`--end`範圍(2024-07-22~2026-07-22)，不是技術限制。TPEx透過FinMind逐股抓，
+成本是「股票數x資料集數」與日期範圍長短基本無關，先前那次全市場回補就已經出現大量
+`FinMind API連續3次請求失敗`——這次只延伸TWSE官方端點的範圍(`--skip-tpex`)，成本低
+又可靠：背景執行`backfill_history.py --start 2023-01-02 --end 2024-07-21
+--skip-tpex`，把本機db的股價歷史從2024-07-22~2026-07-24(486個交易日)延伸到
+2023-01-03~2026-07-24(857~858個交易日，約3.4年)，TWSE 240個交易日全部有資料、0筆
+失敗。
+
+⚠️ 延伸資料後意外發現一個連帶要修的參數：`chart_data.TREND_LOOKBACK_DAYS`原本設750天
+(約3年)，`load_price_history()`的`.tail(days)`裁切邏輯是從「現有全部歷史」尾端保留
+最近N天——db從486天長到860天左右後，750天的窗口反而會把最舊的一段(含月線轉折點演算法
+需要的暖身期)裁掉，2330的長期(月線)一度從「多頭」退化回「轉折點不足」，方向跟使用者
+要的完全相反。改成1000天(約4年)，暫時比db實際累積的歷史(860天)多留緩衝；這是trailing
+window設計本來就有的效果，之後db隨每日排程持續增長、遲早還是會再次超過1000天觸發裁切，
+不是bug，只是這個常數要抓得比「目前實際歷史」寬裕一些。
+
+驗證：對本機真實2330資料重新算過，`TREND_LOOKBACK_DAYS=1000`後trend_df撈到857天全部
+歷史(2023-01-03~2026-07-24，不再被裁切)，長期(月線)正確顯示「多頭」，依據是「最近兩個
+頭：594.00@2023-06-30→1160.00@2025-01-31（頭頭高）；最近兩個底：516.00@2023-09-30→
+780.00@2025-04-30（底底高）」——是真正算出來的多頭架構，不是「資料不足」的預設值。
+
+新增測試：`tests/test_chart_data.py`新增`get_stock_name()`/`_twse_tick_size()`/
+`_price_axis_dtick()`測試、title/legend定位測試、MACD/KD annotation(參數標示+
+hover-value預設文字)測試。572個測試全過。
+
+對本機真實db視覺驗證(2330)：Streamlit版(Playwright)與桌面版(直接開實際產生的HTML檔用
+瀏覽器截圖，QWebEngineView在offscreen模式下`.grab()`會拿到空白畫面，是這個測試環境
+本身的已知限制，不影響實際桌面應用程式的行為)都確認：標題「2330 台積電」與legend不再
+重疊、Y軸格線變密且是實際升降單位的整數倍、MACD/KD子圖左上角顯示數值+右上角顯示參數；
+桌面版另外用Playwright模擬滑鼠移動確認hover時價格/MACD/KD三個資訊框會同步更新成滑鼠
+所在那一天的數值。

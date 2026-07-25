@@ -376,17 +376,20 @@ class MainWindow(QMainWindow):
             sr_levels = chart_overlays.nearest_support_resistance(all_levels, float(price_df["close"].iloc[-1]))
 
         fig = chart_data.build_candlestick_figure(
-            price_df, title=self._current_stock_id, holidays=holidays, ma_periods=selected_periods,
+            price_df, holidays=holidays, ma_periods=selected_periods,
             trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
             sr_levels=sr_levels, show_support_resistance=show_sr,
             show_macd=self.macd_checkbox.isChecked(), show_kd=self.kd_checkbox.isChecked(),
         )
-        # render_chart_html()疊加滑鼠十字線(貫穿價格/成交量兩個子圖)+左上角動態資訊框，
+        # render_chart_html()疊加滑鼠十字線(貫穿價格/成交量/MACD/KD子圖)+左上角動態資訊框，
         # 取代Plotly預設會跟著滑鼠跑的浮動tooltip，仿TradingView的畫法(desktop/chart_render.py
         # 有完整說明，這個效果只有桌面版能用，Streamlit版沒有對應機制)。include_plotlyjs=True
         # 把plotly.js整包內嵌，桌面版離線也能看圖。寫進暫存檔案再用load()開啟，理由見__init__裡
-        # _chart_html_path的註解(setHtml對大內容會靜默失敗)。
-        html = render_chart_html(fig, price_df)
+        # _chart_html_path的註解(setHtml對大內容會靜默失敗)。不傳title給build_candlestick_
+        # figure(桌面版改用render_chart_html的stock_label固定列顯示代號+名稱，見那裡的說明)。
+        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
+        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        html = render_chart_html(fig, price_df, stock_label=stock_label)
         self._chart_html_path.write_text(html, encoding="utf-8")
         self.chart_view.load(QUrl.fromLocalFile(str(self._chart_html_path)))
 

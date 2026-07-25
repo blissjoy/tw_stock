@@ -142,9 +142,11 @@ def main() -> None:
             all_levels = chart_overlays.compute_support_resistance_levels(price_df)
             sr_levels = chart_overlays.nearest_support_resistance(all_levels, float(price_df["close"].iloc[-1]))
 
+        stock_name = chart_data.get_stock_name(conn, stock_id)
+        chart_title = f"{stock_id} {stock_name}" if stock_name else stock_id
         st.plotly_chart(
             build_candlestick_figure(
-                price_df, holidays=holidays, ma_periods=selected_periods,
+                price_df, title=chart_title, holidays=holidays, ma_periods=selected_periods,
                 trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
                 sr_levels=sr_levels, show_support_resistance=show_sr,
                 show_macd=show_macd, show_kd=show_kd,

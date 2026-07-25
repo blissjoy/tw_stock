@@ -31,9 +31,15 @@ MA_COLORS = {
 # 短/中/長(日/週/月)趨勢分類器(見src/patterns/trend_state.py)專用的歷史長度——跟畫K線圖
 # 用的顯示窗口(load_price_history預設120天)分開，因為週線/月線要重新取樣(resample)出夠多
 # 根K棒才能讓轉折點演算法找到2組頭與2組底，120天日線只夠取樣出4~5根月線K棒，遠遠不夠。
-# 750個交易日約3年，本機DB目前實際累積的歷史通常不到這個天數，屆時就是撈到多少算多少
-# (SQL LIMIT不會因為要求的天數超過現有資料而報錯)。
-TREND_LOOKBACK_DAYS = 750
+#
+# ⚠️ 2026-07-25教訓：這個值原本設750(約3年)，本機DB回補到約860個交易日(約3.4年)後，
+# `load_price_history()`的`.tail(days)`會從「現有全部歷史」的尾端裁掉最舊的部分只留最近
+# 750天——裁掉的那段剛好包含月線轉折點演算法需要的暖身期資料，反而讓2330的長期(月線)
+# 從「多頭」退化回「轉折點不足」。這裡改成1000天(約4年)，暫時比本機DB實際累積的歷史
+# (860天)多留一截緩衝，之後DB隨每日排程持續增長、遲早還是會超過1000天再次觸發裁切——
+# 這是這個「trailing window」設計本來就有的效果(固定天數窗口，不是無限累積)，不是bug，
+# 只是要留意窗口大小要抓得比「目前實際歷史」寬裕，不能抓得太剛好。
+TREND_LOOKBACK_DAYS = 1000
 
 TRENDLINE_LABELS = {
     "up_tangent": "上升切線", "down_tangent": "下降切線",
@@ -224,6 +230,15 @@ def resolve_stock_id(conn, query: str) -> str | None:
     return row[0] if row else None
 
 
+def get_stock_name(conn, stock_id: str) -> str | None:
+    """回傳股票代號對應的名稱，查無資料回傳None。供圖表標題顯示「代號+名稱」用
+    (例如"2330 台積電")，不是只顯示代號——兩個前端都要呼叫，圖表本身的
+    build_candlestick_figure()只負責畫圖，不知道conn，名稱查詢留在這裡。
+    """
+    row = conn.execute("SELECT name FROM stocks WHERE stock_id = ?", (stock_id,)).fetchone()
+    return row[0] if row else None
+
+
 def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
     """回傳指定股票最近days天的OHLCV+均線(MA5/10/20/60/120/240，欄位名MA{n})，依date遞增
     排序、index為date；查無資料回傳空DataFrame。
@@ -259,6 +274,43 @@ def load_holidays_for_chart(df: pd.DataFrame) -> tuple[list[str], bool]:
         return trading_calendar.holidays_between(df.index.min().year, df.index.max().year), True
     except Exception:  # noqa: BLE001 - 不應該讓TWSE暫時打不通就讓整張圖表壞掉
         return [], False
+
+
+# 台灣證交所公告的股票升降單位（價格級距，越高價股票的最小跳動點越大）：
+# <10元:0.01／10~50:0.05／50~100:0.1／100~500:0.5／500~1000:1／>=1000:5。
+_TWSE_TICK_SIZE_TIERS: list[tuple[float, float]] = [
+    (10, 0.01), (50, 0.05), (100, 0.1), (500, 0.5), (1000, 1), (float("inf"), 5),
+]
+
+
+def _twse_tick_size(price: float) -> float:
+    """依股價所在的證交所價格級距，回傳該價位實際可成交的最小跳動點（升降單位）。"""
+    for upper_bound, tick in _TWSE_TICK_SIZE_TIERS:
+        if price < upper_bound:
+            return tick
+    return _TWSE_TICK_SIZE_TIERS[-1][1]
+
+
+def _price_axis_dtick(df: pd.DataFrame, target_gridlines: int = 10) -> float:
+    """算出價格Y軸的格線間距：取該股票實際升降單位的整數倍，讓格線都落在真正可能成交的
+    價位上，不是像Plotly預設那樣依數值大小自動抓一個跟股票本身無關的間距(例如2330股價在
+    1700~2500區間、Plotly預設抓500元一格，太粗)。倍數選擇讓可視範圍內大約有
+    target_gridlines(預設10)條格線，兼顧「格線落在有意義的價位」與「不會多到擠成一團」。
+    """
+    last_price = float(df["close"].iloc[-1])
+    tick = _twse_tick_size(last_price)
+    price_range = float(df["high"].max() - df["low"].min())
+    if price_range <= 0:
+        return tick
+    multiple = max(1, round(price_range / target_gridlines / tick))
+    return tick * multiple
+
+
+def _axis_ref_suffix(row: int) -> str:
+    """Plotly subplot的軸參照命名規則：第1個subplot的軸是"x"/"y"(不加數字)，第2個以後才是
+    "x2"/"y2"、"x3"/"y3"……annotation的xref/yref要用這個suffix才能正確對應到指定的子圖。
+    """
+    return "" if row == 1 else str(row)
 
 
 def build_candlestick_figure(
@@ -348,6 +400,15 @@ def build_candlestick_figure(
     volume_colors = ["#c0392b" if c >= o else "#1a1a1a" for o, c in zip(df["open"], df["close"])]
     fig.add_trace(go.Bar(x=df.index, y=df["volume"], marker_color=volume_colors, name="成交量", showlegend=False), row=2, col=1)
 
+    # MACD/KD子圖各自右上角標示目前使用的參數(固定值，直接寫死跟load_price_history()
+    # 呼叫compute_macd()/compute_kd()時完全沒有覆寫參數的事實一致)，左上角顯示「最新一天」
+    # 的實際數值(不hover時的預設狀態)——desktop/chart_render.py會在滑鼠hover時透過JS動態
+    # 覆寫這個文字改顯示「當天」數值，這裡先給的是靜態的初始/預設內容，Streamlit版沒有
+    # hover機制，這組數字就是它唯一、也足夠的呈現方式。annotation用name標記
+    # ("macd-hover-value"/"kd-hover-value")，讓chart_render.py的JS能在不知道實際
+    # annotations清單順序的情況下，用name找到正確的index更新文字。
+    annotations = list(fig.layout.annotations or ())
+
     if macd_row is not None and {"DIF", "MACD", "OSC"}.issubset(df.columns):
         # OSC正值紅柱(多方動能)/負值綠柱(空方動能)是書中原文定義的顏色，跟K棒紅漲黑跌是
         # 兩套獨立配色慣例，不要混用(見src/indicators/macd.py docstring)。
@@ -356,20 +417,53 @@ def build_candlestick_figure(
         fig.add_trace(go.Scatter(x=df.index, y=df["DIF"], mode="lines", name="DIF", line=dict(color="#e74c3c", width=1.2)), row=macd_row, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], mode="lines", name="MACD訊號線", line=dict(color="#2980b9", width=1.2)), row=macd_row, col=1)
 
+        macd_suffix = _axis_ref_suffix(macd_row)
+        last = df.iloc[-1]
+        annotations.append(dict(
+            xref=f"x{macd_suffix} domain", x=1, yref=f"y{macd_suffix} domain", y=1,
+            xanchor="right", yanchor="top", showarrow=False, font=dict(size=11, color="#666666"),
+            text="MACD(12,26,9)",
+        ))
+        annotations.append(dict(
+            xref=f"x{macd_suffix} domain", x=0, yref=f"y{macd_suffix} domain", y=1,
+            xanchor="left", yanchor="top", showarrow=False, font=dict(size=11, color="#333333"),
+            text=f"DIF {last['DIF']:.2f}　MACD {last['MACD']:.2f}　OSC {last['OSC']:.2f}",
+            name="macd-hover-value",
+        ))
+
     if kd_row is not None and {"K", "D"}.issubset(df.columns):
         fig.add_trace(go.Scatter(x=df.index, y=df["K"], mode="lines", name="K", line=dict(color="#8e44ad", width=1.3)), row=kd_row, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df["D"], mode="lines", name="D", line=dict(color="#f39c12", width=1.3)), row=kd_row, col=1)
         fig.add_hline(y=80, line=dict(color="#999999", width=1, dash="dot"), row=kd_row, col=1)
         fig.add_hline(y=20, line=dict(color="#999999", width=1, dash="dot"), row=kd_row, col=1)
 
+        kd_suffix = _axis_ref_suffix(kd_row)
+        last = df.iloc[-1]
+        annotations.append(dict(
+            xref=f"x{kd_suffix} domain", x=1, yref=f"y{kd_suffix} domain", y=1,
+            xanchor="right", yanchor="top", showarrow=False, font=dict(size=11, color="#666666"),
+            text="KD(N=9,D=3)",
+        ))
+        annotations.append(dict(
+            xref=f"x{kd_suffix} domain", x=0, yref=f"y{kd_suffix} domain", y=1,
+            xanchor="left", yanchor="top", showarrow=False, font=dict(size=11, color="#333333"),
+            text=f"K {last['K']:.1f}　D {last['D']:.1f}",
+            name="kd-hover-value",
+        ))
+
+    # 標題(股票代號+名稱)跟上方橫式legend(均線/切線/MACD/KD項目)搶同一塊頂端空間，原本
+    # 兩者都用Plotly預設位置、margin也不夠高，會疊在一起看不清楚——改成title釘在最上緣
+    # (yanchor="top", y=1)、legend的底部貼齊繪圖區頂部往上長(yanchor="bottom", y=1.01)，
+    # 兩者用不同錨點各自往「圖表外」的方向延伸，加高margin.t留出足夠空間，兩者才不會疊到。
     fig.update_layout(
-        title=title,
+        title=dict(text=title, x=0.01, xanchor="left", y=1, yanchor="top", font=dict(size=14)) if title else dict(text=""),
         xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=40 if title else 10, b=10),
+        margin=dict(l=10, r=10, t=70 if title else 10, b=10),
         height=560 + 140 * extra_rows,
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
+        annotations=annotations,
     )
-    fig.update_yaxes(title_text="價格", row=1, col=1)
+    fig.update_yaxes(title_text="價格", dtick=_price_axis_dtick(df), row=1, col=1)
     fig.update_yaxes(title_text="成交量", row=2, col=1)
     if macd_row is not None:
         fig.update_yaxes(title_text="MACD", row=macd_row, col=1)

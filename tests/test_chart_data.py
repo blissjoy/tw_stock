@@ -7,6 +7,7 @@ from src.presentation.chart_data import (
     build_candlestick_figure,
     compute_ma_bullish_flags,
     get_latest_update_time,
+    get_stock_name,
     list_candidate_dates,
     load_candidates_for_date,
     load_holidays_for_chart,
@@ -213,6 +214,17 @@ def test_load_candidates_for_date_reports_intraday_false_when_status_flagged_fin
     assert is_intraday is False
 
 
+def test_get_stock_name_returns_name_when_found():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    assert get_stock_name(conn, "2330") == "台積電"
+
+
+def test_get_stock_name_returns_none_when_not_found():
+    conn = _fresh_conn()
+    assert get_stock_name(conn, "9999") is None
+
+
 def test_list_candidate_dates_returns_dates_descending():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
@@ -369,6 +381,52 @@ def test_apply_candidate_filters_keeps_only_stocks_matching_ma_bullish(monkeypat
     result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=["均線多頭排列（MA5>MA10>MA20）"])
 
     assert list(result["stock_id"]) == ["2330", "2603"]
+
+
+def test_twse_tick_size_matches_official_price_tiers():
+    """台灣證交所公告的股票升降單位：<10:0.01／10~50:0.05／50~100:0.1／100~500:0.5／
+    500~1000:1／>=1000:5，邊界值(10/50/100/500/1000)歸入「較高」那一級。"""
+    assert chart_data._twse_tick_size(9.99) == 0.01
+    assert chart_data._twse_tick_size(10) == 0.05
+    assert chart_data._twse_tick_size(49.99) == 0.05
+    assert chart_data._twse_tick_size(50) == 0.1
+    assert chart_data._twse_tick_size(99.99) == 0.1
+    assert chart_data._twse_tick_size(100) == 0.5
+    assert chart_data._twse_tick_size(499.99) == 0.5
+    assert chart_data._twse_tick_size(500) == 1
+    assert chart_data._twse_tick_size(999.99) == 1
+    assert chart_data._twse_tick_size(1000) == 5
+    assert chart_data._twse_tick_size(2350) == 5
+
+
+def test_price_axis_dtick_is_a_multiple_of_the_actual_tick_size():
+    """使用者反映價格Y軸每5元一格太少(太粗)，應該依股票實際的升降單位決定格線間距——
+    這裡驗證算出來的dtick確實是該股票實際tick size的整數倍(格線都落在真正可能成交的
+    價位上)，不是像Plotly預設那樣抓一個跟股票本身無關的間距。"""
+    dates = pd.date_range("2026-01-01", periods=5)
+    df = pd.DataFrame(
+        {"open": [2300] * 5, "high": [2400, 2450, 2500, 2380, 2360], "low": [2200, 2250, 2280, 2300, 2290],
+         "close": [2350] * 5, "volume": [1000] * 5},
+        index=dates,
+    )
+    dtick = chart_data._price_axis_dtick(df)
+    tick = chart_data._twse_tick_size(float(df["close"].iloc[-1]))
+    assert dtick % tick == 0 or round(dtick / tick, 6) == round(dtick / tick)
+    assert dtick > 0
+
+
+def test_build_candlestick_figure_price_yaxis_dtick_reflects_tick_size():
+    dates = pd.date_range("2026-01-01", periods=3)
+    df = pd.DataFrame(
+        {"open": [2300] * 3, "high": [2400, 2450, 2500], "low": [2200, 2250, 2280],
+         "close": [2350] * 3, "volume": [1000] * 3},
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df)
+
+    expected_dtick = chart_data._price_axis_dtick(df)
+    assert fig.layout.yaxis.dtick == expected_dtick
 
 
 def test_build_candlestick_figure_uses_ohlc_and_is_not_a_line_chart():
@@ -559,6 +617,67 @@ def test_build_candlestick_figure_row_count_unchanged_when_macd_kd_disabled():
     fig = build_candlestick_figure(df, show_macd=False, show_kd=False)
 
     assert len(fig.data) == 2
+
+
+def test_build_candlestick_figure_macd_kd_add_parameter_and_hover_value_annotations():
+    """使用者反映MACD/KD子圖看不出目前用的參數、hover也不會顯示當天數值——修法是右上角
+    標示固定參數(MACD(12,26,9)/KD(N=9,D=3))、左上角顯示「最新一天」的數值(desktop版
+    另外用JS在hover時動態覆寫成當天數值，見desktop/chart_render.py)。hover-value那則
+    annotation要用name標記，讓JS能在不知道annotations清單實際順序的情況下找到它更新。"""
+    dates = pd.date_range("2026-07-01", periods=3)
+    df = pd.DataFrame(
+        {
+            "open": [100, 102, 101], "high": [103, 104, 105], "low": [99, 101, 100], "close": [102, 101, 104],
+            "volume": [1000, 1200, 900], "DIF": [1.0, 1.2, 1.5], "MACD": [0.8, 0.9, 1.0], "OSC": [0.2, 0.3, -0.1],
+            "K": [50.0, 60.0, 70.0], "D": [45.0, 55.0, 65.0],
+        },
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, show_macd=True, show_kd=True)
+
+    texts = [a.text for a in fig.layout.annotations]
+    assert "MACD(12,26,9)" in texts
+    assert "KD(N=9,D=3)" in texts
+    macd_value_annotation = next(a for a in fig.layout.annotations if a.name == "macd-hover-value")
+    kd_value_annotation = next(a for a in fig.layout.annotations if a.name == "kd-hover-value")
+    # 預設(還沒hover)顯示的是「最新一天」(最後一列)的數值
+    assert "1.50" in macd_value_annotation.text and "1.00" in macd_value_annotation.text and "-0.10" in macd_value_annotation.text
+    assert "70.0" in kd_value_annotation.text and "65.0" in kd_value_annotation.text
+
+
+def test_build_candlestick_figure_title_is_positioned_to_not_overlap_legend():
+    """使用者回報左上角股票代號(title)跟上方legend(均線/切線清單)重疊——修法是title釘在
+    最上緣(yanchor="top", y=1)、legend的底部貼齊繪圖區頂部往上長(yanchor="bottom",
+    y=1.01)，兩者往不同方向從各自的錨點延伸，才不會疊在一起。"""
+    dates = pd.date_range("2026-07-01", periods=3)
+    df = pd.DataFrame(
+        {"open": [100, 102, 101], "high": [103, 104, 105], "low": [99, 101, 100], "close": [102, 101, 104], "volume": [1000, 1200, 900]},
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, title="2330 台積電")
+
+    assert fig.layout.title.text == "2330 台積電"
+    # title的錨點是自己的"top"邊釘在y=1(繪圖區頂端)往下長；legend的錨點是自己的"bottom"邊
+    # 釘在y=1.01(繪圖區頂端再往上一點點)往上長——兩者分別往相反方向延伸，才不會疊在一起
+    # (不能只比較y數值大小，因為兩者的yanchor語意不同，y數值大不代表視覺位置更高)。
+    assert fig.layout.title.yanchor == "top" and fig.layout.title.y == 1
+    assert fig.layout.legend.yanchor == "bottom" and fig.layout.legend.y == 1.01
+
+
+def test_build_candlestick_figure_no_title_when_not_given():
+    """桌面版不傳title(改用固定CSS列顯示代號+名稱，見desktop/chart_render.py)，這裡要
+    確認預設維持空標題，不會意外印出None或其他字面值。"""
+    dates = pd.date_range("2026-07-01", periods=2)
+    df = pd.DataFrame(
+        {"open": [100, 102], "high": [103, 104], "low": [99, 101], "close": [102, 101], "volume": [1000, 1200]},
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df)
+
+    assert not fig.layout.title.text
 
 
 def test_build_candlestick_figure_sets_weekend_and_holiday_rangebreaks():
