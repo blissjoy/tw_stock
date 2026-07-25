@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(outer_scroll)
 
         central = QWidget()
-        central.setMinimumHeight(1000)  # 足夠容納候選清單+圖表+摘要的實務高度，視窗變小時才會出現捲軸
+        central.setMinimumHeight(1150)  # 足夠容納候選清單(320)+圖表(450)+摘要(220)等實務高度，視窗變小時才會出現捲軸
         outer_scroll.setWidget(central)
         root_layout = QVBoxLayout(central)
 
@@ -167,7 +167,21 @@ class MainWindow(QMainWindow):
         self.candidates_table = QTableWidget()
         self.candidates_table.setColumnCount(8)
         self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "產業別", "訊號(信心%)", "進場價", "停損價", "漲跌幅(%)", "成交量"])
-        self.candidates_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # ⚠️ 之前對整個header統一套用Stretch，會讓8欄一律平分寬度——「訊號」欄內容通常
+        # 遠比其他欄位長，平分寬度下wrap出來的行數暴增、視覺上看起來像沒有斷行。改成除了
+        # 「訊號」欄以外都用ResizeToContents(依內容自動給剛好的寬度)，多出來的空間全部
+        # 留給「訊號」欄(Stretch)，這樣wrap後的行數才會合理。
+        header = self.candidates_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        _SIGNAL_COLUMN = 3
+        header.setSectionResizeMode(_SIGNAL_COLUMN, QHeaderView.ResizeMode.Stretch)
+        # 欄寬只有在視窗真正顯示、完成layout後才會是最終數值，_reload_candidates()在
+        # __init__()裡就會被呼叫一次(視窗還沒show()、欄寬還是預設值)，resizeRowsToContents()
+        # 這時算出來的列高會用到錯誤的欄寬、之後不會自動修正，導致文字被截斷看起來像沒
+        # 斷行——sectionResized在欄寬因為Stretch隨視窗大小改變時也會觸發，一併重新計算
+        # 列高，兩種情況(初次顯示/使用者拉大縮小視窗)都能修正。
+        header.sectionResized.connect(lambda *_: QTimer.singleShot(0, self.candidates_table.resizeRowsToContents))
+        self.candidates_table.setMinimumHeight(320)  # 至少完整顯示約8~10列，不用一開始就要捲動
         self.candidates_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.candidates_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         # 同一檔股票符合多條規則時，訊號欄位的內容用「\n」分隔多行(見
@@ -261,7 +275,7 @@ class MainWindow(QMainWindow):
         bottom_layout.addWidget(self.summary_view)
 
         splitter.addWidget(bottom)
-        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
 
     # ------------------------------------------------------------------

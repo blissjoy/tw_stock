@@ -379,9 +379,19 @@ def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) 
     日期的舊紀錄(見storage.delete_daily_candidates_for_date)，否則「這次已經不再符合條件」
     的股票會繼續卡在表裡，讓候選清單顯示過時的結果。即使這次重算出0檔候選，也要清掉舊紀錄
     (代表『今天正確答案就是沒有候選股』)，不能因為candidates是空的就跳過清除這一步。
+
+    ⚠️ iso_date為None時，「今天」指的是『資料庫裡實際有價格資料的最新交易日』(MAX(date)
+    FROM stock_prices)，不是`date.today()`字面上的日曆日期——兩者在非交易日(週末/國定
+    假日)按「立即重新篩選」時會不同：`scripts/daily_pipeline.py`本身已經有「TWSE官方+
+    yfinance盤中備援都查無資料就判定非交易日、跳過選股」的檢查，但「立即重新篩選」是
+    純本地重算、不會觸發那段檢查，如果沿用`date.today()`，週六按下去會把『用上週五資料
+    算出的結果』寫成『週六的候選清單』，候選清單日期下拉選單因此會冒出一個實際上沒有任何
+    交易發生的日期，使用者會誤以為系統在非交易日也有跑選股。改成用價格資料本身的最新日期，
+    不管哪一天按都會正確地寫回『資料實際對應的那個交易日』。
     """
     if iso_date is None:
-        iso_date = date.today().isoformat()
+        latest_price_date = conn.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+        iso_date = latest_price_date or date.today().isoformat()
 
     frames = load_trailing_frames(conn, min_days=min_days)
     candidates = screen_all_stocks(frames, min_days=min_days)

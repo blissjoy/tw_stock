@@ -1748,3 +1748,61 @@ R-INDICATOR-10「不改變公式本身」的精神，維持三種天期用同一
 對本機真實db視覺驗證(2330)：Streamlit版(Playwright)與桌面版(PySide6 offscreen)都截圖+
 文字擷取確認「目前趨勢」正確顯示3行、每行都附上依據文字；「個股分析」面板R-TREND-04的
 note也正確附上「（依據：...）」；桌面版截圖確認視窗右側出現外層垂直捲軸。
+
+## 修正候選清單日期含非交易日、改成信心分數加總排序、桌面版候選清單可視列數太少(2026-07-25)
+
+使用者實測後一次回報4個問題（要求一次改對，不要多次來回）：
+
+1. 候選清單日期下拉選單出現「2026-07-25」(週六)，不應該出現非交易日。
+2. 候選清單預設排序應該改成「所有信心度加總分數」由高到低，不是股票代號。
+3. 桌面版候選清單可視列數太少、難以閱讀，「訊號」欄也沒有正確自動斷行。
+4. web版手動輸入2330再度出現`AttributeError: ... no attribute 'TREND_LOOKBACK_DAYS'`。
+
+逐項查證與修法：
+
+**問題1(根因，不是UI問題)**：追查發現本機db的`daily_candidates`裡真的有一筆日期是
+"2026-07-25"、但`stock_prices`同一天完全沒有任何資料——來源是`src/screener/
+daily_screener.py`的`run_screen_and_store(conn, iso_date=None, ...)`，`iso_date`
+未指定時原本用`date.today()`(日曆日期)，而兩個前端的「🔄 立即重新篩選」按鈕
+(`dashboard/app.py`/`desktop/main_window.py`)都是直接呼叫`run_screen_and_store(conn)`
+不傳日期。`scripts/daily_pipeline.py`本身已經有「TWSE官方+yfinance盤中備援都查無資料
+就判定非交易日、跳過選股」的檢查，但「立即重新篩選」是純本地重算、不會經過那段檢查——
+週六按下去，就會把『用上週五資料算出的結果』誤寫成『週六的候選清單』。修法：`iso_date`
+未指定時改成用`SELECT MAX(date) FROM stock_prices`(資料庫裡實際有價格資料的最新交易日)
+而非`date.today()`，資料完全空的邊界情況才退回`date.today()`。同時清掉本機db裡這筆
+已經寫入的錯誤資料(40筆`date='2026-07-25'`的`daily_candidates`紀錄)。新增測試
+`test_run_screen_and_store_defaults_to_latest_price_date_when_iso_date_omitted`。
+
+**問題2**：`src/presentation/chart_data.py`的`load_candidates_for_date()`原本
+`merged_df.sort_values("stock_id")`，改成先用正則`（(\d+)%）`從合併後的`signal_name`
+(可能同時含多條規則、以`\n`分隔)算出信心分數加總，`sort_values(["_confidence_sum",
+"stock_id"], ascending=[False, True])`(加總分數高到低、同分退回股票代號排序求穩定)，
+排序完丟棄`_confidence_sum`輔助欄，不影響回傳的欄位結構。新增測試
+`test_load_candidates_for_date_sorts_by_total_confidence_descending`。
+
+**問題3**：`desktop/main_window.py`的候選清單表格有兩個獨立問題疊加：
+- 欄寬：原本對整個header統一套用`Stretch`，8欄一律平分寬度，「訊號」欄內容通常遠比其他
+  欄長，平分寬度下wrap出來的行數暴增，視覺上像沒斷行。改成除了「訊號」欄以外都用
+  `ResizeToContents`(依內容自動給剛好寬度)，多出來的空間全部留給「訊號」欄(`Stretch`)。
+- 列高計算時機：`_reload_candidates()`在`__init__()`裡就會被呼叫(視窗還沒`show()`、
+  欄寬還是預設值)，當下呼叫的`resizeRowsToContents()`會用到還沒定案的欄寬、算出錯誤的
+  列高，之後不會自動修正。改成監聽`header.sectionResized`，欄寬因為視窗顯示或使用者
+  拉動改變時，都用`QTimer.singleShot(0, ...)`重新排一次`resizeRowsToContents()`，
+  初次顯示與使用者手動調整視窗大小兩種情境都能自我修正。
+- 可視列數：`candidates_table.setMinimumHeight(320)`(至少完整顯示約8~10列)，
+  `splitter`的stretch factor從(1,3)調成(2,3)給候選清單更多相對空間，`central`
+  widget的`setMinimumHeight`從1000拉高到1150配合。
+
+**問題4**：確認`src/presentation/chart_data.py`裡`TREND_LOOKBACK_DAYS`常數確實存在
+(上一次commit就加了，`python -c "from src.presentation import chart_data; print(chart_
+data.TREND_LOOKBACK_DAYS)"`直接驗證正常)，不是程式碼問題——使用者當時開著的Streamlit
+process是在那次commit「之前」就啟動的舊process，Python長駐process的`sys.modules`
+快取住了舊版module，重新整理瀏覽器頁面/點Streamlit選單裡的「Rerun」都不會重新載入
+Python模組，只有完整重啟`streamlit run`(Ctrl+C後重新執行指令)才會生效，已請使用者確認
+用這個方式重啟。
+
+564個測試全過。對本機真實db視覺驗證：Streamlit版(Playwright)截圖確認候選清單日期選單
+不再出現2026-07-25、清單依信心分數加總正確由高到低排序(前4名皆為觸發2條規則的股票，
+分數179~180，排在只觸發1條規則的87~92分股票之前)；桌面版(PySide6 offscreen)截圖確認
+同一視窗大小下可視列數從原本個位數大幅增加到約15列、「訊號」欄多條規則正確換行成2行
+且欄寬明顯比其他欄位寬。

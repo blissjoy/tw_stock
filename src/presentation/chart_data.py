@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 import pandas as pd
@@ -19,6 +20,8 @@ from src.indicators.kd import compute_kd
 from src.indicators.macd import compute_macd
 from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned
 from src.patterns import chart_overlays
+
+_CONFIDENCE_PATTERN = re.compile(r"（(\d+)%）")
 
 MA_COLORS = {
     5: "#2e86de", 10: "#e67e22", 20: "#8e44ad",
@@ -174,18 +177,28 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
     merged_rows = []
     for stock_id, group in raw_df.groupby("stock_id", sort=False):
         first = group.iloc[0]
+        signal_name = "\n".join(group["signal_name"])
         merged_rows.append({
             "stock_id": stock_id,
             "name": first["name"],
             "industry": first["industry"],
-            "signal_name": "\n".join(group["signal_name"]),
+            "signal_name": signal_name,
             "entry_price": first["entry_price"],
             "stop_loss": first["stop_loss"],
             "pct_change": first["pct_change"],
             "volume": first["today_volume"],
+            # 排序用：這檔股票當天符合的所有規則信心分數加總，觸發越多條規則、信心分數
+            # 越高的股票排越前面——不是最終顯示欄位，排序完就丟棄，不影響回傳的欄位結構。
+            "_confidence_sum": sum(int(m) for m in _CONFIDENCE_PATTERN.findall(signal_name)),
         })
-    merged_df = pd.DataFrame(merged_rows, columns=["stock_id", "name", "industry", "signal_name", "entry_price", "stop_loss", "pct_change", "volume"])
-    merged_df = merged_df.sort_values("stock_id").reset_index(drop=True)
+    merged_df = pd.DataFrame(
+        merged_rows,
+        columns=["stock_id", "name", "industry", "signal_name", "entry_price", "stop_loss", "pct_change", "volume", "_confidence_sum"],
+    )
+    # 預設排序：信心分數加總由高到低；同分時退回股票代號排序，確保結果穩定、可重現。
+    merged_df = merged_df.sort_values(
+        ["_confidence_sum", "stock_id"], ascending=[False, True]
+    ).drop(columns="_confidence_sum").reset_index(drop=True)
     return merged_df, target_date, is_intraday
 
 

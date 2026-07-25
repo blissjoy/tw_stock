@@ -352,6 +352,22 @@ def test_load_trailing_frames_only_includes_stocks_with_enough_days():
     assert list(frames["2330"].columns) == ["open", "high", "low", "close", "volume"]
 
 
+def test_run_screen_and_store_defaults_to_latest_price_date_when_iso_date_omitted(monkeypatch):
+    """iso_date未指定時應該用stock_prices裡實際的最新交易日，不是date.today()這個日曆
+    日期——真實案例：本機DB最後交易日其實是2026-07-24(週五)，但週六按「立即重新篩選」
+    (兩個前端都是呼叫run_screen_and_store(conn)、不傳iso_date)時寫成了2026-07-25(週六)，
+    候選清單日期下拉選單因此冒出一個實際上沒有任何交易發生的日期。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)  # _seed_stock_prices的日期產生規則下，最後一天是2026-03-14
+    candidate = {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None}
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate])
+
+    daily_screener.run_screen_and_store(conn, min_days=60)  # 不傳iso_date
+
+    dates = [row[0] for row in conn.execute("SELECT DISTINCT date FROM daily_candidates").fetchall()]
+    assert dates == ["2026-03-14"]
+
+
 def test_run_screen_and_store_writes_candidates_and_returns_them(monkeypatch):
     conn = init_db(":memory:")
     _seed_stock_prices(conn, "2330", n_days=70)

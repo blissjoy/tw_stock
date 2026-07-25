@@ -118,6 +118,32 @@ def test_load_candidates_for_date_merges_multiple_signals_for_same_stock_into_on
     assert row_1101["signal_name"] == "R-TREND-14多頭短線進場"  # 只觸發一條規則時，格式維持不變
 
 
+def test_load_candidates_for_date_sorts_by_total_confidence_descending():
+    """預設排序改成「這檔股票當天符合的所有規則信心分數加總」由高到低，不是股票代號——
+    使用者要優先看到最值得留意的候選股，不是隨機的代號順序。1101觸發2條規則(87+92=179)
+    應該排在只觸發1條規則的2330(87)前面，即使股票代號2330數字比較小。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "3008", "name": "大立光", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-CLASSIC-24突破大量黑K買進（87%）",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-23T18:00:00"},
+        {"date": "2026-07-23", "stock_id": "1101", "signal_name": "R-CLASSIC-24突破大量黑K買進（87%）",
+         "entry_price": 50.0, "stop_loss": 45.0, "note": None, "created_at": "2026-07-23T18:00:01"},
+        {"date": "2026-07-23", "stock_id": "1101", "signal_name": "R-TREND-14多頭短線進場（92%）",
+         "entry_price": 50.0, "stop_loss": 45.0, "note": None, "created_at": "2026-07-23T18:00:02"},
+        {"date": "2026-07-23", "stock_id": "3008", "signal_name": "R-SCREEN-15緩漲軌道突破做多（88%）",
+         "entry_price": 2000.0, "stop_loss": 1900.0, "note": None, "created_at": "2026-07-23T18:00:03"},
+    ])
+
+    df, _, _ = load_candidates_for_date(conn)
+
+    assert list(df["stock_id"]) == ["1101", "3008", "2330"]  # 179 > 88 > 87
+
+
 def test_load_candidates_for_date_computes_pct_change_and_volume_from_stock_prices():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
