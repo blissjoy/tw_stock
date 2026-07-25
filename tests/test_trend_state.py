@@ -115,9 +115,9 @@ def test_classify_trend_states_multi_horizon_uses_fixed_n_and_resamples_by_timef
     assert daily_len == len(close)
     assert weekly_len < daily_len  # 週線筆數應該遠少於日線
     assert monthly_len < weekly_len  # 月線筆數應該又比週線更少
-    assert result["短線"].timeframe == "日線"
-    assert result["中線"].timeframe == "週線"
-    assert result["長線"].timeframe == "月線"
+    assert result["短期"].timeframe == "日線"
+    assert result["中期"].timeframe == "週線"
+    assert result["長期"].timeframe == "月線"
 
 
 def test_classify_trend_states_multi_horizon_can_disagree_across_periods(monkeypatch):
@@ -134,9 +134,9 @@ def test_classify_trend_states_multi_horizon_can_disagree_across_periods(monkeyp
 
     result = classify_trend_states_multi_horizon(high, low, close)
 
-    assert result["短線"].trend == "空頭"
-    assert result["中線"].trend == "多頭"
-    assert result["長線"].trend == "多頭"
+    assert result["短期"].trend == "空頭"
+    assert result["中期"].trend == "多頭"
+    assert result["長期"].trend == "多頭"
 
 
 def test_classify_trend_states_multi_horizon_smoke_test_does_not_crash_on_realistic_data():
@@ -145,10 +145,11 @@ def test_classify_trend_states_multi_horizon_smoke_test_does_not_crash_on_realis
 
     result = classify_trend_states_multi_horizon(high, low, close)
 
-    assert set(result.keys()) == {"短線", "中線", "長線"}
-    for label, expected_timeframe in [("短線", "日線"), ("中線", "週線"), ("長線", "月線")]:
+    assert set(result.keys()) == {"短期", "中期", "長期"}
+    for label, expected_timeframe in [("短期", "日線"), ("中期", "週線"), ("長期", "月線")]:
         assert result[label].timeframe == expected_timeframe
         assert result[label].trend in ("多頭", "空頭", "盤整")
+        assert isinstance(result[label].reason, str) and result[label].reason  # 一定要有非空的判斷依據文字
 
 
 def test_classify_trend_states_multi_horizon_falls_back_to_range_when_resampled_data_too_short():
@@ -159,4 +160,33 @@ def test_classify_trend_states_multi_horizon_falls_back_to_range_when_resampled_
 
     result = classify_trend_states_multi_horizon(high, low, close)
 
-    assert result["長線"].trend == "盤整"
+    assert result["長期"].trend == "盤整"
+
+
+def test_classify_trend_states_multi_horizon_reason_shows_actual_head_and_bottom_prices(monkeypatch):
+    """使用者質疑「短線顯示空頭/中長線顯示盤整的依據是什麼」——reason必須附上實際的頭部/
+    底部價格與頭頭高低/底底高低的判讀，不能只回傳一個「多頭/空頭/盤整」結論字串，使用者才能
+    自己核對演算法有沒有算錯。"""
+    points = _fake_points([("bottom", 90), ("head", 100), ("bottom", 95), ("head", 105)])
+    monkeypatch.setattr(trend_state, "compute_turning_points", lambda h, l, c, n=5: points)
+    high, low, close = _make_daily_series()
+
+    result = classify_trend_states_multi_horizon(high, low, close)
+
+    assert result["短期"].trend == "多頭"
+    assert "頭頭高" in result["短期"].reason
+    assert "底底高" in result["短期"].reason
+    assert "100.00" in result["短期"].reason and "105.00" in result["短期"].reason  # 頭：100→105
+    assert "90.00" in result["短期"].reason and "95.00" in result["短期"].reason  # 底：90→95
+
+
+def test_classify_trend_states_multi_horizon_reason_explains_insufficient_turning_points(monkeypatch):
+    """轉折點不足2組頭與2組底時判定成「盤整」，reason要說明是「資料不足」，不能讓使用者
+    誤以為這是演算法真的判斷出「盤整」這個技術含義。"""
+    monkeypatch.setattr(trend_state, "compute_turning_points", lambda h, l, c, n=5: _fake_points([("bottom", 90)]))
+    high, low, close = _make_daily_series()
+
+    result = classify_trend_states_multi_horizon(high, low, close)
+
+    assert result["短期"].trend == "盤整"
+    assert "轉折點不足" in result["短期"].reason

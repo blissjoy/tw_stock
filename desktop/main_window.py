@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -111,8 +112,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        # 候選清單+搜尋列+均線/切線勾選+圖表+分析面板+摘要文字全部疊在一起，自然高度常常
+        # 超過視窗實際可見範圍(尤其視窗沒有最大化時)，之前各元件只能被硬擠壓、圖表下方的
+        # 摘要文字被截斷看不到。改成用QScrollArea包住整個central widget：視窗比內容小時
+        # 最外層會出現垂直捲軸，使用者可以捲動看到全部內容，而不是元件互相擠壓。
+        outer_scroll = QScrollArea()
+        outer_scroll.setWidgetResizable(True)
+        self.setCentralWidget(outer_scroll)
+
         central = QWidget()
-        self.setCentralWidget(central)
+        central.setMinimumHeight(1000)  # 足夠容納候選清單+圖表+摘要的實務高度，視窗變小時才會出現捲軸
+        outer_scroll.setWidget(central)
         root_layout = QVBoxLayout(central)
 
         filter_bar = QHBoxLayout()
@@ -240,11 +250,14 @@ class MainWindow(QMainWindow):
         bottom_layout.addWidget(self.analysis_view)
 
         self.chart_view = QWebEngineView()
+        self.chart_view.setMinimumHeight(450)  # 避免在QScrollArea裡被壓縮到看不出圖表內容
         bottom_layout.addWidget(self.chart_view, stretch=1)
 
         self.summary_view = QTextEdit()
         self.summary_view.setReadOnly(True)
-        self.summary_view.setMaximumHeight(120)
+        # 目前趨勢改成短/中/長三行各自附上判斷依據後內容變多，原本120px只夠顯示1~2行，
+        # 拉高到220px讓大部分情況不用捲動就看得到完整的3行趨勢+K棒/型態/量價訊號。
+        self.summary_view.setMaximumHeight(220)
         bottom_layout.addWidget(self.summary_view)
 
         splitter.addWidget(bottom)
@@ -370,11 +383,17 @@ class MainWindow(QMainWindow):
         latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
         # 短/中/長三種天期分開顯示、各自標示判斷依據的K棒週期(見R-INDICATOR-10：做短線看
         # 日線、中期看週線、長期看月線)，不合併成單一「目前趨勢」——三者可能不一致(例如
-        # 日線走空、週線仍是多頭)，只看一種天期容易誤判。
-        trend_text = "　".join(f"{label}({timeframe})：{trend}" for label, (timeframe, trend) in summary["trend"].items())
+        # 日線走空、週線仍是多頭)，只看一種天期容易誤判。每個天期都附上「依據」(最近兩個
+        # 頭部/底部的實際價格、日期、頭頭高低/底底高低的判讀)，讓使用者能自己核對演算法的
+        # 判斷——改成每行一種天期，跟Streamlit版對齊，附上依據後單行會過長不好讀。
+        trend_lines = [
+            f"　- {label}（{timeframe}）：{trend}（依據：{reason}）"
+            for label, (timeframe, trend, reason) in summary["trend"].items()
+        ]
         lines = [
             f"最新交易日分析（{latest_date_label}）",
-            f"目前趨勢：{trend_text}",
+            "目前趨勢：",
+            *trend_lines,
             f"K棒名稱：{summary['candle_name']}",
             "型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"),
             "量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"),

@@ -158,11 +158,13 @@ def main() -> None:
         st.markdown(f"**📋 最新交易日分析（{latest_date_label}）**")
         # 短/中/長三種天期分開顯示、各自標示判斷依據的K棒週期(見R-INDICATOR-10：做短線看
         # 日線、中期看週線、長期看月線)，不合併成單一「目前趨勢」——三者可能不一致(例如
-        # 日線走空、週線仍是多頭)，只看一種天期容易誤判。
-        trend_text = "　".join(
-            f"{label}({timeframe})：{trend}" for label, (timeframe, trend) in summary["trend"].items()
-        )
-        st.write(f"目前趨勢：{trend_text}")
+        # 日線走空、週線仍是多頭)，只看一種天期容易誤判。每個天期都附上「依據」(最近兩個
+        # 頭部/底部的實際價格、日期、頭頭高低/底底高低的判讀)，讓使用者能自己核對演算法的
+        # 判斷，不是只丟一個「多頭/空頭/盤整」結論字串——改成每行一種天期，不是併成一行，
+        # 附上依據後單行會過長不好讀。
+        st.write("目前趨勢：")
+        for label, (timeframe, trend, reason) in summary["trend"].items():
+            st.write(f"　- {label}（{timeframe}）：{trend}（依據：{reason}）")
         st.write(f"K棒名稱：{summary['candle_name']}")
         st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
         st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))

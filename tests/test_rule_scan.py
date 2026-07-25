@@ -81,7 +81,7 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
     monkeypatch.setattr(rule_scan, "is_hammer_candle", lambda o, h, l, c: true_series)
     monkeypatch.setattr(rule_scan, "is_inverted_hammer_candle", lambda o, h, l, c: pd.Series(False, index=df.index))
     monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", lambda h, l, c: {
-        "短線": ("日線", "多頭"), "中線": ("週線", "多頭"), "長線": ("月線", "多頭"),
+        "短期": ("日線", "多頭", "測試依據"), "中期": ("週線", "多頭", "測試依據"), "長期": ("月線", "多頭", "測試依據"),
     })  # 讓interpret_cross真的算出訊號，不用另外mock
     monkeypatch.setattr(rule_scan, "kd_cross_signal_by_trend", lambda k, d, trend: text_series)
     monkeypatch.setattr(rule_scan, "bollinger_buy_signal_1", lambda close, lower, trend: true_series)
@@ -109,7 +109,7 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
 def test_scan_golden_tier_reports_bear_trend_and_skips_bull(monkeypatch):
     df = _trend_df(60, "up")
     monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", lambda h, l, c: {
-        "短線": ("日線", "空頭"), "中線": ("週線", "空頭"), "長線": ("月線", "空頭"),
+        "短期": ("日線", "空頭", "測試依據"), "中期": ("週線", "空頭", "測試依據"), "長期": ("月線", "空頭", "測試依據"),
     })
 
     rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
@@ -123,14 +123,15 @@ def test_scan_golden_tier_reports_each_horizon_independently_when_they_disagree(
     不會互相排擠——這正是分開判斷短/中/長趨勢的核心理由(見trend_state.py)。"""
     df = _trend_df(60, "up")
     monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", lambda h, l, c: {
-        "短線": ("日線", "空頭"), "中線": ("週線", "盤整"), "長線": ("月線", "多頭"),
+        "短期": ("日線", "空頭", "測試依據"), "中期": ("週線", "盤整", "測試依據"), "長期": ("月線", "多頭", "測試依據"),
     })
 
     results = scan_golden_tier(df)
     trend_notes = {item["rule_id"]: item["note"] for item in results if item["rule_id"] in ("R-TREND-03", "R-TREND-04")}
 
-    assert "短線(日線轉折波)" in trend_notes["R-TREND-04"]
-    assert "長線(月線轉折波)" in trend_notes["R-TREND-03"]
+    assert "短期(日線轉折波)" in trend_notes["R-TREND-04"]
+    assert "長期(月線轉折波)" in trend_notes["R-TREND-03"]
+    assert "依據：測試依據" in trend_notes["R-TREND-04"]  # note要附上reason，不是只有結論
     # 中線是盤整，R-TREND-03/04都不該為了中線多冒出一筆
     assert sum(1 for item in results if item["rule_id"] == "R-TREND-03") == 1
     assert sum(1 for item in results if item["rule_id"] == "R-TREND-04") == 1
@@ -142,7 +143,7 @@ def test_scan_golden_tier_skips_ma15_when_trend_is_range(monkeypatch):
     df = _trend_df(60, "up")
     true_series = pd.Series(True, index=df.index)
     monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", lambda h, l, c: {
-        "短線": ("日線", "盤整"), "中線": ("週線", "盤整"), "長線": ("月線", "盤整"),
+        "短期": ("日線", "盤整", "測試依據"), "中期": ("週線", "盤整", "測試依據"), "長期": ("月線", "盤整", "測試依據"),
     })
     monkeypatch.setattr(rule_scan, "is_golden_cross", lambda a, b: true_series)
 
@@ -156,7 +157,7 @@ def test_scan_golden_tier_skips_ma15_when_no_cross_today(monkeypatch):
     df = _trend_df(60, "up")
     false_series = pd.Series(False, index=df.index)
     monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", lambda h, l, c: {
-        "短線": ("日線", "多頭"), "中線": ("週線", "多頭"), "長線": ("月線", "多頭"),
+        "短期": ("日線", "多頭", "測試依據"), "中期": ("週線", "多頭", "測試依據"), "長期": ("月線", "多頭", "測試依據"),
     })
     monkeypatch.setattr(rule_scan, "is_golden_cross", lambda a, b: false_series)
     monkeypatch.setattr(rule_scan, "is_death_cross", lambda a, b: false_series)

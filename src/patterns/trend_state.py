@@ -32,6 +32,14 @@ patterns_2.py的函式、R-VOLPRICE-03/04/09/10等)需要的`is_at_high`/`is_at_
 desktop的個股分析面板)因此改成額外抓一份更長期(見`src/presentation/chart_data.py`的
 `TREND_LOOKBACK_DAYS`)的日線資料專門餵給這裡，不是沿用畫K線圖用的120天窗口——兩者用途
 不同，不應該共用同一份裁切過的資料。
+
+⚠️ 2026-07-24第三次修正：使用者拿2330實際結果反問「短線(日線)顯示空頭的依據是什麼？中線/
+長線顯示盤整的依據又是什麼？我看起來中長線都是上升趨勢」——這正凸顯只顯示「多頭/空頭/
+盤整」這個結論、不附任何依據，使用者沒有辦法自行核對演算法的判斷是否合理。改成
+`TrendHorizonResult`新增`reason`欄位，把「最近兩個頭部/底部的實際價格與日期、以及頭頭高
+低/底底高低的判讀」直接組成文字回傳，呼叫端(UI)可以原文顯示，讓使用者自己核對，不用只
+相信一個結論字串。也把顯示標籤從「短線/中線/長線」改成使用者要求的「短期/中期/長期」
+(避免跟R-TREND-01原本「短線轉折波=5日」的舊用法混淆——那是另一個已經不再使用的定義)。
 """
 
 from __future__ import annotations
@@ -40,7 +48,7 @@ from typing import NamedTuple
 
 import pandas as pd
 
-from src.indicators.pivots import compute_turning_points
+from src.indicators.pivots import TurningPoint, compute_turning_points
 from src.indicators.trend import is_bear_trend, is_bull_trend
 
 TREND_BULL = "多頭"
@@ -51,11 +59,11 @@ TREND_RANGE = "盤整"
 # 「不改變公式本身，只換輸入的K棒週期」的做法)；短/中/長三種天期改成分別對應日/週/月線，
 # 用pandas resample規則把日線OHLC重新取樣成週線/月線後再套用同一套演算法。key的順序即為
 # 顯示順序(短→中→長)；tuple為(timeframe顯示標籤, resample規則)，resample規則為None代表
-# 不需要重新取樣(短線本來就是日線)。
+# 不需要重新取樣(短期本來就是日線)。
 _HORIZONS: dict[str, tuple[str, str | None]] = {
-    "短線": ("日線", None),
-    "中線": ("週線", "W-FRI"),
-    "長線": ("月線", "ME"),
+    "短期": ("日線", None),
+    "中期": ("週線", "W-FRI"),
+    "長期": ("月線", "ME"),
 }
 TREND_TURNING_POINT_N = 5
 
@@ -63,6 +71,7 @@ TREND_TURNING_POINT_N = 5
 class TrendHorizonResult(NamedTuple):
     timeframe: str   # 這個天期對應的K棒週期："日線"/"週線"/"月線"
     trend: str       # "多頭"/"空頭"/"盤整"
+    reason: str      # 判斷依據：最近兩個頭部/底部的價格、日期與頭頭高低/底底高低的比較結果
 
 
 def classify_trend_state(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 5) -> str:
@@ -89,6 +98,48 @@ def classify_trend_state(high: pd.Series, low: pd.Series, close: pd.Series, n: i
     return TREND_RANGE
 
 
+def _fmt_turning_point(tp: TurningPoint) -> str:
+    """把單一轉折點格式化成「價格@日期」，供判斷依據文字使用。"""
+    try:
+        date_str = pd.Timestamp(tp.index).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        date_str = str(tp.index)
+    return f"{tp.price:.2f}@{date_str}"
+
+
+def _describe_trend_basis(turning_points: list[TurningPoint]) -> str:
+    """把is_bull_trend/is_bear_trend實際比較的「最近兩個頭部/最近兩個底部」組成使用者能自行
+    核對的文字(價格＋日期＋頭頭高低/底底高低的判讀)，不是額外的判斷邏輯——只是把
+    R-TREND-03/04已經在用的同一份比較結果格式化成看得懂的說明，讓UI能附上依據，不是只
+    顯示一個「多頭/空頭/盤整」結論字串。轉折點不足2組頭與2組底時(is_bull_trend/
+    is_bear_trend本身也會因此回傳False，判定成「盤整」)，直接說明資料不足，不是真的判斷
+    出「盤整」這個技術含義。
+    """
+    heads = [tp for tp in turning_points if tp.type == "head"]
+    bottoms = [tp for tp in turning_points if tp.type == "bottom"]
+    if len(heads) < 2 or len(bottoms) < 2:
+        return f"轉折點不足(頭部{len(heads)}組、底部{len(bottoms)}組，各需至少2組才能判斷)"
+
+    head_prev, head_last = heads[-2], heads[-1]
+    bottom_prev, bottom_last = bottoms[-2], bottoms[-1]
+    if head_last.price > head_prev.price:
+        head_word = "頭頭高"
+    elif head_last.price < head_prev.price:
+        head_word = "頭頭低"
+    else:
+        head_word = "頭頭平"
+    if bottom_last.price > bottom_prev.price:
+        bottom_word = "底底高"
+    elif bottom_last.price < bottom_prev.price:
+        bottom_word = "底底低"
+    else:
+        bottom_word = "底底平"
+    return (
+        f"最近兩個頭：{_fmt_turning_point(head_prev)}→{_fmt_turning_point(head_last)}（{head_word}）；"
+        f"最近兩個底：{_fmt_turning_point(bottom_prev)}→{_fmt_turning_point(bottom_last)}（{bottom_word}）"
+    )
+
+
 def _resample_ohlc(high: pd.Series, low: pd.Series, close: pd.Series, rule: str | None) -> tuple[pd.Series, pd.Series, pd.Series]:
     """把日線high/low/close重新取樣成`rule`週期的K棒(high取區間最高、low取區間最低、
     close取區間最後一筆收盤)；rule為None時代表本來就是日線，原樣傳回。要求high/low/close
@@ -105,12 +156,13 @@ def _resample_ohlc(high: pd.Series, low: pd.Series, close: pd.Series, rule: str 
 def classify_trend_states_multi_horizon(
     high: pd.Series, low: pd.Series, close: pd.Series,
 ) -> dict[str, TrendHorizonResult]:
-    """回傳{"短線": TrendHorizonResult(timeframe="日線", trend=...),
-    "中線": TrendHorizonResult(timeframe="週線", ...), "長線": TrendHorizonResult(timeframe=
+    """回傳{"短期": TrendHorizonResult(timeframe="日線", trend=..., reason=...),
+    "中期": TrendHorizonResult(timeframe="週線", ...), "長期": TrendHorizonResult(timeframe=
     "月線", ...)}——依R-INDICATOR-10「做短線看日線、中期看週線、長期看月線」的定義，把同一套
     N=5轉折波演算法分別套用在日/週/月三種週期重新取樣後的K棒上。三者可能不一致(例如日線走
     短空、週線仍是多頭)，這正是分開判斷的意義所在——呼叫端(UI)應該三個都顯示，不要合併成
-    一個籠統的「目前趨勢」。
+    一個籠統的「目前趨勢」。`reason`是給使用者核對用的判斷依據文字，見`_describe_trend_
+    basis()`。
 
     ⚠️ 週線/月線需要足夠長的日線歷史才能取樣出夠多根K棒，資料不足時該天期會偏向回傳「盤整」
     (轉折點不足2組頭與2組底)，不代表真的盤整，呼叫端若用短窗口(例如只抓120天日線)資料
@@ -119,6 +171,11 @@ def classify_trend_states_multi_horizon(
     result = {}
     for label, (timeframe, rule) in _HORIZONS.items():
         h, l, c = _resample_ohlc(high, low, close, rule)
-        trend = classify_trend_state(h, l, c, n=TREND_TURNING_POINT_N) if len(c) > 0 else TREND_RANGE
-        result[label] = TrendHorizonResult(timeframe=timeframe, trend=trend)
+        if len(c) > 0:
+            trend = classify_trend_state(h, l, c, n=TREND_TURNING_POINT_N)
+            turning_points = compute_turning_points(h, l, c, n=TREND_TURNING_POINT_N)
+            reason = _describe_trend_basis(turning_points)
+        else:
+            trend, reason = TREND_RANGE, "資料不足，無法重新取樣出任何K棒"
+        result[label] = TrendHorizonResult(timeframe=timeframe, trend=trend, reason=reason)
     return result

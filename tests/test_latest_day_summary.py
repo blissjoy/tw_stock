@@ -137,12 +137,13 @@ def test_summarize_latest_day_combines_all_parts():
     # 不是單一字串。resample成週線/月線需要DatetimeIndex，df沒有日期索引時
     # (`_df()`用預設RangeIndex)，週/中/長三個天期會直接算出「盤整」而不是crash——
     # 這裡只驗證結構正確，資料量/索引不足以支撐真正的趨勢判斷不在這個測試的範圍內。
-    assert set(result["trend"].keys()) == {"短線", "中線", "長線"}
-    assert result["trend"]["短線"].timeframe == "日線"
-    assert result["trend"]["中線"].timeframe == "週線"
-    assert result["trend"]["長線"].timeframe == "月線"
+    assert set(result["trend"].keys()) == {"短期", "中期", "長期"}
+    assert result["trend"]["短期"].timeframe == "日線"
+    assert result["trend"]["中期"].timeframe == "週線"
+    assert result["trend"]["長期"].timeframe == "月線"
     for horizon in result["trend"].values():
         assert horizon.trend in ("多頭", "空頭", "盤整")
+        assert isinstance(horizon.reason, str) and horizon.reason  # 一定要有非空的判斷依據文字
 
 
 def test_summarize_latest_day_uses_trend_df_for_trend_classification_when_given():
@@ -165,4 +166,4 @@ def test_summarize_latest_day_uses_trend_df_for_trend_classification_when_given(
 
     # candle_name/patterns/volume_signals仍然是df(最後一列)算出來的，不受trend_df影響
     assert result["candle_name"] == "長紅K"
-    assert set(result["trend"].keys()) == {"短線", "中線", "長線"}
+    assert set(result["trend"].keys()) == {"短期", "中期", "長期"}
