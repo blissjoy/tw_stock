@@ -477,12 +477,20 @@ class MainWindow(QMainWindow):
         blocks = [header]
         for m in matches:
             block = f"<p><b>{html.escape(m['rule_id'])}　{html.escape(m['title'])}（信心{m['confidence']}%）</b><br>"
+            # 「目前狀態」(這條規則今天為什麼觸發)排在規則名稱後第一個位置，跟dashboard/
+            # app.py對齊——使用者最想先看到的是「現在是什麼情況」，解讀/原文頁碼是補充
+            # 說明。analyze_stock_signals()裡同一個rule_id若對應多筆觸發(例如R-TREND-03
+            # 短期/中期各自獨立判斷都是多頭)，note會是用換行接起來的多行文字，這裡逐行
+            # 各自加註「目前狀態：」/縮排顯示，不能假設note永遠是單行字串。
+            if m.get("note"):
+                note_lines = m["note"].split("\n")
+                block += f"目前狀態：{html.escape(note_lines[0])}<br>"
+                for extra_line in note_lines[1:]:
+                    block += f"　　{html.escape(extra_line)}<br>"
             if m["description"]:
                 block += f"{html.escape(m['description'])}<br>"
             if m.get("reference"):
-                block += f"<i>原文與頁碼：{html.escape(m['reference'])}</i><br>"
-            if m.get("note"):
-                block += f"目前狀態：{html.escape(m['note'])}"
+                block += f"<i>原文與頁碼：{html.escape(m['reference'])}</i>"
             block += "</p><hr>"
             blocks.append(block)
         self.analysis_view.setHtml("".join(blocks))

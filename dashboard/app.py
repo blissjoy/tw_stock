@@ -128,12 +128,21 @@ def main() -> None:
                 else:
                     for m in signal_matches:
                         st.markdown(f"**{m['rule_id']}　{m['title']}（信心{m['confidence']}%）**")
+                        # 「目前狀態」(這條規則今天為什麼觸發)排在規則名稱後第一個位置，
+                        # 使用者最想先看到的是「現在是什麼情況」，解讀/原文頁碼是補充說明，
+                        # 排序上應該讓位。analyze_stock_signals()裡同一個rule_id若對應多筆
+                        # 觸發(例如R-TREND-03短期/中期各自獨立判斷都是多頭)，note會是用
+                        # 換行接起來的多行文字，這裡逐行各自加註「目前狀態：」/縮排顯示，
+                        # 不能假設note永遠是單行字串。
+                        if m.get("note"):
+                            note_lines = m["note"].split("\n")
+                            st.caption(f"目前狀態：{note_lines[0]}")
+                            for extra_line in note_lines[1:]:
+                                st.caption(f"　　{extra_line}")
                         if m["description"]:
                             st.write(m["description"])
                         if m.get("reference"):
                             st.caption(f"原文與頁碼：{m['reference']}")
-                        if m.get("note"):
-                            st.caption(f"目前狀態：{m['note']}")
                         st.divider()
         # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到6條、
         # 會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。

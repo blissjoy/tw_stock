@@ -218,6 +218,31 @@ def test_analyze_stock_signals_sorts_by_confidence_descending(monkeypatch):
     assert matches[0]["description"] is None  # 查無此規則(假規則)，優雅回傳None不crash
 
 
+def test_analyze_stock_signals_merges_duplicate_rule_id_notes(monkeypatch):
+    """使用者實測2317鴻海反映「個股分析」面板裡的規則列表跟候選清單不一致、疑似重複——
+    追查後確認scan_golden_tier()裡R-TREND-03/04這類規則因為短/中/長三種天期各自獨立
+    判斷，同一個rule_id可能被add()呼叫多次、note文字不同(天期不同)。這裡驗證合併成
+    一筆，note是用換行接起來的多行文字，畫面上不會出現同一條規則名稱重複列出兩次。"""
+    monkeypatch.setattr(daily_screener, "_SCREEN_FUNCTIONS", ())
+    import src.screener.rule_scan as rule_scan
+    monkeypatch.setattr(
+        rule_scan, "scan_golden_tier",
+        lambda df, trend_df=None: [
+            {"rule_id": "R-TREND-03", "note": "短期(日線轉折波)：頭頭高且底底高，多頭趨勢成立"},
+            {"rule_id": "R-TREND-03", "note": "中期(週線轉折波)：頭頭高且底底高，多頭趨勢成立"},
+        ],
+    )
+
+    matches = daily_screener.analyze_stock_signals(pd.DataFrame({"close": [1]}), min_days=0)
+
+    assert len(matches) == 1
+    assert matches[0]["rule_id"] == "R-TREND-03"
+    assert matches[0]["note"] == (
+        "短期(日線轉折波)：頭頭高且底底高，多頭趨勢成立\n"
+        "中期(週線轉折波)：頭頭高且底底高，多頭趨勢成立"
+    )
+
+
 def _build_narrow_range_breakout_df(n_days: int = 60) -> pd.DataFrame:
     """前n_days-1天維持完全相同的高低價(狹幅盤整不擴張)，最後一天中長紅K放量突破。"""
     dates = pd.date_range("2026-01-01", periods=n_days, freq="B")

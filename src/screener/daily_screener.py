@@ -565,6 +565,15 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
 
     trend_df：轉傳給`scan_golden_tier()`專門供短/中/長(日/週/月)趨勢分類器使用的長歷史
     資料，見那裡的說明；不傳時退回用`df`自己的歷史。
+
+    ⚠️ 回傳清單裡每個rule_id只會出現一次：`scan_golden_tier()`裡有些規則(例如R-TREND-03/
+    04，短/中/長三種天期各自獨立判斷)可能對同一個rule_id呼叫多次add()、每次note文字不同
+    (天期不同)，這裡合併成一筆，`note`欄位可能是用換行接起來的多行文字，呼叫端(UI)顯示
+    時要自行處理多行(不能假設`note`永遠是單行字串)。跟「候選清單」(daily_candidates，
+    只顯示`_SCREEN_FUNCTIONS`這組更精簡的「新進場機會」規則)範圍不同、通常會比候選清單
+    列出更多規則，是刻意設計成這樣：「個股分析」是「這檔股票今天符合規則庫裡哪些訊號」
+    的完整清單，「候選清單」只是其中一個精選子集(附進場價/停損建議的SOP型規則)，兩者
+    定位不同，不是bug。
     """
     from src.rule_docs import load_rule_doc
     from src.screener.rule_scan import scan_golden_tier
@@ -602,8 +611,29 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
             "reference": doc.get("原文與頁碼"),
         })
 
-    matches.sort(key=lambda m: m["confidence"], reverse=True)
-    return matches
+    # ⚠️ 同一個rule_id可能在scan_golden_tier()裡被add()呼叫超過一次，最常見的情況是
+    # R-TREND-03/04(短/中/長三種天期各自獨立判斷多空，見trend_state.py)——如果例如短期
+    # 跟中期剛好都是多頭，會各自產生一筆rule_id="R-TREND-03"、但note文字不同(天期不同)
+    # 的match。不合併的話，UI畫面上同一條規則名稱會重複出現兩次、只有下面的「目前狀態」
+    # 文字不一樣，使用者容易誤以為是重複的bug。這裡合併成同一個rule_id只留一筆，把
+    # 多筆note文字用換行接起來，呼叫端(dashboard/desktop)看到的「目前狀態」可能是
+    # 多行文字，需要各自處理換行顯示。
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for m in matches:
+        rid = m["rule_id"]
+        if rid not in merged:
+            merged[rid] = dict(m)
+            merged[rid]["note"] = [m["note"]] if m.get("note") else []
+            order.append(rid)
+        elif m.get("note"):
+            merged[rid]["note"].append(m["note"])
+    result = [merged[rid] for rid in order]
+    for m in result:
+        m["note"] = "\n".join(m["note"]) if m["note"] else None
+
+    result.sort(key=lambda m: m["confidence"], reverse=True)
+    return result
 
 
 def screen_all_stocks(stock_frames: dict[str, pd.DataFrame], min_days: int = 60) -> list[dict]:
