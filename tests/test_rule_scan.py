@@ -1192,3 +1192,67 @@ def test_scan_golden_tier_skips_sr17_when_state_unchanged_from_yesterday(monkeyp
     rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
 
     assert "R-SR-17" not in rule_ids
+
+
+def test_scan_golden_tier_reports_candle23_when_big_red_and_filter_passes(monkeypatch):
+    """R-CANDLE-23：is_big_red門檻是長紅(>6.5%)+爆量(重用is_big_volume_vs_ma5)，達標後
+    直接mock底層big_red_candle_entry_filter驗證wiring，9個avoid/buy子條件的個別計算邏輯
+    (重用R-CLASSIC-22/R-SR-17等已經過各自測試驗證的building block)不在這裡重複驗證。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    df.loc[idx[-1], ["open", "close"]] = [100.0, 108.0]
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-1] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    monkeypatch.setattr(rule_scan, "big_red_candle_entry_filter", lambda *a, **k: "符合進場條件的大量長紅K")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-CANDLE-23"] == "符合進場條件的大量長紅K"
+
+
+def test_scan_golden_tier_skips_candle23_when_not_big_red(monkeypatch):
+    """_trend_df(60,"up")平滑上漲，最後一天實體漲幅遠低於6.5%長紅門檻，不該呼叫底層函式。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "big_red_candle_entry_filter", lambda *a, **k: "符合進場條件的大量長紅K")
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-CANDLE-23" not in rule_ids
+
+
+def test_scan_golden_tier_skips_candle23_when_result_not_actionable(monkeypatch):
+    df = _trend_df(60, "up")
+    idx = df.index
+    df.loc[idx[-1], ["open", "close"]] = [100.0, 108.0]
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-1] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    monkeypatch.setattr(rule_scan, "big_red_candle_entry_filter", lambda *a, **k: "不在明列的可買清單內，保守觀望")
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-CANDLE-23" not in rule_ids
+
+
+def test_scan_golden_tier_candle23_always_passes_pattern_confirmed_breakout_as_false(monkeypatch):
+    """pattern_confirmed_breakout書中沒有明確定義是哪一種型態，固定傳False避免自己發明
+    規則、誤判成「可以買」——直接驗證呼叫big_red_candle_entry_filter時這個位置參數
+    (第5個，簽章上is_big_red之後第4個)永遠是False。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    df.loc[idx[-1], ["open", "close"]] = [100.0, 108.0]
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-1] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    captured = {}
+
+    def _fake_filter(is_big_red, *args):
+        captured["args"] = args
+        return "符合進場條件的大量長紅K"
+
+    monkeypatch.setattr(rule_scan, "big_red_candle_entry_filter", _fake_filter)
+
+    scan_golden_tier(df)
+
+    assert captured["args"][4] is False

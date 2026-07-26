@@ -41,7 +41,7 @@ from src.indicators.bollinger import (
     bollinger_sell_signal_3,
 )
 from src.indicators.candle_patterns_2 import bearish_engulfing_at_high
-from src.indicators.candles import candle_shadows, is_black_candle, is_doji, is_gravestone_line, is_hammer_candle, is_inverted_hammer_candle, is_long_t_line, is_mid_long_black_candle, is_mid_long_red_candle, is_red_candle, is_reversal_candle_at_high, is_reversal_candle_at_low, prev_bar_support_resistance_signal
+from src.indicators.candles import big_red_candle_entry_filter, candle_shadows, is_black_candle, is_doji, is_gravestone_line, is_hammer_candle, is_inverted_hammer_candle, is_long_t_line, is_mid_long_black_candle, is_mid_long_red_candle, is_red_candle, is_reversal_candle_at_high, is_reversal_candle_at_low, prev_bar_support_resistance_signal
 from src.indicators.consolidation import detect_consolidation_breakout
 from src.indicators.crossovers import interpret_cross, is_death_cross, is_golden_cross
 from src.indicators.gaps import detect_gap, detect_island_reversal_bottom, false_fill_reasons, is_true_fill
@@ -81,7 +81,7 @@ from src.indicators.support_resistance import (
     ma_resistance_conversion_short,
     ma_support_conversion_long,
 )
-from src.indicators.trend import bear_trend_change_warning, bull_high_volume_exhaustion_signal, bull_trend_change_warning, daily_bear_trend_state, daily_bull_trend_state
+from src.indicators.trend import bear_trend_change_warning, bull_high_volume_exhaustion_signal, bull_pullback_buy_signal, bull_trend_change_warning, daily_bear_trend_state, daily_bull_trend_state
 from src.indicators.trend_position import compute_trend_position
 from src.indicators.trendlines import check_channel_breakdown, check_channel_breakout
 from src.indicators.volume_price import basic_volume, bear_decline_big_black_role, bear_low_divergence_signal, bear_low_key_point_rebound_signal, bull_high_key_point_pullback_signal, classify_big_volume_bar, is_accumulation_volume, is_big_volume_vs_ma5, is_big_volume_vs_prev_day, resistance_zone_big_volume_next_day_response, support_zone_big_volume_next_day_response
@@ -121,6 +121,7 @@ CLASSIC16_LOOKBACK = 20  # R-CLASSIC-16「低檔短時間內反覆出現大量�
 VOLPRICE08_LOOKBACK = 20  # R-VOLPRICE-08往回搜尋「任一大量K棒」的天數上限，書中無明確數字
 VOLPRICE06_LOOKBACK = 20  # R-VOLPRICE-06往回搜尋「下跌大量長黑K」的天數上限，書中無明確數字
 VOLPRICE10_NEW_LOW_LOOKBACK = 20  # R-VOLPRICE-10「低檔創新低」的比較窗口，書中無明確數字
+CANDLE23_LONG_BODY_PCT = 0.065  # R-CANDLE-23「大量長紅K」的長紅門檻，跟R-CANDLE-21「長紅K」定義一致(書中原文數字)
 
 
 def _last_bool(series: pd.Series) -> bool:
@@ -988,5 +989,64 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         bear_strength_yesterday_17 = _sr17_bear_strength_at(today_pos_17 - 1) if today_pos_17 > 0 else None
         if bear_strength_17 != bear_strength_yesterday_17:
             add("R-SR-17", f"空頭：{bear_strength_17}")
+
+    # --- R-CANDLE-23大量長紅K進場位置篩選規則 ---
+    # 10個avoid/buy布林參數裡9個都能用這批已經建立的「錨點+滾動視窗」手法(跟R-CLASSIC-13/
+    # 22/R-SR-17同一套)算出來，只有pattern_confirmed_breakout(書中沒有指定是哪一種型態，
+    # 33種經典型態圖裡任何一種突破都可能算，猜一個等於發明書中沒有的規則)固定給False——
+    # 這是buy_ok清單裡用or連接的其中一條，給False只會少算一種本來也能買的情境，不會像
+    # avoid_buy清單漏算那樣有製造假「可以買」訊號的風險，安全。
+    is_big_red_23 = bool(
+        float(close.iloc[-1]) > float(open_.iloc[-1])
+        and (float(close.iloc[-1]) - float(open_.iloc[-1])) / float(open_.iloc[-1]) > CANDLE23_LONG_BODY_PCT
+        and bool(is_big_volume_vs_ma5(volume, ma5_volume).iloc[-1])
+    )
+    if is_big_red_23:
+        ma_triple_bullish_23 = bool(is_bullish_aligned(ma_frame).iloc[-1])
+        consolidation_breakout_23 = bool(consolidation_box["breakout_up"].iloc[-1])
+        below_ma20_23 = float(close.iloc[-1]) < float(ma20.iloc[-1])
+        # 空轉多第1次過前高：重用R-CLASSIC-22已經算好的「空頭趨勢中確認的底部當錨點+今天
+        # 突破反彈高點」判斷，兩條規則描述的本質是同一個「空頭止穩反轉+突破前波高點」情境。
+        bear_to_bull_first_break_23 = anchor_bottom_22 is not None and broke_today_22
+
+        # 高檔連續上漲>=3天：重用is_at_high往回數連續上漲天數。
+        is_up_day_23 = (close > close.shift(1)).fillna(False)
+        consecutive_up_streak_23 = 0
+        for k in range(len(close) - 1, -1, -1):
+            if bool(is_up_day_23.iloc[k]):
+                consecutive_up_streak_23 += 1
+            else:
+                break
+        consecutive_up_days_ge_3_at_high_23 = consecutive_up_streak_23 >= 3 and bool(is_at_high.iloc[-1])
+
+        # 上漲前貼近壓力：重用R-VOLPRICE-11已經算好的「昨天觸及月線壓力」判斷。
+        near_resistance_before_rise_23 = touched_resistance_yesterday_11
+
+        # 空頭反彈中：短期日線趨勢仍是空頭，但今天貼近波段高點。
+        is_bear_rebound_23 = trend_today == TREND_BEAR and bool(is_at_high.iloc[-1])
+
+        # 回檔止跌回升／回檔跌破前低：兩者互為鏡射，共用同一段「回檔期間」視窗(從最近一個
+        # 轉折頭部到現在，前提是這個頭部確實比最近一個轉折底部更新)。
+        bull_pullback_reversal_23 = False
+        broke_prior_low_in_pullback_23 = False
+        if tp_heads and tp_bottoms and tp_heads[-1].index > tp_bottoms[-1].index:
+            pullback_pos_23 = close.index.get_loc(tp_heads[-1].index)
+            pullback_holds_prior_low_23 = bool((low.iloc[pullback_pos_23:] >= tp_bottoms[-1].price).all())
+            broke_prior_low_in_pullback_23 = not pullback_holds_prior_low_23
+            bull_pullback_reversal_23 = bull_pullback_buy_signal(
+                trend_today == TREND_BULL, pullback_holds_prior_low_23,
+                float(open_.iloc[-1]), float(close.iloc[-1]), float(ma_frame["MA5"].iloc[-1]), float(high.iloc[-2]),
+                float(volume.iloc[-1]), float(volume.iloc[-2]),
+            )
+
+        candle23_note = big_red_candle_entry_filter(
+            is_big_red_23,
+            bear_to_bull_first_break_23, ma_triple_bullish_23, bull_pullback_reversal_23,
+            consolidation_breakout_23, False,
+            consecutive_up_days_ge_3_at_high_23, near_resistance_before_rise_23, is_bear_rebound_23,
+            below_ma20_23, broke_prior_low_in_pullback_23,
+        )
+        if candle23_note not in ("非大量長紅K，不適用本規則", "不在明列的可買清單內，保守觀望"):
+            add("R-CANDLE-23", candle23_note)
 
     return results

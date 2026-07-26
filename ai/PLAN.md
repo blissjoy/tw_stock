@@ -2565,10 +2565,6 @@ simplify_turning_points)看能不能補強。逐條重新核對整個「114條�
   分——用swing_pct門檻硬猜「多大算主升段」等於是發明書中沒有的數字，不接。
 - R-GAP-11/16(高檔末升段/低檔末跌段竭盡缺口)：同樣需要`is_late_stage_rally`/`is_late_
   stage_decline`這種「末」字輩的子階段判斷，跟R-VOLPRICE-03同一個問題，不接。
-- R-CANDLE-23(大量長紅K進場位置篩選規則)：10個布林參數裡`consecutive_up_days_ge_3_at_
-  high`現在可以用is_at_high計數解決，但`near_resistance_before_rise`/`is_bear_rebound`
-  仍然沒有對應的building block——維持先前的判斷：只解決3條裡的1條、其餘用預設值硬湊，
-  失敗模式是產生假的「可以買」訊號，風險比不接更高，不接。
 新增測試：`tests/test_rule_scan.py`新增5個測試(R-VOLPRICE-06/08各1個、R-VOLPRICE-10的
 第5點1個、R-VOLPRICE-11壓力/支撐各1個)。659個測試全過。
 
@@ -2646,3 +2642,44 @@ R-SR-17本質上是一個5態狀態分類器(跟R-TREND-03/04一樣)，但用`.a
 不是跟R-SR-08重複的雜訊)、R-SR-17觸發124次。
 
 **至此「信心≥80分且未接入」的114條規則裡，累計接上67條**(前批65+這批2)。
+
+## 重新評估並接上R-CANDLE-23(大量長紅K進場位置篩選規則)(2026-07-26)
+
+使用者追問「10個布林參數為什麼只能解決1個」，逐一重新核對後發現：這個評估是在建立
+R-CLASSIC-13/22、R-SR-17的「錨點+滾動視窗」手法**之前**寫的，現在用這批已經驗證過的
+building block重新檢視，10個參數裡有9個都能算，只有1個真的卡住：
+
+- `ma_triple_bullish`：重用`is_bullish_aligned()`(R-MA-08已在用)。
+- `consolidation_breakout`：重用`consolidation_box["breakout_up"]`(R-CANDLE-04已在用)。
+- `below_ma20`：`close < ma20`，最簡單的一個。
+- `consecutive_up_days_ge_3_at_high`：重用`is_at_high`往回數連續上漲天數。
+- `near_resistance_before_rise`：重用R-VOLPRICE-11已經算好的「昨天觸及月線壓力」判斷
+  (`touched_resistance_yesterday_11`)。
+- `is_bear_rebound`：`trend_today==空頭` AND `is_at_high`的組合。
+- `bear_to_bull_first_break_prior_high`：重用R-CLASSIC-22已經算好的「空頭趨勢中確認的
+  底部當錨點+今天突破反彈高點」判斷(`anchor_bottom_22`/`broke_today_22`)——兩條規則描述
+  的本質是同一個「空頭止穩反轉+突破前波高點」情境，這批直接借用不重新設計。
+- `bull_pullback_reversal`/`broke_prior_low_in_pullback`：互為鏡射，共用「回檔期間」
+  視窗(從最近一個轉折頭部到現在，前提是這個頭部確實比最近一個轉折底部更新，跟R-SR-17
+  同一個「哪個轉折點比較新」判斷)，`bull_pullback_reversal`直接呼叫既有的
+  `bull_pullback_buy_signal()`(R-TREND-06)。
+
+唯一真正卡住的是`pattern_confirmed_breakout`(型態確認突破)：書中沒有指定是哪一種型態，
+33種經典型態圖裡任何一種突破都可能算，猜一個等於發明書中沒有的規則，跟先前排除
+R-CLASSIC-19「強勢整理訊號」同一類問題。固定傳`False`——這是`buy_ok`清單裡用`or`連接的
+其中一條，給`False`只會少算一種本來也能買的情境，不會像`avoid_buy`清單漏算那樣有製造假
+「可以買」訊號的風險(這正是先前評估「風險過高」時真正擔心的失敗模式，但那時候是假設10個
+參數裡9個都要用預設值硬湊；現在只剩1個、而且是安全側的buy條件，風險結構完全不同了)。
+
+`is_big_red`門檻：長紅(實體漲幅>6.5%，跟R-CANDLE-21「長紅K」定義一致)+爆量(重用
+`is_big_volume_vs_ma5`，2倍5日均量)。
+
+新增測試：`tests/test_rule_scan.py`新增4個測試(達標時呼叫底層函式驗證wiring、非長紅時
+不呼叫、結果不可行動時不回報、驗證pattern_confirmed_breakout永遠傳False這個安全預設)。
+670個測試全過。
+
+對本機真實db跑600檔股票驗證：0筆crash，597檔裡只有1檔觸發(`is_big_red`門檻很嚴格，
+長紅6.5%+2倍量同時成立本來就罕見)，且這1次觸發是「不建議進場的大量長紅K位置」(避免
+清單)，不是「符合進場條件」(可買清單)——沒有出現先前擔心的假「可以買」訊號。
+
+**至此「信心≥80分且未接入」的114條規則裡，累計接上68條**(前批67+這批1)。
