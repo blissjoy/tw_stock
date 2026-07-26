@@ -444,3 +444,60 @@ def test_scan_golden_tier_reports_line15_when_channel_breakdown_today(monkeypatc
     results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
 
     assert "跌破下降軌道線" in results["R-LINE-15"]
+
+
+def test_scan_golden_tier_reports_trend08_bull_change_warning(monkeypatch):
+    """R-TREND-08：前提是「昨天為止」多頭已確立(daily_bull_trend_state的前一天)，今天
+    最新一組頭/底任一個出現裂痕(頭頭低或底底低)才預警——用假轉折點+固定昨天多頭狀態
+    驗證wiring，底層邏輯本身已有tests/test_trend.py專屬測試。"""
+    df = _trend_df(60, "up")
+    dates = df.index
+    fake_points = [
+        TurningPoint(type="bottom", price=90, index=dates[10]),
+        TurningPoint(type="head", price=105, index=dates[20]),
+        TurningPoint(type="bottom", price=95, index=dates[30]),
+        TurningPoint(type="head", price=100, index=dates[40]),  # 頭頭低(100<105)
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    monkeypatch.setattr(rule_scan, "daily_bull_trend_state", lambda h, l, c, n=5: pd.Series(True, index=df.index))
+    monkeypatch.setattr(rule_scan, "daily_bear_trend_state", lambda h, l, c, n=5: pd.Series(False, index=df.index))
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "頭頭低" in results["R-TREND-08"]
+
+
+def test_scan_golden_tier_skips_trend08_when_bull_trend_not_confirmed_yesterday(monkeypatch):
+    df = _trend_df(60, "up")
+    dates = df.index
+    fake_points = [
+        TurningPoint(type="bottom", price=90, index=dates[10]),
+        TurningPoint(type="head", price=105, index=dates[20]),
+        TurningPoint(type="bottom", price=95, index=dates[30]),
+        TurningPoint(type="head", price=100, index=dates[40]),
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    monkeypatch.setattr(rule_scan, "daily_bull_trend_state", lambda h, l, c, n=5: pd.Series(False, index=df.index))
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-TREND-08" not in rule_ids
+
+
+def test_scan_golden_tier_reports_trend09_bear_change_warning(monkeypatch):
+    """R-TREND-09：R-TREND-08的鏡射版本(頭頭高或底底高預警空頭改變)。"""
+    df = _trend_df(60, "up")
+    dates = df.index
+    fake_points = [
+        TurningPoint(type="head", price=105, index=dates[10]),
+        TurningPoint(type="bottom", price=90, index=dates[20]),
+        TurningPoint(type="head", price=100, index=dates[30]),
+        TurningPoint(type="bottom", price=95, index=dates[40]),  # 底底高(95>90)
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    monkeypatch.setattr(rule_scan, "daily_bull_trend_state", lambda h, l, c, n=5: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "daily_bear_trend_state", lambda h, l, c, n=5: pd.Series(True, index=df.index))
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "底底高" in results["R-TREND-09"]

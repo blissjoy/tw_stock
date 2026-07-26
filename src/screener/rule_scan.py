@@ -75,6 +75,7 @@ from src.indicators.support_resistance import (
     ma_resistance_conversion_short,
     ma_support_conversion_long,
 )
+from src.indicators.trend import bear_trend_change_warning, bull_trend_change_warning, daily_bear_trend_state, daily_bull_trend_state
 from src.indicators.trendlines import check_channel_breakdown, check_channel_breakout
 from src.indicators.volume_price import basic_volume, is_accumulation_volume, is_big_volume_vs_prev_day
 from src.patterns.chart_overlays import compute_trendlines
@@ -175,6 +176,21 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         trough_divergence = kd_trough_divergence(bottom_prices, k_troughs)
         if trough_divergence:
             add("R-INDICATOR-12", trough_divergence)
+
+    # --- 趨勢判定(R-TREND-08多頭改變先知先覺/R-TREND-09空頭改變先知先覺) ---
+    # 「先知先覺」的重點是比對「今天最新一組頭/底」是否已經出現裂痕，但前提是「昨天為止」
+    # 原本的主趨勢已經確立——用daily_bull_trend_state()/daily_bear_trend_state()(逐日、
+    # 不用未來資料的狀態機，R-TREND-14已經在用同一套)取「昨天」的確認狀態當前提，不能用
+    # 「今天」的多頭/空頭判斷當前提，因為is_bull_trend本身要求頭跟底同時創高，跟這裡「頭
+    # 或底任一個出現裂痕」互斥，用今天的判斷結果當前提會讓這條規則永遠不可能觸發。
+    bull_trend_yesterday = bool(daily_bull_trend_state(high, low, close, n=5).iloc[-2])
+    bull_warning = bull_trend_change_warning(head_prices, bottom_prices, bull_trend_yesterday)
+    if bull_warning:
+        add("R-TREND-08", bull_warning)
+    bear_trend_yesterday = bool(daily_bear_trend_state(high, low, close, n=5).iloc[-2])
+    bear_warning = bear_trend_change_warning(head_prices, bottom_prices, bear_trend_yesterday)
+    if bear_warning:
+        add("R-TREND-09", bear_warning)
 
     # --- 支撐壓力(R-SR-01/02轉折高低點角色互換) ---
     # classify_head_role/classify_bottom_role本身是「隨時可查詢」的角色分類函式(壓力或
