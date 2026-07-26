@@ -35,7 +35,7 @@ import pandas as pd
 from src.data import storage
 from src.indicators.candles import is_mid_long_red_candle
 from src.indicators.consolidation import detect_consolidation, detect_consolidation_breakout
-from src.indicators.gaps import detect_breakaway_gap_up, detect_gap
+from src.indicators.gaps import detect_breakaway_gap_down, detect_breakaway_gap_up, detect_gap
 from src.indicators.moving_average import compute_ma_set, is_bullish_aligned, ma_strategy_stop_loss_long, ma_strategy_stop_loss_short, sma
 from src.indicators.trend import (
     bear_short_term_entry_ready,
@@ -443,6 +443,49 @@ def screen_breakaway_gap_up(df: pd.DataFrame, min_days: int = 60) -> dict | None
     }
 
 
+def screen_breakaway_gap_down(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票的OHLCV資料判斷「今天」是否觸發R-GAP-14做頭完成向下跌破缺口訊號，是
+    `screen_breakaway_gap_up()`(R-GAP-09)的鏡射版本。書中明文的關鍵不對稱：這條不需要
+    大量配合(`detect_breakaway_gap_down()`本身沒有量能檢查)，跟R-GAP-09不同。
+    `topping_pattern_confirmed`用「缺口上緣是否清楚跌出已盤整區間下緣」判斷，不是還在
+    盤整區內部的普通缺口，跟R-GAP-09判斷「缺口下緣不低於盤整區上緣」同一種思路的鏡射。
+    """
+    if len(df) < min_days:
+        return None
+    open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
+    t = len(close) - 1
+    if t < 1:
+        return None
+
+    gap = detect_gap(
+        prev_high=float(high.iloc[t - 1]), prev_low=float(low.iloc[t - 1]),
+        curr_high=float(high.iloc[t]), curr_low=float(low.iloc[t]),
+    )
+    if gap is None or gap.type != "down_gap":
+        return None
+
+    box = detect_consolidation(high.iloc[:t], low.iloc[:t], min_bars=GAP_CONSOLIDATION_MIN_BARS)
+    if not bool(box["is_consolidating"].iloc[-1]):
+        return None
+    consolidation_lower = float(box["lower_neckline"].iloc[-1])
+    topping_pattern_confirmed = gap.upper_edge <= consolidation_lower
+
+    result = detect_breakaway_gap_down(
+        gap=gap, topping_pattern_confirmed=topping_pattern_confirmed, gap_filled_within_3_days=False,
+    )
+    if result is None:
+        return None
+
+    entry_price = float(close.iloc[t])
+    stop_loss = bear_short_term_stop_loss(entry_bar_high=float(high.iloc[t]))
+    return {
+        "signal_name": "R-GAP-14做頭完成向下跌破缺口（91%）",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": f"{result['signal']}，缺口上緣{result['resistance']:.2f}(原支撐轉壓力)",
+    }
+
+
 _SCREEN_FUNCTIONS = (
     screen_bull_short_term_entry,
     screen_bear_short_term_entry,
@@ -450,6 +493,7 @@ _SCREEN_FUNCTIONS = (
     screen_slow_rally_channel_breakout,
     screen_breakout_above_big_black_candle,
     screen_breakaway_gap_up,
+    screen_breakaway_gap_down,
     screen_single_ma_short_term_long,
     screen_single_ma_short_term_short,
     screen_single_ma_mid_term_long,

@@ -322,3 +322,45 @@ def test_scan_golden_tier_skips_ma_channel_when_normal_range(monkeypatch):
     rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
 
     assert "R-INDICATOR-18" not in rule_ids
+
+
+def test_scan_golden_tier_reports_gap_up_today():
+    """R-GAP-01：今天的最低價高於昨天最高價，構成向上跳空缺口。"""
+    df = _trend_df(60, "up")
+    prev_high = float(df["high"].iloc[-2])
+    df.loc[df.index[-1], ["open", "high", "low", "close"]] = [
+        prev_high + 5, prev_high + 6, prev_high + 4, prev_high + 5.5,
+    ]
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "向上跳空缺口" in results["R-GAP-01"]
+
+
+def test_scan_golden_tier_no_gap_when_prices_overlap():
+    df = _trend_df(60, "up")  # 平滑連續上漲，每天高低價都跟前一天重疊，不構成缺口
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+    assert "R-GAP-01" not in rule_ids
+
+
+def test_scan_golden_tier_reports_true_and_false_gap_fill(monkeypatch):
+    """R-GAP-19真封口/R-GAP-20假封口：往回找到最近一次缺口後，用「今天」的K棒評估——
+    這裡直接mock底層is_true_fill/false_fill_reasons驗證wiring，兩者的判斷邏輯本身已有
+    tests/test_gaps.py專屬測試。"""
+    df = _trend_df(60, "up")
+    prev_high = float(df["high"].iloc[-3])
+    # 在倒數第2天造一個缺口，讓往回搜尋能找到(從len-2開始往前找，第一個命中就是它)
+    df.loc[df.index[-2], ["open", "high", "low", "close"]] = [
+        prev_high + 5, prev_high + 6, prev_high + 4, prev_high + 5.5,
+    ]
+    monkeypatch.setattr(rule_scan, "is_true_fill", lambda *a, **k: True)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+    assert "真封口" in results["R-GAP-19"]
+
+    monkeypatch.setattr(rule_scan, "is_true_fill", lambda *a, **k: False)
+    monkeypatch.setattr(rule_scan, "false_fill_reasons", lambda *a, **k: ["量縮，跌破力道不足"])
+
+    results2 = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+    assert "假封口" in results2["R-GAP-20"]
+    assert "量縮" in results2["R-GAP-20"]

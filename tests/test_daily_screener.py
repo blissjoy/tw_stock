@@ -448,6 +448,55 @@ def test_screen_breakaway_gap_up_returns_none_without_prior_consolidation():
     assert daily_screener.screen_breakaway_gap_up(df, min_days=60) is None
 
 
+def _build_breakaway_gap_down_df(n_days: int = 65, gap_down: bool = True) -> pd.DataFrame:
+    """_build_breakaway_gap_df()的鏡射版本(R-GAP-14用)：前n_days-1天維持相同高低價
+    (盤整區下緣=95)，最後一天視參數決定要不要真的向下跳空跌破盤整區下緣。"""
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    open_ = [97.0] * (n_days - 1)
+    high = [100.0] * (n_days - 1)
+    low = [95.0] * (n_days - 1)
+    close = [98.0] * (n_days - 1)
+    volume = [1000] * (n_days - 1)
+
+    if gap_down:
+        last_open, last_close, last_high, last_low = 89.0, 86.0, 90.0, 85.0  # high=90<前一日low=95，缺口成立
+    else:
+        last_open, last_close, last_high, last_low = 96.0, 94.5, 97.0, 93.0  # high=97>=前一日low=95，沒有跳空
+
+    open_.append(last_open)
+    close.append(last_close)
+    high.append(last_high)
+    low.append(last_low)
+    volume.append(1000)
+
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+
+def test_screen_breakaway_gap_down_fires_when_conditions_met():
+    """R-GAP-14做頭完成向下跌破缺口：R-GAP-09(已接)的鏡射版本，不需要大量配合。"""
+    df = _build_breakaway_gap_down_df(n_days=65, gap_down=True)
+
+    result = daily_screener.screen_breakaway_gap_down(df, min_days=60)
+
+    assert result is not None
+    assert result["signal_name"] == "R-GAP-14做頭完成向下跌破缺口（91%）"
+    assert result["entry_price"] == df["close"].iloc[-1]
+    assert result["stop_loss"] > result["entry_price"]
+    assert "95" in result["note"]  # note裡應該提到缺口上緣(原盤整區下緣，轉為壓力)
+
+
+def test_screen_breakaway_gap_down_returns_none_when_no_gap():
+    df = _build_breakaway_gap_down_df(n_days=65, gap_down=False)
+    assert daily_screener.screen_breakaway_gap_down(df, min_days=60) is None
+
+
+def test_screen_breakaway_gap_down_returns_none_without_prior_topping_box():
+    """沒有先形成夠長的頭部盤整區間(這裡直接用一般下跌趨勢資料)，即使最後一天也符合
+    跳空條件，也不應該被誤判成「做頭完成」跌破缺口。"""
+    df = _build_downtrend_df(n_days=65)
+    assert daily_screener.screen_breakaway_gap_down(df, min_days=60) is None
+
+
 def test_screen_all_stocks_aggregates_multiple_candidates(monkeypatch):
     monkeypatch.setattr(
         daily_screener, "daily_bull_trend_state",

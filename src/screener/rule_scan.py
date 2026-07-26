@@ -40,8 +40,9 @@ from src.indicators.bollinger import (
     bollinger_sell_signal_2,
     bollinger_sell_signal_3,
 )
-from src.indicators.candles import is_hammer_candle, is_inverted_hammer_candle, is_reversal_candle_at_high, is_reversal_candle_at_low
+from src.indicators.candles import candle_shadows, is_hammer_candle, is_inverted_hammer_candle, is_reversal_candle_at_high, is_reversal_candle_at_low
 from src.indicators.crossovers import interpret_cross, is_death_cross, is_golden_cross
+from src.indicators.gaps import detect_gap, false_fill_reasons, is_true_fill
 from src.indicators.granville import (
     granville_buy_signal_1,
     granville_buy_signal_2,
@@ -78,6 +79,7 @@ from src.indicators.volume_price import basic_volume, is_accumulation_volume, is
 from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_states_multi_horizon
 
 MIN_DAYS = 30  # 均線/MACD/KD/RSI/布林通道都需要暖身天數，資料不足就整批不評估(不逐一判斷各自門檻)
+GAP_FILL_LOOKBACK = 20  # R-GAP-19/20往回搜尋「最近一次缺口」的天數上限，避免抓到太久以前已經沒有參考意義的舊缺口
 
 
 def _last_bool(series: pd.Series) -> bool:
@@ -311,6 +313,54 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         short_sig = bearish_resistance_short_signal(trend_label_bear, touched_resistance_ma20, "月線", reversal_down)
         if short_sig:
             add("R-SR-16", short_sig)
+
+    # --- 缺口(R-GAP-01基本定義與偵測) ---
+    today_gap = detect_gap(
+        prev_high=float(high.iloc[-2]), prev_low=float(low.iloc[-2]),
+        curr_high=float(high.iloc[-1]), curr_low=float(low.iloc[-1]),
+    )
+    if today_gap is not None:
+        gap_label = "向上跳空缺口" if today_gap.type == "up_gap" else "向下跳空缺口"
+        add("R-GAP-01", f"今天出現{gap_label}，缺口區間{today_gap.lower_edge:.2f}~{today_gap.upper_edge:.2f}")
+
+    # --- 缺口(R-GAP-19真封口/R-GAP-20假封口) ---
+    # 往回找GAP_FILL_LOOKBACK天內最近一次缺口，用「今天」的K棒(量/紅黑/影線)評估是否
+    # 構成真封口(大量+實體反向K+收盤確實越界，三者缺一即為假封口)——這是R-CLASSIC-24
+    # 已經用過的「往回搜尋最近一根參考K棒」模式，不是新的搜尋邏輯形狀。
+    recent_gap = None
+    search_end = max(len(close) - 1 - GAP_FILL_LOOKBACK, 1)
+    for j in range(len(close) - 2, search_end - 1, -1):
+        g = detect_gap(
+            prev_high=float(high.iloc[j - 1]), prev_low=float(low.iloc[j - 1]),
+            curr_high=float(high.iloc[j]), curr_low=float(low.iloc[j]),
+        )
+        if g is not None:
+            recent_gap = g
+            break
+    if recent_gap is not None:
+        upper_shadow_series, lower_shadow_series = candle_shadows(open_, high, low, close)
+        body_today = float(abs(close.iloc[-1] - open_.iloc[-1]))
+        has_long_shadow_today = (
+            max(float(upper_shadow_series.iloc[-1]), float(lower_shadow_series.iloc[-1])) >= 2 * body_today
+            if body_today > 0 else True
+        )
+        is_black_today = bool(close.iloc[-1] < open_.iloc[-1])
+        is_red_today = bool(close.iloc[-1] > open_.iloc[-1])
+        avg_volume_20 = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else float(volume.iloc[:-1].mean())
+        gap_range = f"{recent_gap.lower_edge:.2f}~{recent_gap.upper_edge:.2f}"
+        if is_true_fill(
+            recent_gap, is_black_today, is_red_today, has_long_shadow_today,
+            float(volume.iloc[-1]), avg_volume_20, float(close.iloc[-1]),
+        ):
+            add("R-GAP-19", f"大量實體反向K收盤確實越過缺口邊界，真封口，缺口({gap_range})失效")
+        else:
+            reasons = false_fill_reasons(
+                recent_gap, is_black_today, is_red_today, has_long_shadow_today,
+                float(volume.iloc[-1]), avg_volume_20, float(close.iloc[-1]),
+                float(low.iloc[-1]), float(high.iloc[-1]),
+            )
+            if reasons:
+                add("R-GAP-20", f"假封口（{'；'.join(reasons)}），缺口({gap_range})支撐/壓力仍然有效")
 
     # --- 量能 ---
     ma5_volume = basic_volume(volume)
