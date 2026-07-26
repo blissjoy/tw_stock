@@ -278,15 +278,14 @@ def one_day_reversal_high(day_low: float, next_day_low: float) -> bool:
     return next_day_low < day_low
 
 
-def daily_bull_trend_state(high, low, close, n: int = 5):
-    """逐日計算「以當下已confirmed的轉折點為準」的多頭趨勢狀態(R-TREND-01+03的逐日版本)。
+def _daily_trend_state(high, low, close, n, classify):
+    """逐日計算「以當下已confirmed的轉折點為準」的趨勢狀態，`classify`決定判多頭還是空頭
+    (is_bull_trend/is_bear_trend)——`daily_bull_trend_state()`/`daily_bear_trend_state()`
+    共用同一套狀態機，差別只在最後一行呼叫哪個classify函式。
 
     刻意不用 pivots.compute_turning_points 一次算完整個序列再事後比對日期，因為那樣會讓
     每個轉折點的「確認時點」與「頭/底本身的日期」混淆，造成look-ahead；這裡直接重現同一套
-    狀態機演算法，但在每一天當下就決定是否已經知道最新的多頭趨勢狀態。回傳布林Series。
-
-    這是 scripts/run_backtest_trend14.py 抽取出來的共用邏輯，daily_screener.py 也用同一份，
-    避免回測與每日選股各自維護一套一樣的狀態機。
+    狀態機演算法，但在每一天當下就決定是否已經知道最新的趨勢狀態。回傳布林Series。
     """
     import pandas as pd
 
@@ -328,9 +327,27 @@ def daily_bull_trend_state(high, low, close, n: int = 5):
             state = cur
             group_idx = [i]
 
-        result.iloc[i] = is_bull_trend(heads, bottoms)
+        result.iloc[i] = classify(heads, bottoms)
 
     return result
+
+
+def daily_bull_trend_state(high, low, close, n: int = 5):
+    """逐日計算多頭趨勢狀態(R-TREND-01+03的逐日版本)，見`_daily_trend_state()`。
+
+    這是 scripts/run_backtest_trend14.py 抽取出來的共用邏輯，daily_screener.py 也用同一份，
+    避免回測與每日選股各自維護一套一樣的狀態機。
+    """
+    return _daily_trend_state(high, low, close, n, is_bull_trend)
+
+
+def daily_bear_trend_state(high, low, close, n: int = 5):
+    """逐日計算空頭趨勢狀態(R-TREND-01+04的逐日版本)，是`daily_bull_trend_state()`的鏡射——
+    R-TREND-15(空頭短線SOP)與均線分類的單/雙/三線做空戰法(R-MA-23/25/29/30空頭部分)需要
+    逐日、非look-ahead的空頭趨勢判斷，原本只有多頭版本，這裡補上對稱版本。見
+    `_daily_trend_state()`。
+    """
+    return _daily_trend_state(high, low, close, n, is_bear_trend)
 
 
 @implements_rule("R-TREND-14")

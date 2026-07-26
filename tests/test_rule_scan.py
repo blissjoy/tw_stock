@@ -88,6 +88,14 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
     monkeypatch.setattr(rule_scan, "bollinger_buy_signal_2", lambda close, mid, trend: true_series)
     monkeypatch.setattr(rule_scan, "bollinger_sell_signal_1", lambda close, upper, trend: pd.Series(False, index=df.index))
     monkeypatch.setattr(rule_scan, "bollinger_sell_signal_2", lambda close, mid, trend: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "granville_buy_signal_1", lambda close, ma20: true_series)
+    monkeypatch.setattr(rule_scan, "granville_buy_signal_2", lambda close, low, ma20: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "granville_buy_signal_3", lambda close, ma20: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "granville_buy_signal_4", lambda close, ma20, is_bear_trend: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "granville_sell_signal_1", lambda close, ma20: true_series)
+    monkeypatch.setattr(rule_scan, "granville_sell_signal_2", lambda close, high, ma20: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "granville_sell_signal_3", lambda close, ma20: pd.Series(False, index=df.index))
+    monkeypatch.setattr(rule_scan, "granville_sell_signal_4", lambda close, ma20, is_bull_trend: pd.Series(False, index=df.index))
 
     rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
 
@@ -95,7 +103,7 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
         "R-MA-08", "R-MA-09", "R-MA-12", "R-MA-16", "R-MA-13", "R-MA-14",
         "R-INDICATOR-02", "R-INDICATOR-03", "R-INDICATOR-11", "R-INDICATOR-14", "R-INDICATOR-15",
         "R-INDICATOR-22", "R-VOLPRICE-01", "R-CANDLE-05", "R-CANDLE-13", "R-CANDLE-25",
-        "R-TREND-03", "R-MA-15", "R-INDICATOR-09",
+        "R-TREND-03", "R-MA-15", "R-INDICATOR-09", "R-MA-19", "R-MA-20",
     ]
     for rule_id in expected:
         assert rule_id in rule_ids, f"{rule_id} 沒有被scan_golden_tier回報"
@@ -104,6 +112,8 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
     assert rule_ids.count("R-INDICATOR-11") == 1  # 只有高檔鈍化觸發，低檔鈍化沒有
     assert "R-INDICATOR-23" not in rule_ids
     assert "R-TREND-04" not in rule_ids  # trend固定為"多頭"，不該同時冒出空頭趨勢
+    assert rule_ids.count("R-MA-19") == 1  # 只有買點①觸發，買點②③④沒有
+    assert rule_ids.count("R-MA-20") == 1  # 只有賣點①觸發，賣點②③④沒有
 
 
 def test_scan_golden_tier_reports_bear_trend_and_skips_bull(monkeypatch):

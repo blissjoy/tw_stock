@@ -36,15 +36,26 @@ from src.data import storage
 from src.indicators.candles import is_mid_long_red_candle
 from src.indicators.consolidation import detect_consolidation, detect_consolidation_breakout
 from src.indicators.gaps import detect_breakaway_gap_up, detect_gap
-from src.indicators.moving_average import compute_ma_set, is_bullish_aligned, sma
+from src.indicators.moving_average import compute_ma_set, is_bullish_aligned, ma_strategy_stop_loss_long, ma_strategy_stop_loss_short, sma
 from src.indicators.trend import (
+    bear_short_term_entry_ready,
+    bear_short_term_stop_loss,
     bull_short_term_entry_ready,
     bull_short_term_stop_loss,
+    daily_bear_trend_state,
     daily_bull_trend_state,
 )
 from src.indicators.volume_price import is_big_volume_vs_prev_day
 from src.patterns import chart_overlays
 from src.screener.screening_rules import narrow_range_bottom_breakout, slow_rally_channel_breakout
+from src.strategies.ma_strategies import (
+    dual_ma_long_term_long_strategy,
+    dual_ma_long_term_short_strategy,
+    single_ma_mid_term_long_strategy,
+    single_ma_mid_term_short_strategy,
+    single_ma_short_term_long_strategy,
+    single_ma_short_term_short_strategy,
+)
 
 # R-GAP-09判斷「打底完成」的盤整天數門檻：書中這條規則本身沒有給出明確的天數(只引用
 # 「盤整區上下頸線支撐壓力規則」等其他章節)，這裡用比R-SCREEN-11(2個月/42天)略短的
@@ -95,6 +106,174 @@ def screen_bull_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict |
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "note": "多頭架構＋MA10/MA20多排向上＋攻擊量(前日1.3倍以上)＋紅K實體漲幅>2%",
+    }
+
+
+def screen_bear_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票的OHLCV資料判斷「今天」是否觸發R-TREND-15空頭短線選股訊號——
+    R-TREND-14多頭短線進場的鏡射對稱版本，用`daily_bear_trend_state()`(見trend.py)。
+    """
+    if len(df) < min_days:
+        return None
+
+    close, high, low, open_, volume = df["close"], df["high"], df["low"], df["open"], df["volume"]
+    ma5 = sma(close, 5)
+    ma10 = sma(close, 10)
+    ma20 = sma(close, 20)
+    ma10_slope = ma10.diff()
+    ma20_slope = ma20.diff()
+    volume_prev = volume.shift(1)
+    low_prev = low.shift(1)
+    bear_trend = daily_bear_trend_state(high, low, close, n=5)
+
+    t = len(close) - 1
+    if pd.isna(ma20_slope.iloc[t]) or pd.isna(volume_prev.iloc[t]) or pd.isna(ma5.iloc[t]) or pd.isna(low_prev.iloc[t]):
+        return None
+
+    ready = bear_short_term_entry_ready(
+        is_bear_trend=bool(bear_trend.iloc[t]),
+        ma10=ma10.iloc[t], ma20=ma20.iloc[t],
+        ma10_slope=ma10_slope.iloc[t], ma20_slope=ma20_slope.iloc[t],
+        close_t=close.iloc[t], open_t=open_.iloc[t],
+        volume_t=volume.iloc[t], volume_prev=volume_prev.iloc[t],
+        ma5_t=ma5.iloc[t], low_prev=low_prev.iloc[t],
+    )
+    if not ready:
+        return None
+
+    entry_price = float(close.iloc[t])
+    stop_loss = bear_short_term_stop_loss(entry_bar_high=float(high.iloc[t]))
+    return {
+        "signal_name": "R-TREND-15空頭短線進場（92%）",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": "空頭架構＋MA10/MA20空排向下＋攻擊量(前日1.3倍以上)＋黑K實體跌幅>2%＋跌破MA5與前一日低點",
+    }
+
+
+def _single_ma_strategy_screen(
+    df: pd.DataFrame, min_days: int, strategy_fn, is_long: bool, hold_ma_label: str, signal_name: str,
+) -> dict | None:
+    """R-MA-22/23/24/25(單一均線短/中線做多做空戰法)共用的wiring邏輯：4個戰法共用同一套
+    骨架(見src/strategies/ma_strategies.py開頭說明)，差別只在傳入的策略函式、多空方向、
+    停損守哪一條均線(短線守MA5/中線守MA10)——抽成共用函式避免4份幾乎相同的程式碼。
+    """
+    if len(df) < min_days:
+        return None
+    close, high, low, open_ = df["close"], df["high"], df["low"], df["open"]
+    ma5, ma10, ma20 = sma(close, 5), sma(close, 10), sma(close, 20)
+    t = len(close) - 1
+    if pd.isna(ma20.iloc[t]) or pd.isna(ma10.iloc[t]):
+        return None
+
+    trend = daily_bull_trend_state(high, low, close, n=5) if is_long else daily_bear_trend_state(high, low, close, n=5)
+    if is_long:
+        result = strategy_fn(close, high, ma5, ma10, ma20, trend) if hold_ma_label == "MA10" else strategy_fn(close, high, ma5, ma20, trend)
+    else:
+        result = strategy_fn(close, low, ma5, ma10, ma20, trend) if hold_ma_label == "MA10" else strategy_fn(close, low, ma5, ma20, trend)
+
+    if not bool(result["entry_signal"].iloc[t]):
+        return None
+
+    entry_price = float(close.iloc[t])
+    if is_long:
+        stop_loss = ma_strategy_stop_loss_long(
+            entry_open=float(open_.iloc[t]), entry_close=float(close.iloc[t]),
+            entry_low=float(low.iloc[t]), swing_low_after_entry=None,
+        )
+    else:
+        stop_loss = ma_strategy_stop_loss_short(
+            entry_open=float(open_.iloc[t]), entry_close=float(close.iloc[t]),
+            entry_high=float(high.iloc[t]), swing_high_after_entry=None,
+        )
+    direction = "多頭回後買上漲(收盤突破MA5且突破前一日高點)" if is_long else "空頭彈後空下跌(收盤跌破MA5且跌破前一日低點)"
+    return {
+        "signal_name": signal_name,
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": f"主趨勢確認+站{'上' if is_long else '下'}MA20，{direction}，持股依據守{hold_ma_label}",
+    }
+
+
+def screen_single_ma_short_term_long(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """R-MA-22單一均線短線做多戰法：進出場皆守MA5。"""
+    return _single_ma_strategy_screen(
+        df, min_days, single_ma_short_term_long_strategy, is_long=True, hold_ma_label="MA5",
+        signal_name="R-MA-22單一均線短線做多（88%）",
+    )
+
+
+def screen_single_ma_short_term_short(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """R-MA-23單一均線短線做空戰法，與R-MA-22鏡射對稱。"""
+    return _single_ma_strategy_screen(
+        df, min_days, single_ma_short_term_short_strategy, is_long=False, hold_ma_label="MA5",
+        signal_name="R-MA-23單一均線短線做空（88%）",
+    )
+
+
+def screen_single_ma_mid_term_long(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """R-MA-24單一均線中線做多戰法：進場訊號仍用MA5判斷回檔結束，持股/停利改守MA10。"""
+    return _single_ma_strategy_screen(
+        df, min_days, single_ma_mid_term_long_strategy, is_long=True, hold_ma_label="MA10",
+        signal_name="R-MA-24單一均線中線做多（88%）",
+    )
+
+
+def screen_single_ma_mid_term_short(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """R-MA-25單一均線中線做空戰法，與R-MA-24鏡射對稱。"""
+    return _single_ma_strategy_screen(
+        df, min_days, single_ma_mid_term_short_strategy, is_long=False, hold_ma_label="MA10",
+        signal_name="R-MA-25單一均線中線做空（88%）",
+    )
+
+
+def screen_dual_ma_long_term_long(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """R-MA-28兩條均線長線做多戰法：MA10/MA20黃金交叉且多排向上進場。"""
+    if len(df) < min_days:
+        return None
+    close, open_, low = df["close"], df["open"], df["low"]
+    ma5, ma10, ma20 = sma(close, 5), sma(close, 10), sma(close, 20)
+    t = len(close) - 1
+    if pd.isna(ma20.iloc[t]):
+        return None
+    result = dual_ma_long_term_long_strategy(close, ma5, ma10, ma20)
+    if not bool(result["entry_signal"].iloc[t]):
+        return None
+    entry_price = float(close.iloc[t])
+    stop_loss = ma_strategy_stop_loss_long(
+        entry_open=float(open_.iloc[t]), entry_close=float(close.iloc[t]),
+        entry_low=float(low.iloc[t]), swing_low_after_entry=None,
+    )
+    return {
+        "signal_name": "R-MA-28兩條均線長線做多（89%）",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": "MA10上穿MA20且多排向上，黃金交叉進場",
+    }
+
+
+def screen_dual_ma_long_term_short(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """R-MA-29兩條均線長線做空戰法，與R-MA-28鏡射對稱。"""
+    if len(df) < min_days:
+        return None
+    close, open_, high = df["close"], df["open"], df["high"]
+    ma5, ma10, ma20 = sma(close, 5), sma(close, 10), sma(close, 20)
+    t = len(close) - 1
+    if pd.isna(ma20.iloc[t]):
+        return None
+    result = dual_ma_long_term_short_strategy(close, ma5, ma10, ma20)
+    if not bool(result["entry_signal"].iloc[t]):
+        return None
+    entry_price = float(close.iloc[t])
+    stop_loss = ma_strategy_stop_loss_short(
+        entry_open=float(open_.iloc[t]), entry_close=float(close.iloc[t]),
+        entry_high=float(high.iloc[t]), swing_high_after_entry=None,
+    )
+    return {
+        "signal_name": "R-MA-29兩條均線長線做空（89%）",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "note": "MA10下穿MA20且空排向下，死亡交叉進場",
     }
 
 
@@ -266,10 +445,17 @@ def screen_breakaway_gap_up(df: pd.DataFrame, min_days: int = 60) -> dict | None
 
 _SCREEN_FUNCTIONS = (
     screen_bull_short_term_entry,
+    screen_bear_short_term_entry,
     screen_narrow_range_bottom_breakout,
     screen_slow_rally_channel_breakout,
     screen_breakout_above_big_black_candle,
     screen_breakaway_gap_up,
+    screen_single_ma_short_term_long,
+    screen_single_ma_short_term_short,
+    screen_single_ma_mid_term_long,
+    screen_single_ma_mid_term_short,
+    screen_dual_ma_long_term_long,
+    screen_dual_ma_long_term_short,
 )
 
 

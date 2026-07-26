@@ -21,6 +21,8 @@ from src.indicators.trend import (
     classify_consolidation_shape,
     classify_pullback_correction,
     consolidation_trading_direction,
+    daily_bear_trend_state,
+    daily_bull_trend_state,
     is_bear_trend,
     is_bull_trend,
     is_correction_classification_applicable,
@@ -290,6 +292,30 @@ def test_is_correction_classification_applicable():
     assert is_correction_classification_applicable(0.12) is True
     assert is_correction_classification_applicable(0.08) is False
     assert is_correction_classification_applicable(-0.15) is True
+
+
+def test_daily_bear_trend_state_detects_bear_trend_on_real_downtrend_data():
+    """daily_bear_trend_state()是daily_bull_trend_state()的鏡射版本(R-TREND-15空頭短線SOP
+    需要)，用一段持續下跌的真實價格路徑端對端驗證：夠長的下跌趨勢應該最終被判定為空頭，
+    且同一段資料用多頭版本判斷應該維持False(不會誤判成多頭)。"""
+    n = 60
+    dates = pd.date_range("2026-01-01", periods=n, freq="B")
+    close = pd.Series([200 - i * 0.8 - (5 if i % 10 < 5 else -5) for i in range(n)], index=dates)
+    high = close + 1
+    low = close - 1
+
+    bear_state = daily_bear_trend_state(high, low, close)
+    bull_state = daily_bull_trend_state(high, low, close)
+
+    assert bool(bear_state.iloc[-1]) is True
+    assert bool(bull_state.iloc[-1]) is False
+
+
+def test_daily_bear_trend_state_returns_all_false_when_not_enough_warmup_days():
+    dates = pd.date_range("2026-01-01", periods=3, freq="B")
+    close = pd.Series([100.0, 99.0, 98.0], index=dates)
+    result = daily_bear_trend_state(close, close, close, n=5)
+    assert not result.any()
 
 
 def test_classify_pullback_correction_four_scenarios():

@@ -42,6 +42,16 @@ from src.indicators.bollinger import (
 )
 from src.indicators.candles import is_hammer_candle, is_inverted_hammer_candle, is_reversal_candle_at_high, is_reversal_candle_at_low
 from src.indicators.crossovers import interpret_cross, is_death_cross, is_golden_cross
+from src.indicators.granville import (
+    granville_buy_signal_1,
+    granville_buy_signal_2,
+    granville_buy_signal_3,
+    granville_buy_signal_4,
+    granville_sell_signal_1,
+    granville_sell_signal_2,
+    granville_sell_signal_3,
+    granville_sell_signal_4,
+)
 from src.indicators.kd import compute_kd, is_high_dull, is_low_dull, kd_cross_signal_by_trend
 from src.indicators.macd import compute_macd, macd_zero_axis_bear_signal, macd_zero_axis_bull_signal
 from src.indicators.moving_average import compute_ma_set, is_bearish_aligned, is_bullish_aligned, is_ma_converged, is_ma_tangled, sma
@@ -175,6 +185,29 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         add("R-INDICATOR-23", "多頭高檔，價格由上往下穿越上軌，搶多頭回檔賣出/放空")
     if _last_bool(bollinger_sell_signal_2(close, bb["mid"], trend_series)):
         add("R-INDICATOR-23", "空頭反彈突破中軌後，近期再跌回中軌下方，賣出/放空")
+
+    # --- 均線(葛蘭碧8大法則，R-MA-19買點①②③④/R-MA-20賣點①②③④) ---
+    # 全部以股價與MA20的相對關係+方向判斷；買點④/賣點④需要is_bull_trend/is_bear_trend，
+    # 沿用上面已經算好的trend_series(短期/日線)，跟R-MA-15等既有規則同一套依據。
+    ma20 = ma_frame["MA20"]
+    is_bull_trend_series = trend_series == TREND_BULL
+    is_bear_trend_series = trend_series == TREND_BEAR
+    if _last_bool(granville_buy_signal_1(close, ma20)):
+        add("R-MA-19", "買點①落底反轉：MA20止跌走平或上揚，股價由均線下方收盤突破")
+    if _last_bool(granville_buy_signal_2(close, low, ma20)):
+        add("R-MA-19", "買點②多頭回測支撐：MA20上揚，股價回檔貼近但未跌破，隨後轉漲")
+    if _last_bool(granville_buy_signal_3(close, ma20)):
+        add("R-MA-19", "買點③短暫跌破快速收復：MA20持續上揚，近期短暫跌破後已收復站上")
+    if _last_bool(granville_buy_signal_4(close, ma20, is_bear_trend_series)):
+        add("R-MA-19", "買點④乖離過大搶反彈：空頭連跌且負乖離過大，股價開始反彈(僅短打)")
+    if _last_bool(granville_sell_signal_1(close, ma20)):
+        add("R-MA-20", "賣點①盤頭反轉：MA20止漲走平或下彎，股價由均線上方收盤跌破")
+    if _last_bool(granville_sell_signal_2(close, high, ma20)):
+        add("R-MA-20", "賣點②空頭反彈遇壓：MA20下彎，股價反彈貼近但未突破，隨後轉跌")
+    if _last_bool(granville_sell_signal_3(close, ma20)):
+        add("R-MA-20", "賣點③短暫突破快速回跌：MA20持續下彎，近期短暫突破後已回跌至下方")
+    if _last_bool(granville_sell_signal_4(close, ma20, is_bull_trend_series)):
+        add("R-MA-20", "賣點④乖離過大搶回檔：多頭連漲且正乖離過大，股價開始回檔(僅短打)")
 
     # --- 量能 ---
     ma5_volume = basic_volume(volume)

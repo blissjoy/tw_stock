@@ -17,6 +17,135 @@ def _build_uptrend_df(n_days: int = 70) -> pd.DataFrame:
     return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
 
 
+def _build_downtrend_df(n_days: int = 70) -> pd.DataFrame:
+    """_build_uptrend_df()的鏡射版本，供空頭方向的screen_*測試使用。"""
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    close = [200 - i * 0.3 for i in range(n_days)]
+    close[-1] = close[-2] * 0.97  # 最後一天跳空下跌3%，確保黑K實體跌幅>2%
+    open_ = [c + 0.2 for c in close]
+    open_[-1] = close[-2]
+    high = [c + 0.5 for c in close]
+    low = [c - 0.5 for c in close]
+    volume = [1000] * n_days
+    volume[-1] = 1500
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+
+def _build_golden_cross_df(n_days: int = 40) -> pd.DataFrame:
+    """前段持平、最後一天急拉，讓MA10剛好在「最後一天」上穿MA20(is_golden_cross只在真正
+    穿越當天才是True，維持在上方的隔幾天都不算)——R-MA-28兩條均線黃金交叉用。"""
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    flat_len = n_days - 1
+    close = [100.0] * flat_len + [112.0]
+    high = [c + 0.5 for c in close]
+    low = [c - 0.5 for c in close]
+    open_ = [c - 0.2 for c in close]
+    volume = [1000] * n_days
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+
+def _build_death_cross_df(n_days: int = 40) -> pd.DataFrame:
+    """_build_golden_cross_df()的鏡射版本(R-MA-29兩條均線死亡交叉用)。"""
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    flat_len = n_days - 1
+    close = [200.0] * flat_len + [188.0]
+    high = [c + 0.5 for c in close]
+    low = [c - 0.5 for c in close]
+    open_ = [c + 0.2 for c in close]
+    volume = [1000] * n_days
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+
+def test_screen_bear_short_term_entry_fires_when_conditions_met(monkeypatch):
+    df = _build_downtrend_df(n_days=70)
+    monkeypatch.setattr(
+        daily_screener, "daily_bear_trend_state",
+        lambda high, low, close, n=5: pd.Series(True, index=close.index),
+    )
+    result = daily_screener.screen_bear_short_term_entry(df, min_days=60)
+    assert result is not None
+    assert result["signal_name"] == "R-TREND-15空頭短線進場（92%）"
+    assert result["entry_price"] == df["close"].iloc[-1]
+    assert result["stop_loss"] > result["entry_price"]
+
+
+def test_screen_bear_short_term_entry_returns_none_when_not_bear_trend(monkeypatch):
+    df = _build_downtrend_df(n_days=70)
+    monkeypatch.setattr(
+        daily_screener, "daily_bear_trend_state",
+        lambda high, low, close, n=5: pd.Series(False, index=close.index),
+    )
+    assert daily_screener.screen_bear_short_term_entry(df, min_days=60) is None
+
+
+def test_screen_single_ma_short_term_long_fires_when_conditions_met(monkeypatch):
+    df = _build_uptrend_df(n_days=70)
+    monkeypatch.setattr(
+        daily_screener, "daily_bull_trend_state",
+        lambda high, low, close, n=5: pd.Series(True, index=close.index),
+    )
+    result = daily_screener.screen_single_ma_short_term_long(df, min_days=60)
+    assert result is not None
+    assert result["signal_name"] == "R-MA-22單一均線短線做多（88%）"
+    assert result["stop_loss"] < result["entry_price"]
+
+
+def test_screen_single_ma_short_term_short_fires_when_conditions_met(monkeypatch):
+    df = _build_downtrend_df(n_days=70)
+    monkeypatch.setattr(
+        daily_screener, "daily_bear_trend_state",
+        lambda high, low, close, n=5: pd.Series(True, index=close.index),
+    )
+    result = daily_screener.screen_single_ma_short_term_short(df, min_days=60)
+    assert result is not None
+    assert result["signal_name"] == "R-MA-23單一均線短線做空（88%）"
+    assert result["stop_loss"] > result["entry_price"]
+
+
+def test_screen_single_ma_mid_term_long_fires_when_conditions_met(monkeypatch):
+    df = _build_uptrend_df(n_days=70)
+    monkeypatch.setattr(
+        daily_screener, "daily_bull_trend_state",
+        lambda high, low, close, n=5: pd.Series(True, index=close.index),
+    )
+    result = daily_screener.screen_single_ma_mid_term_long(df, min_days=60)
+    assert result is not None
+    assert result["signal_name"] == "R-MA-24單一均線中線做多（88%）"
+
+
+def test_screen_single_ma_mid_term_short_fires_when_conditions_met(monkeypatch):
+    df = _build_downtrend_df(n_days=70)
+    monkeypatch.setattr(
+        daily_screener, "daily_bear_trend_state",
+        lambda high, low, close, n=5: pd.Series(True, index=close.index),
+    )
+    result = daily_screener.screen_single_ma_mid_term_short(df, min_days=60)
+    assert result is not None
+    assert result["signal_name"] == "R-MA-25單一均線中線做空（88%）"
+
+
+def test_screen_dual_ma_long_term_long_fires_on_golden_cross():
+    df = _build_golden_cross_df()
+    result = daily_screener.screen_dual_ma_long_term_long(df, min_days=30)
+    assert result is not None
+    assert result["signal_name"] == "R-MA-28兩條均線長線做多（89%）"
+    assert result["stop_loss"] < result["entry_price"]
+
+
+def test_screen_dual_ma_long_term_long_returns_none_without_cross():
+    df = _build_uptrend_df(n_days=70)  # 平滑上漲，交叉發生在暖身期附近而非最後一天
+    result = daily_screener.screen_dual_ma_long_term_long(df, min_days=60)
+    assert result is None
+
+
+def test_screen_dual_ma_long_term_short_fires_on_death_cross():
+    df = _build_death_cross_df()
+    result = daily_screener.screen_dual_ma_long_term_short(df, min_days=30)
+    assert result is not None
+    assert result["signal_name"] == "R-MA-29兩條均線長線做空（89%）"
+    assert result["stop_loss"] > result["entry_price"]
+
+
 def test_screen_bull_short_term_entry_returns_none_when_not_enough_days():
     df = _build_uptrend_df(n_days=30)
     assert daily_screener.screen_bull_short_term_entry(df, min_days=60) is None
@@ -61,13 +190,17 @@ def test_analyze_stock_signals_includes_confidence_and_rule_description(monkeypa
 
     matches = daily_screener.analyze_stock_signals(df, min_days=60)
 
-    assert len(matches) == 1
+    # 這段均線持續上漲的合成資料，除了R-TREND-14以外，均線分類的單一均線短/中線做多戰法
+    # (R-MA-22/24)進場條件(收盤突破MA5且突破前一日高點)也會一併成立，都是合理觸發，
+    # 不是重複或錯誤——依信心分數由高到低排序，R-TREND-14(92%)應該排第一。
+    assert len(matches) >= 1
     match = matches[0]
     assert match["rule_id"] == "R-TREND-14"
     assert match["title"] == "多頭短線進場"
     assert match["confidence"] == 92
     assert match["description"]  # 從ai/zhu-rules/查到的完整解讀文字，非空
     assert match["reference"]
+    assert matches == sorted(matches, key=lambda m: -m["confidence"])
 
 
 def test_analyze_stock_signals_sorts_by_confidence_descending(monkeypatch):
@@ -323,8 +456,10 @@ def test_screen_all_stocks_aggregates_multiple_candidates(monkeypatch):
     df_ok = _build_uptrend_df(70)
     df_short = _build_uptrend_df(30)
     candidates = daily_screener.screen_all_stocks({"2330": df_ok, "1101": df_short}, min_days=60)
-    assert len(candidates) == 1
-    assert candidates[0]["stock_id"] == "2330"
+    # df_ok同時符合R-TREND-14跟均線分類的單一均線短/中線做多戰法(R-MA-22/24)，都是合理
+    # 觸發；df_short天數不足(30<60)，1101不應該出現在候選清單裡。
+    assert len(candidates) >= 1
+    assert all(c["stock_id"] == "2330" for c in candidates)
 
 
 def _seed_stock_prices(conn, stock_id: str, n_days: int) -> None:
