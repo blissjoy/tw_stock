@@ -67,6 +67,7 @@ from src.indicators.volume_price import (
     is_attack_volume,
     is_big_volume_vs_ma5,
     is_big_volume_vs_prev_day,
+    is_pothole_volume_pattern,
     is_suffocation_volume,
 )
 
@@ -197,6 +198,26 @@ def detect_latest_day_volume_signals(df: pd.DataFrame) -> list[str]:
             next_volume=float(volume.iloc[-1]), big_black_volume=float(volume.iloc[-2]),
         ):
             hits.append("窒息量（前一日大量長黑後，今日量縮續跌，留意止跌訊號）")
+
+    # R-VOLPRICE-07凹洞量：昨天(index -2)確認窒息量成立後，今天(index -1)出現量增紅K
+    # 收盤在開盤之上，視為凹洞量止跌反轉訊號。要判斷「昨天」是否成立窒息量，需要再往前
+    # 抓大黑K的錨點(index -3)，所以這裡至少要3天資料才夠算。
+    if len(df) >= 3:
+        is_big_black_anchor = bool(is_mid_long_black_candle(open_, close).iloc[-3]) and bool(
+            is_big_volume_vs_ma5(volume, ma5_volume).iloc[-3]
+        )
+        suffocation_yesterday = is_suffocation_volume(
+            is_big_black_candle=is_big_black_anchor,
+            next_close_down=bool(close.iloc[-2] < close.iloc[-3]),
+            next_volume=float(volume.iloc[-2]), big_black_volume=float(volume.iloc[-3]),
+        )
+        if is_pothole_volume_pattern(
+            is_suffocation=suffocation_yesterday,
+            day_after_is_red=bool(close.iloc[-1] > open_.iloc[-1]),
+            day_after_volume_up=bool(volume.iloc[-1] > volume.iloc[-2]),
+            day_after_close_above_open=bool(close.iloc[-1] > open_.iloc[-1]),
+        ):
+            hits.append("凹洞量（窒息量隔日量增紅K收復，止跌反轉訊號）")
 
     return hits
 

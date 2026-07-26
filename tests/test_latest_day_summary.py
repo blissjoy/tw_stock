@@ -114,6 +114,27 @@ def test_detect_latest_day_volume_signals_big_volume_vs_prev_day():
     assert any("爆量" in h for h in hits)
 
 
+def test_detect_latest_day_volume_signals_pothole_volume():
+    """R-VOLPRICE-07凹洞量：大黑K(day-3，量3000=3倍ma5量1000)→隔日窒息量確認(day-2，量1400
+    <=大黑K量的一半)→再隔日(day-1/今天)量增(1500>1400)紅K收復，應該觸發凹洞量。"""
+    rows = [_flat_row(100.0, volume=1000.0) for _ in range(5)] + [
+        {"open": 100.0, "high": 101.0, "low": 94.0, "close": 95.0, "volume": 3000},  # day-3大黑K(-5%)+爆量
+        {"open": 94.0, "high": 94.5, "low": 89.0, "close": 90.0, "volume": 1400},  # day-2續跌+量縮(窒息量成立)
+        {"open": 90.0, "high": 93.5, "low": 89.5, "close": 93.0, "volume": 1500},  # day-1(今天)量增紅K收復
+    ]
+    df = _df(rows)
+    hits = detect_latest_day_volume_signals(df)
+    assert any("凹洞量" in h for h in hits)
+
+
+def test_detect_latest_day_volume_signals_no_pothole_when_too_short():
+    """不足3天資料時，凹洞量判斷需要的「窒息量錨點」抓不到，不應該觸發也不應該crash。"""
+    rows = [_flat_row(100.0, volume=1000.0) for _ in range(2)]
+    df = _df(rows)
+    hits = detect_latest_day_volume_signals(df)
+    assert not any("凹洞量" in h for h in hits)
+
+
 def test_detect_latest_day_volume_signals_empty_when_too_short():
     df = _df([_flat_row()])
     assert detect_latest_day_volume_signals(df) == []
