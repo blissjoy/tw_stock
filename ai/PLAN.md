@@ -2725,3 +2725,36 @@ session開始前就已經接入的規則(例如R-CANDLE-24/R-MA-22~29等更早�
 ⏸️已實作未接入的113條裡，有約60條在這個session裡曾被個別評估過排除理由(信心≥80分、
 屬於原始「114條」批次範圍)，附上從PLAN.md擷取的理由文字；其餘(多為信心<80分)這個
 session沒有逐條評估，`ai/RULE_STATUS.md`裡如實標註「未個別評估」，不假裝有評估過。
+
+## 修正bug：desktop/main_window.py漏改的TrendHorizonResult解構崩潰(2026-07-26)
+
+使用者實際使用桌面版時回報3個問題：(1)點候選清單股票，「個股分析」不會自動更新，也
+不知道目前顯示的是哪一檔；(2)圖表下方的說明完全沒顯示；(3) terminal噴出`ValueError:
+too many values to unpack (expected 3)`，出在`desktop/main_window.py`的
+`_rerender_chart()`。
+
+**根本原因**：`TrendHorizonResult`在稍早的「R-TREND-02降噪+freshness新鮮度標註」那次
+修正裡新增了第4個欄位`freshness`，當時已經找出並修正了`dashboard/app.py`跟
+`src/screener/rule_scan.py`兩處用固定3個一組`(timeframe, trend, reason)`寫死解構的
+呼叫端，但**漏掉了`desktop/main_window.py`**——這個檔案沒有被那次的搜尋涵蓋到(推測是
+搜尋範圍當時遺漏，或該檔案是在那次修正前後的另一個工作階段建立)。多出的第4個欄位讓
+每次呼叫`_rerender_chart()`都會在解構那一行直接丟`ValueError`，導致整個函式從那一行
+之後全部沒有執行——後面的`summary_view.setPlainText()`(圖表下方說明)跟`_refresh_
+analysis_view()`(個股分析面板)都執行不到，這正是回報的問題(1)(2)的根本原因，問題(3)
+的traceback是這兩個症狀共同的病因。
+
+**修正**：
+- `desktop/main_window.py`改成`*freshness_rest`吸收多出來的欄位(跟另外兩處已修正過的
+  寫法一致)，並在freshness文字包含⚠️警示時另外附上一行，不是直接丟掉不用。
+- 使用者同時指出「不知道現在顯示的是誰的分析」，在「圖表下方說明」跟「個股分析」面板
+  的第一行都固定加註「股票代碼+名稱」(重用`chart_data.get_stock_name()`)，切換候選
+  股票後能立刻確認面板已經跟著更新到正確的那一檔，不是還停在上一檔的殘留內容。
+
+驗證：`python -c "import ast; ast.parse(...)"`語法檢查通過；`import desktop.main_window`
+匯入成功；直接執行`python desktop/main.py`確認能正常啟動、8秒內無crash/traceback；
+670個現有測試全過(這個檔案沒有對應的pytest測試，桌面GUI互動需要人工或專用driver驗證，
+無法在這個環境用pytest涵蓋，如實記錄這個限制)。
+
+**教訓**：修改一個被多處呼叫的共用資料結構(這裡是`TrendHorizonResult`新增欄位)時，
+搜尋呼叫端不能只靠記憶中「應該有哪些檔案」，之後類似情況要用`grep -rn`實際掃過整個
+專案目錄(含`desktop/`、`dashboard/`等所有前端)再動手修，不能假設搜尋範圍已經涵蓋全部。

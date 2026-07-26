@@ -403,18 +403,33 @@ class MainWindow(QMainWindow):
         # 日線走空、週線仍是多頭)，只看一種天期容易誤判。每個天期都附上「依據」(最近兩個
         # 頭部/底部的實際價格、日期、頭頭高低/底底高低的判讀)，讓使用者能自己核對演算法的
         # 判斷——改成每行一種天期，跟Streamlit版對齊，附上依據後單行會過長不好讀。
-        trend_lines = [
-            f"　- {label}（{timeframe}）：{trend}（依據：{reason}）"
-            for label, (timeframe, trend, reason) in summary["trend"].items()
-        ]
+        #
+        # ⚠️ TrendHorizonResult 2026-07-26新增了第4個欄位freshness(見trend_state.py)，
+        # 這裡原本用固定3個一組的tuple unpacking(`(timeframe, trend, reason)`)寫死解構，
+        # 沒有跟著更新，多了freshness欄位後每次呼叫都會丟ValueError("too many values to
+        # unpack")、讓_rerender_chart()整個中斷在這裡——後面的summary_view.setPlainText()
+        # 跟_refresh_analysis_view()都執行不到，這就是「圖表下方說明沒顯示」「個股分析
+        # 沒有自動更新」的根本原因(dashboard/app.py跟rule_scan.py當時都已經一併修正過，
+        # 唯獨這個桌面版檔案漏掉)。改成`*_freshness`吸收多出來的欄位，並在需要提醒使用者
+        # 「轉折點可能已經跟不上盤面」時另外附上一行，不是直接丟掉不用。
+        trend_lines = []
+        for label, (timeframe, trend, reason, *freshness_rest) in summary["trend"].items():
+            trend_lines.append(f"　- {label}（{timeframe}）：{trend}（依據：{reason}）")
+            if freshness_rest and "⚠️" in freshness_rest[0]:
+                trend_lines.append(f"　　{freshness_rest[0]}")
+        # 使用者反映「不知道現在顯示的是誰的分析」——第一行固定加註股票代碼+名稱，跟圖表
+        # 標題(render_chart_html的stock_label)、視窗標題一致，三處都看得到同一個代碼名稱
+        # 才不會誤把上一檔股票的資料當成目前這檔。
+        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
+        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
         lines = [
-            f"最新交易日分析（{latest_date_label}）",
+            f"{stock_label}｜最新交易日分析（{latest_date_label}）",
             "目前趨勢：",
             *trend_lines,
             f"K棒名稱：{summary['candle_name']}",
             "型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"),
             "量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"),
-            "⚠️ 型態訊號僅判斷幾何條件是否成立，尚未確認是否位於真正的高檔/低檔位置。",
+            "⚠️ 型態訊號的高低檔判斷已接上趨勢位置模組，但還沒有初升/主升/末升等更細的子階段分類。",
         ]
         if not holidays_ok:
             lines.append("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
@@ -445,15 +460,21 @@ class MainWindow(QMainWindow):
         # (預設120天顯示窗口)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明。
         trend_df = chart_data.load_price_history(self.conn, self._current_stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
         matches = analyze_stock_signals(price_df, trend_df=trend_df)
+        # 使用者反映「不知道現在顯示的是誰的分析」——第一行固定加註股票代碼+名稱，不管
+        # 有沒有符合訊號的規則都要顯示，讓使用者能一眼確認面板已經跟著候選清單點選更新，
+        # 不是還停留在上一檔股票的內容。
+        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
+        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        header = f"<p><b>個股分析：{html.escape(stock_label)}</b></p>"
         if not matches:
-            self.analysis_view.setHtml("<p>目前沒有符合任何已接上規則庫的訊號。</p>")
+            self.analysis_view.setHtml(header + "<p>目前沒有符合任何已接上規則庫的訊號。</p>")
             return
         # ⚠️ QTextEdit.setHtml()一定會把內容當HTML剖析，rule_scan.py的note文字裡常有
         # "MA5<MA10<MA20"這種原始"<"/">"符號(見rule_scan.py)，不escape的話會被誤判成
         # HTML標籤、內容被吃掉一截(實測"目前狀態：MA5<MA10<MA20..."只會顯示到"MA5"就斷掉)。
         # Streamlit版沒有這個問題是因為st.write/st.caption預設unsafe_allow_html=False，
         # 不會把文字內容當HTML剖析；這裡是QTextEdit本身的行為，只有桌面版需要escape。
-        blocks = []
+        blocks = [header]
         for m in matches:
             block = f"<p><b>{html.escape(m['rule_id'])}　{html.escape(m['title'])}（信心{m['confidence']}%）</b><br>"
             if m["description"]:
