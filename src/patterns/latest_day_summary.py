@@ -3,11 +3,10 @@
 (indicators/volume_price.py)規則，對資料的「最新一天」給出白話摘要，供儀表板個股圖表
 下方顯示用。不重新實作任何底層判斷邏輯，只做組裝與整理。
 
-⚠️ 範圍說明：candle_patterns_2.py 開頭已註明，「位於高檔/低檔」需要外部的趨勢位置模組
-（尚未實作，指的是is_at_high/is_at_low這種「趨勢的哪個階段」的細緻判斷），呼叫端可先傳
-全True的Series只看幾何型態——這裡沿用同樣做法。也就是說，這裡判斷的是「型態的幾何條件是否
-成立」，不是「確認真的發生在高檔或低檔」，摘要文字會清楚標註這一點，避免看起來像是完整的
-高低檔位置判斷。
+「位於高檔/低檔」的判斷2026-07-26已經接上`src.indicators.trend_position.compute_trend_
+position()`(逐日判斷是否處於本波段高檔/低檔，見該模組docstring說明操作型定義與書中
+R-TREND-18波段門檻的對應關係)，不再是全True的佔位符——`candle_patterns_2.py`/
+`candles.py`裡需要is_at_high/is_at_low的函式，這裡都改傳真正算出來的Series/當天布林值。
 
 也刻意只挑選書中最常被提及、且不需要「趨勢位置」就能單純從OHLCV算出的規則子集，不是246條
 規則的全自動化。趨勢方向(多頭/空頭/盤整，跟「趨勢位置」是不同層次的判斷)2026-07-24已經
@@ -24,6 +23,8 @@ from __future__ import annotations
 import pandas as pd
 
 from src.patterns.trend_state import classify_trend_states_multi_horizon
+
+from src.indicators.trend_position import compute_trend_position
 
 from src.indicators.candle_patterns_2 import (
     basic_reversal_at_high,
@@ -71,8 +72,6 @@ from src.indicators.volume_price import (
     is_suffocation_volume,
 )
 
-# 位置條件(是否位於高檔/低檔)的趨勢位置模組尚未實作，比照 candle_patterns_2.py
-# 開頭註明的做法：呼叫端傳全True的Series，只判斷型態本身的幾何條件。
 _MIN_ROWS_FOR_MULTI_CANDLE = 3
 
 
@@ -109,20 +108,22 @@ def detect_latest_day_candle_patterns(df: pd.DataFrame) -> list[str]:
         return []
 
     open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
-    all_true = pd.Series(True, index=close.index)
+    trend_position = compute_trend_position(high, low, close)
+    is_at_high = trend_position["is_at_high"]
+    is_at_low = trend_position["is_at_low"]
     hits: list[str] = []
 
     two_candle_checks = {
-        "基本反轉（高檔）": basic_reversal_at_high(open_, close, all_true),
-        "基本反轉（低檔）": basic_reversal_at_low(open_, close, all_true),
-        "烏雲罩頂": dark_cloud_cover(open_, high, close, all_true),
-        "貫穿線（低檔）": bullish_cover_low(open_, low, close, all_true),
-        "空頭母子懷抱": bearish_harami_at_high(open_, high, low, close, all_true),
-        "多頭母子懷抱（光明在望）": bullish_harami_at_low(open_, high, low, close, all_true),
-        "空頭長黑吞噬": bearish_engulfing_at_high(open_, low, close, all_true),
-        "多頭長紅吞噬": bullish_engulfing_at_low(open_, high, close, all_true),
-        "空頭刺透": bearish_piercing_at_high(open_, low, close, all_true),
-        "多頭刺透": bullish_piercing_at_low(open_, high, close, all_true),
+        "基本反轉（高檔）": basic_reversal_at_high(open_, close, is_at_high),
+        "基本反轉（低檔）": basic_reversal_at_low(open_, close, is_at_low),
+        "烏雲罩頂": dark_cloud_cover(open_, high, close, is_at_high),
+        "貫穿線（低檔）": bullish_cover_low(open_, low, close, is_at_low),
+        "空頭母子懷抱": bearish_harami_at_high(open_, high, low, close, is_at_high),
+        "多頭母子懷抱（光明在望）": bullish_harami_at_low(open_, high, low, close, is_at_low),
+        "空頭長黑吞噬": bearish_engulfing_at_high(open_, low, close, is_at_high),
+        "多頭長紅吞噬": bullish_engulfing_at_low(open_, high, close, is_at_low),
+        "空頭刺透": bearish_piercing_at_high(open_, low, close, is_at_high),
+        "多頭刺透": bullish_piercing_at_low(open_, high, close, is_at_low),
     }
     for name, series in two_candle_checks.items():
         if bool(series.iloc[-1]):
@@ -153,7 +154,7 @@ def detect_latest_day_candle_patterns(df: pd.DataFrame) -> list[str]:
             is_mid_long_red_left=bool(mid_long_red.iloc[-3]),
             all_middle_are_reversal_candles=bool(star_shape.iloc[-2]),
             is_mid_long_black_right=bool(mid_long_black.iloc[-1]),
-            is_at_high=True,
+            is_at_high=bool(is_at_high.iloc[-1]),
         ):
             hits.append("夜星")
 
@@ -161,7 +162,7 @@ def detect_latest_day_candle_patterns(df: pd.DataFrame) -> list[str]:
             is_mid_long_black_left=bool(mid_long_black.iloc[-3]),
             all_middle_are_reversal_candles=bool(star_shape.iloc[-2]),
             is_mid_long_red_right=bool(mid_long_red.iloc[-1]),
-            is_at_low=True,
+            is_at_low=bool(is_at_low.iloc[-1]),
         ):
             hits.append("晨星")
 

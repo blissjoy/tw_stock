@@ -21,6 +21,25 @@ def _flat_row(close: float = 100.0, volume: float = 1000.0) -> dict:
     return {"open": close, "high": close + 0.5, "low": close - 0.5, "close": close, "volume": volume}
 
 
+def _swing_rows(start: float, mid: float, end: float, leg1_days: int, leg2_days: int) -> list[dict]:
+    """造出一段「先走到mid、再走到end」的連續價格路徑，供is_at_high/is_at_low需要的「先有一段
+    >=10%真實波段」測試資料使用(見src/indicators/trend_position.py的MIN_SWING_PCT門檻)。
+    start->mid->end分別代表兩段走勢的起訖價，方向由正負差自動決定(可以是漲後跌或跌後漲)。"""
+    rows: list[dict] = []
+    for leg_start, leg_end, days in ((start, mid, leg1_days), (mid, end, leg2_days)):
+        step = (leg_end - leg_start) / days
+        for i in range(days):
+            c = leg_start + step * (i + 1)
+            rows.append({
+                "open": c - step * 0.5,
+                "high": max(c, c - step) + 0.3,
+                "low": min(c, c - step) - 0.3,
+                "close": c,
+                "volume": 1000,
+            })
+    return rows
+
+
 def test_classify_latest_candle_name_long_red():
     df = _df([{"open": 100.0, "high": 115.0, "low": 95.0, "close": 107.0, "volume": 1000}])
     assert classify_latest_candle_name(df) == "長紅K"
@@ -47,9 +66,10 @@ def test_classify_latest_candle_name_inverted_hammer():
 
 
 def test_detect_latest_day_candle_patterns_basic_reversal_at_high():
-    # 沿用 tests/test_candle_patterns_2.py 已驗證過的資料(open_=[100,104], close=[104,100])，
-    # 前面墊幾天平盤資料只是為了讓向量化函式(rolling等)有足夠資料可算，不影響這組判斷。
-    rows = [_flat_row(100.0) for _ in range(5)] + [
+    # 沿用 tests/test_candle_patterns_2.py 已驗證過的型態資料(open_=[100,104], close=[104,100])，
+    # 前面墊一段先跌後漲(80->104，漲幅30%)的真實波段，讓is_at_high(見trend_position.py)能
+    # 判定「打平在高點」這段確實處於本波段高檔，不是只有幾何型態成立、位置條件仍是預設值。
+    rows = _swing_rows(100, 80, 104, 20, 20) + [_flat_row(104.0) for _ in range(5)] + [
         {"open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0, "volume": 1000},
         {"open": 104.0, "high": 105.0, "low": 99.0, "close": 100.0, "volume": 1000},
     ]
@@ -70,7 +90,10 @@ def test_detect_latest_day_candle_patterns_falling_three_black_candles():
 
 
 def test_detect_latest_day_candle_patterns_evening_star():
-    rows = [_flat_row(100.0) for _ in range(3)] + [
+    # 前面墊一段先跌後漲(80->100，漲幅25%)的真實波段，讓is_at_high判定完成夜星那天(右側
+    # 長黑K收盤)仍在本波段高檔容忍帶內——反轉完成日本身就是離開高點的那天，見
+    # trend_position.py docstring說明為何刻意沿用「翻轉前」狀態判斷。
+    rows = _swing_rows(120, 80, 100, 20, 20) + [_flat_row(100.0) for _ in range(3)] + [
         {"open": 100.0, "high": 109.0, "low": 99.0, "close": 108.0, "volume": 1000},   # 左：中長紅(>3.5%)
         {"open": 108.5, "high": 109.5, "low": 108.0, "close": 108.7, "volume": 1000},  # 中：小紅/星形
         {"open": 108.0, "high": 108.5, "low": 100.0, "close": 101.0, "volume": 1000},  # 右：中長黑(>3.5%)
@@ -81,7 +104,9 @@ def test_detect_latest_day_candle_patterns_evening_star():
 
 
 def test_detect_latest_day_candle_patterns_morning_star():
-    rows = [_flat_row(100.0) for _ in range(3)] + [
+    # 鏡射版本：先漲後跌(80->120->100)，讓is_at_low判定完成晨星那天(右側長紅K收盤)仍在
+    # 本波段低檔容忍帶內。
+    rows = _swing_rows(80, 120, 100, 20, 20) + [_flat_row(100.0) for _ in range(3)] + [
         {"open": 108.0, "high": 109.0, "low": 99.0, "close": 100.0, "volume": 1000},   # 左：中長黑(>3.5%)
         {"open": 99.5, "high": 100.0, "low": 99.0, "close": 99.7, "volume": 1000},     # 中：小紅/星形
         {"open": 100.0, "high": 108.5, "low": 99.5, "close": 107.0, "volume": 1000},   # 右：中長紅(>3.5%)
