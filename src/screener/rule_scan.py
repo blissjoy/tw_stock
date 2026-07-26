@@ -61,9 +61,19 @@ from src.indicators.macd import (
     macd_zero_axis_bear_signal,
     macd_zero_axis_bull_signal,
 )
-from src.indicators.moving_average import compute_ma_set, is_bearish_aligned, is_bullish_aligned, is_ma_converged, is_ma_tangled, sma
+from src.indicators.moving_average import compute_ma_set, is_bearish_aligned, is_bullish_aligned, is_ma_converged, is_ma_tangled, ma_direction, sma
 from src.indicators.pivots import compute_turning_points
 from src.indicators.rsi import rsi, rsi_overbought_oversold_signal, rsi_short_long_cross_signal
+from src.indicators.support_resistance import (
+    bearish_resistance_short_signal,
+    bullish_support_buy_signal,
+    classify_bottom_role,
+    classify_head_role,
+    is_bearish_reversal_candle,
+    is_bullish_reversal_candle,
+    ma_resistance_conversion_short,
+    ma_support_conversion_long,
+)
 from src.indicators.volume_price import basic_volume, is_accumulation_volume, is_big_volume_vs_prev_day
 from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_states_multi_horizon
 
@@ -162,6 +172,30 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         if trough_divergence:
             add("R-INDICATOR-12", trough_divergence)
 
+    # --- 支撐壓力(R-SR-01/02轉折高低點角色互換) ---
+    # classify_head_role/classify_bottom_role本身是「隨時可查詢」的角色分類函式(壓力或
+    # 支撐)，不是「今天有沒有觸發」的訊號——這裡收斂成「今天剛好突破/跌破最近一個轉折
+    # 高/低點」這個明確的今日事件才回報，避免每天都因為「查詢角色」而重複列出。
+    if len(tp_heads) >= 1:
+        recent_head = tp_heads[-1]
+        if close.iloc[-1] > recent_head.price and close.iloc[-2] <= recent_head.price:
+            role = classify_head_role(recent_head.price, float(close.iloc[-1]), has_broken_above=True)
+            add("R-SR-01", f"收盤突破前波段轉折高點{recent_head.price:.2f}，原壓力角色轉為{role}")
+    if len(tp_bottoms) >= 1:
+        recent_bottom = tp_bottoms[-1]
+        if close.iloc[-1] < recent_bottom.price and close.iloc[-2] >= recent_bottom.price:
+            role = classify_bottom_role(recent_bottom.price, float(close.iloc[-1]), has_broken_below=True)
+            add("R-SR-02", f"收盤跌破前波段轉折低點{recent_bottom.price:.2f}，原支撐角色轉為{role}")
+
+    # --- 支撐壓力(R-SR-08月線支撐壓力轉換+3日站回觀察窗) ---
+    ma20_direction = ma_direction(ma_frame["MA20"])
+    support_conv = _last_text(ma_support_conversion_long(close, ma_frame["MA20"], ma20_direction))
+    if support_conv:
+        add("R-SR-08", support_conv)
+    resistance_conv = _last_text(ma_resistance_conversion_short(close, ma_frame["MA20"], ma20_direction))
+    if resistance_conv:
+        add("R-SR-08", resistance_conv)
+
     # --- MA通道(R-INDICATOR-18正負乖離軌道突破) ---
     ma20_for_channel = ma_frame["MA20"]
     channel = ma_channel_bands(ma20_for_channel)
@@ -252,6 +286,31 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         add("R-MA-20", "賣點③短暫突破快速回跌：MA20持續下彎，近期短暫突破後已回跌至下方")
     if _last_bool(granville_sell_signal_4(close, ma20, is_bull_trend_series)):
         add("R-MA-20", "賣點④乖離過大搶回檔：多頭連漲且正乖離過大，股價開始回檔(僅短打)")
+
+    # --- 支撐壓力(R-SR-15多頭回檔關鍵支撐買進/R-SR-16空頭反彈關鍵壓力放空) ---
+    # 書中列出4種支撐/壓力來源(月線/季線/上升切線/前低/跳空缺口)，這裡先只接資料需求
+    # 最少、最單純的月線(MA20)版本；貼近但未跌破/突破的容忍度比照granville_buy_signal_2
+    # 既有的2%門檻，保持同一套工程估計值。其餘3種來源之後有需要可以再擴充。
+    ma20_now = float(ma20.iloc[-1])
+    touched_support_ma20 = float(low.iloc[-1]) <= ma20_now * 1.02 and float(close.iloc[-1]) >= ma20_now * 0.98
+    if touched_support_ma20:
+        reversal_up = is_bullish_reversal_candle(
+            float(open_.iloc[-1]), float(high.iloc[-1]), float(low.iloc[-1]), float(close.iloc[-1]),
+        )
+        trend_label = "多頭趨勢" if trend_today == TREND_BULL else "非多頭"
+        buy_sig = bullish_support_buy_signal(trend_label, touched_support_ma20, "月線", reversal_up)
+        if buy_sig:
+            add("R-SR-15", buy_sig)
+
+    touched_resistance_ma20 = float(high.iloc[-1]) >= ma20_now * 0.98 and float(close.iloc[-1]) <= ma20_now * 1.02
+    if touched_resistance_ma20:
+        reversal_down = is_bearish_reversal_candle(
+            float(open_.iloc[-1]), float(high.iloc[-1]), float(low.iloc[-1]), float(close.iloc[-1]),
+        )
+        trend_label_bear = "空頭趨勢" if trend_today == TREND_BEAR else "非空頭"
+        short_sig = bearish_resistance_short_signal(trend_label_bear, touched_resistance_ma20, "月線", reversal_down)
+        if short_sig:
+            add("R-SR-16", short_sig)
 
     # --- 量能 ---
     ma5_volume = basic_volume(volume)

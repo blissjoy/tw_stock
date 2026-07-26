@@ -232,6 +232,86 @@ def test_scan_golden_tier_reports_ma_channel_breakout(monkeypatch):
     assert results["R-INDICATOR-18"] == "帶量突破上軌，偏多趨勢轉強"
 
 
+def test_scan_golden_tier_reports_sr01_when_crossing_above_recent_head(monkeypatch):
+    """R-SR-01：今天收盤剛好突破最近一個轉折高點才回報(不是每天都查詢角色)。"""
+    df = _trend_df(60, "up")
+    close_last, close_prev = df["close"].iloc[-1], df["close"].iloc[-2]
+    head_price = (close_last + close_prev) / 2  # 剛好介於前一天與今天收盤之間，今天才突破
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: [
+        TurningPoint(type="head", price=head_price, index=df.index[10]),
+    ])
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert f"{head_price:.2f}" in results["R-SR-01"]
+    assert "轉為" in results["R-SR-01"]
+
+
+def test_scan_golden_tier_skips_sr01_when_no_head_crossed_today(monkeypatch):
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: [
+        TurningPoint(type="head", price=99999, index=df.index[10]),  # 遠高於股價，今天不可能突破
+    ])
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-SR-01" not in rule_ids
+
+
+def test_scan_golden_tier_reports_sr02_when_crossing_below_recent_bottom(monkeypatch):
+    """R-SR-02：今天收盤剛好跌破最近一個轉折低點才回報，是R-SR-01的鏡射。"""
+    df = _trend_df(60, "down")
+    close_last, close_prev = df["close"].iloc[-1], df["close"].iloc[-2]
+    bottom_price = (close_last + close_prev) / 2
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: [
+        TurningPoint(type="bottom", price=bottom_price, index=df.index[10]),
+    ])
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert f"{bottom_price:.2f}" in results["R-SR-02"]
+
+
+def test_scan_golden_tier_reports_sr08_ma_support_and_resistance_conversion(monkeypatch):
+    """R-SR-08：月線支撐/壓力轉換是逐日狀態機函式，這裡只驗證wiring(有文字就回報)，
+    底層3日觀察窗邏輯已有tests/test_support_resistance.py專屬測試。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "ma_support_conversion_long", lambda close, ma, direction: pd.Series(
+        [None] * (len(df) - 1) + ["月線支撐依然有效，多頭趨勢未變"], index=df.index,
+    ))
+    monkeypatch.setattr(rule_scan, "ma_resistance_conversion_short", lambda close, ma, direction: pd.Series(
+        [None] * len(df), index=df.index,
+    ))
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-SR-08"] == "月線支撐依然有效，多頭趨勢未變"
+
+
+def test_scan_golden_tier_reports_sr15_bullish_support_buy_signal(monkeypatch):
+    """R-SR-15：這裡只接了月線(MA20)當支撐來源(書中另外3種切線/前低/缺口未接)，貼近月線
+    (2%容忍度)+止跌K棒+多頭趨勢才會回報，這裡直接mock touched條件確認wiring正確。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", lambda h, l, c: {
+        "短期": ("日線", "多頭", "測試依據"), "中期": ("週線", "多頭", "測試依據"), "長期": ("月線", "多頭", "測試依據"),
+    })
+    monkeypatch.setattr(rule_scan, "is_bullish_reversal_candle", lambda o, h, l, c: True)
+    # 讓最後一天的low/close落在MA20的2%容忍帶內：MA20由compute_ma_set真實算出，這裡直接
+    # 把df最後一天的low/high/close改到貼近該天真實MA20附近，比重新mock compute_ma_set簡單。
+    ma20_actual = rule_scan.compute_ma_set(df["close"], periods=(5, 10, 20))["MA20"].iloc[-1]
+    df.loc[df.index[-1], ["low", "close"]] = [ma20_actual * 0.999, ma20_actual * 1.0]
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "R-SR-15" in results
+
+
+def test_scan_golden_tier_skips_sr15_when_not_near_ma20(monkeypatch):
+    df = _trend_df(60, "up")  # 平滑上漲，最後一天股價遠高於MA20，不會觸及支撐容忍帶
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+    assert "R-SR-15" not in rule_ids
+
+
 def test_scan_golden_tier_skips_ma_channel_when_normal_range(monkeypatch):
     df = _trend_df(60, "up")
     monkeypatch.setattr(
