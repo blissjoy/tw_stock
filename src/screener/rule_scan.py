@@ -41,7 +41,7 @@ from src.indicators.bollinger import (
     bollinger_sell_signal_3,
 )
 from src.indicators.candle_patterns_2 import bearish_engulfing_at_high
-from src.indicators.candles import candle_shadows, is_black_candle, is_hammer_candle, is_inverted_hammer_candle, is_mid_long_black_candle, is_mid_long_red_candle, is_red_candle, is_reversal_candle_at_high, is_reversal_candle_at_low, prev_bar_support_resistance_signal
+from src.indicators.candles import candle_shadows, is_black_candle, is_doji, is_gravestone_line, is_hammer_candle, is_inverted_hammer_candle, is_long_t_line, is_mid_long_black_candle, is_mid_long_red_candle, is_red_candle, is_reversal_candle_at_high, is_reversal_candle_at_low, prev_bar_support_resistance_signal
 from src.indicators.consolidation import detect_consolidation_breakout
 from src.indicators.crossovers import interpret_cross, is_death_cross, is_golden_cross
 from src.indicators.gaps import detect_gap, detect_island_reversal_bottom, false_fill_reasons, is_true_fill
@@ -68,10 +68,14 @@ from src.indicators.moving_average import compute_ma_set, is_bearish_aligned, is
 from src.indicators.pivots import compute_turning_points
 from src.indicators.rsi import rsi, rsi_overbought_oversold_signal, rsi_short_long_cross_signal
 from src.indicators.support_resistance import (
+    bear_trend_strength,
     bearish_resistance_short_signal,
+    bull_trend_strength,
     bullish_support_buy_signal,
     classify_bottom_role,
     classify_head_role,
+    confirm_resistance,
+    confirm_support,
     is_bearish_reversal_candle,
     is_bullish_reversal_candle,
     ma_resistance_conversion_short,
@@ -881,5 +885,108 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
             )
             if classic22_note:
                 add("R-CLASSIC-22", classic22_note)
+
+    # --- R-SR-14遇壓遇撐4法則支撐壓力有效性確認 ---
+    # sr_price統一用MA20(跟R-SR-15/16/R-VOLPRICE-11同一個簡化原則，書中列出的4種支撐壓力
+    # 來源裡最單純的一種，不是重新設計R-SR-01/02/15/16既有wiring，是獨立接一次)。書中的
+    # candle_type是"中長紅K"/"長上影線K"/"中長黑K"/"變盤線"4類，書中沒有另外定義這4個字串
+    # 怎麼從幾何條件對照，這裡採用最直覺的映射："變盤線"=十字線/墓碑線/長T字線任一成立；
+    # 長上影線=上影線>=2倍實體(跟R-CANDLE-25槌子線的2倍門檻同一個工程估計值)且非變盤線。
+    # 昨天(index -2)觸及月線的K棒決定候選法則、今天(index -1)是確認日，是day-lag確認模式。
+    is_doji_like_14 = is_doji(open_, close) | is_gravestone_line(open_, high, low, close) | is_long_t_line(open_, high, low, close)
+    upper_shadow_14, _lower_shadow_14 = candle_shadows(open_, high, low, close)
+    body_14 = (close - open_).abs()
+    is_long_upper_shadow_14 = (upper_shadow_14 >= 2 * body_14) & ~is_doji_like_14
+    is_mid_long_red_14 = is_mid_long_red_candle(open_, close)
+    is_mid_long_black_14 = is_mid_long_black_candle(open_, close)
+
+    def _sr14_candle_type(i: int) -> str:
+        if bool(is_doji_like_14.iloc[i]):
+            return "變盤線"
+        if bool(is_mid_long_red_14.iloc[i]):
+            return "中長紅K"
+        if bool(is_mid_long_black_14.iloc[i]):
+            return "中長黑K"
+        if bool(is_long_upper_shadow_14.iloc[i]):
+            return "長上影線K"
+        return ""
+
+    candle_type_yesterday_14 = _sr14_candle_type(-2)
+    if candle_type_yesterday_14:
+        ma20_yesterday_14 = float(ma20.iloc[-2])
+        candle_type_today_14 = _sr14_candle_type(-1)
+        is_red_today_14 = bool(is_red_candle(open_, close).iloc[-1])
+        is_big_volume_today_14 = bool(big_vol_days.iloc[-1])
+        skip_labels_14 = ("尚未觸及有效判斷條件", "尚未確認，持續觀察")
+        resistance_result_14 = confirm_resistance(
+            candle_type_yesterday_14, float(close.iloc[-2]), ma20_yesterday_14,
+            candle_type_today_14, is_red_today_14, is_big_volume_today_14,
+        )
+        if resistance_result_14 not in skip_labels_14:
+            add("R-SR-14", f"遇壓：{resistance_result_14}")
+        support_result_14 = confirm_support(
+            candle_type_yesterday_14, float(close.iloc[-2]), ma20_yesterday_14,
+            candle_type_today_14, is_red_today_14, is_big_volume_today_14,
+        )
+        if support_result_14 not in skip_labels_14:
+            add("R-SR-14", f"遇撐：{support_result_14}")
+
+    # --- R-SR-17支撐壓力測試結果回推多空趨勢強弱 ---
+    # 「回檔期間」＝從最近一個轉折頭部到現在(前提是這個頭部確實是目前最新的轉折點，不是
+    # 更早、已經被後續底部取代的舊頭部)；「反彈期間」則鏡射，從最近一個轉折底部到現在。
+    # tested_prior_high/low的容忍帶2%，跟本檔案其他觸價判斷(R-SR-15/16、R-VOLPRICE-11)
+    # 同一個工程估計值。書中另外2個子函式(bull/bear_trend_change_escape_wave)要在「趨勢
+    # 已經改變」之後再找「有沒有出現過反彈」，是在這個狀態機之上再疊一層錨點搜尋，這批不接。
+    #
+    # ⚠️ 這裡刻意加了「今天vs昨天」比較才回報(跟R-LINE-11/12/14/15、R-STRATEGY-07同一個
+    # 慣例)：一開始沒加這個比較，對本機真實db驗證時發現R-SR-17在600檔快照裡高達579檔
+    # 觸發——追查發現`tested_prior_high`(`.any()`掃整段回檔期間至今)一旦在某一天測試過
+    # 前高，之後每天都會持續回傳True，導致「多頭進入盤整」這個結果一旦觸發就會每天重複
+    # 回報，佔了全部觸發次數的74%，不是真正「今天發生了什麼變化」的事件。改成額外算一份
+    # 「昨天」的版本(少一天資料)，只在今天算出的結果跟昨天不同時才回報，才是「狀態剛好
+    # 在今天改變」的真正意義。
+    ma10_series_17 = ma_frame["MA10"]
+
+    def _sr17_bull_strength_at(t: int) -> str | None:
+        if not (tp_heads and tp_bottoms and tp_heads[-1].index > tp_bottoms[-1].index):
+            return None
+        prior_high = tp_heads[-1].price
+        prior_low = tp_bottoms[-1].price
+        anchor_pos = close.index.get_loc(tp_heads[-1].index)
+        if anchor_pos > t:
+            return None
+        stayed_above_ma10 = bool((close.iloc[anchor_pos:t + 1] > ma10_series_17.iloc[anchor_pos:t + 1]).all())
+        tested_prior_high = bool((high.iloc[anchor_pos:t + 1] >= prior_high * 0.98).any())
+        return bull_trend_strength(
+            float(close.iloc[t]), float(ma20.iloc[t]), str(ma20_direction.iloc[t]),
+            prior_low, prior_high, stayed_above_ma10, tested_prior_high,
+        )
+
+    def _sr17_bear_strength_at(t: int) -> str | None:
+        if not (tp_heads and tp_bottoms and tp_bottoms[-1].index > tp_heads[-1].index):
+            return None
+        prior_high = tp_heads[-1].price
+        prior_low = tp_bottoms[-1].price
+        anchor_pos = close.index.get_loc(tp_bottoms[-1].index)
+        if anchor_pos > t:
+            return None
+        stayed_below_ma10 = bool((close.iloc[anchor_pos:t + 1] < ma10_series_17.iloc[anchor_pos:t + 1]).all())
+        tested_prior_low = bool((low.iloc[anchor_pos:t + 1] <= prior_low * 1.02).any())
+        return bear_trend_strength(
+            float(close.iloc[t]), float(ma20.iloc[t]), str(ma20_direction.iloc[t]),
+            prior_low, prior_high, stayed_below_ma10, tested_prior_low,
+        )
+
+    today_pos_17 = len(close) - 1
+    bull_strength_17 = _sr17_bull_strength_at(today_pos_17)
+    if bull_strength_17 is not None and bull_strength_17 != "趨勢持續，無明確變化訊號":
+        bull_strength_yesterday_17 = _sr17_bull_strength_at(today_pos_17 - 1) if today_pos_17 > 0 else None
+        if bull_strength_17 != bull_strength_yesterday_17:
+            add("R-SR-17", f"多頭：{bull_strength_17}")
+    bear_strength_17 = _sr17_bear_strength_at(today_pos_17)
+    if bear_strength_17 is not None and bear_strength_17 != "趨勢持續，無明確變化訊號":
+        bear_strength_yesterday_17 = _sr17_bear_strength_at(today_pos_17 - 1) if today_pos_17 > 0 else None
+        if bear_strength_17 != bear_strength_yesterday_17:
+            add("R-SR-17", f"空頭：{bear_strength_17}")
 
     return results

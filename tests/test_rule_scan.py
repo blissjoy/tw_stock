@@ -1078,3 +1078,117 @@ def test_scan_golden_tier_reports_classic22_bear_to_bull_break_rebound_high(monk
     results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
 
     assert results["R-CLASSIC-22"] == "突破空頭反彈高點，趨勢空轉多確認"
+
+
+def test_scan_golden_tier_reports_sr14_confirm_resistance(monkeypatch):
+    """R-SR-14：sr_price統一用MA20(跟R-SR-15/16/R-VOLPRICE-11同一個簡化原則)，昨天的K棒
+    決定候選法則、今天是確認日，直接mock底層confirm_resistance/confirm_support驗證wiring，
+    candle_type分類邏輯本身用mock is_mid_long_red_candle強制昨天算「中長紅K」。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    fixed_ma = pd.DataFrame(
+        {"MA5": [100.0] * len(df), "MA10": [100.0] * len(df), "MA20": [100.0] * len(df)}, index=idx,
+    )
+    monkeypatch.setattr(rule_scan, "compute_ma_set", lambda close, periods=(5, 10, 20): fixed_ma)
+    is_red_at_minus2 = pd.Series([i == len(df) - 2 for i in range(len(df))], index=idx)
+    monkeypatch.setattr(rule_scan, "is_mid_long_red_candle", lambda o, c: is_red_at_minus2)
+    monkeypatch.setattr(rule_scan, "confirm_resistance", lambda *a, **k: "確認遇壓回檔（闖關前爆大量，股價不漲要回檔）")
+    monkeypatch.setattr(rule_scan, "confirm_support", lambda *a, **k: "尚未觸及有效判斷條件")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "確認遇壓回檔" in results["R-SR-14"]
+
+
+def test_scan_golden_tier_reports_sr14_confirm_support(monkeypatch):
+    """R-SR-14：遇撐版本的鏡射測試。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    fixed_ma = pd.DataFrame(
+        {"MA5": [100.0] * len(df), "MA10": [100.0] * len(df), "MA20": [100.0] * len(df)}, index=idx,
+    )
+    monkeypatch.setattr(rule_scan, "compute_ma_set", lambda close, periods=(5, 10, 20): fixed_ma)
+    is_black_at_minus2 = pd.Series([i == len(df) - 2 for i in range(len(df))], index=idx)
+    monkeypatch.setattr(rule_scan, "is_mid_long_black_candle", lambda o, c: is_black_at_minus2)
+    monkeypatch.setattr(rule_scan, "confirm_resistance", lambda *a, **k: "尚未觸及有效判斷條件")
+    monkeypatch.setattr(rule_scan, "confirm_support", lambda *a, **k: "確認遇撐反彈（過撐爆大量，股價不跌要反彈）")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "確認遇撐反彈" in results["R-SR-14"]
+
+
+def test_scan_golden_tier_reports_sr17_bull_trend_strength_only_when_changed_from_yesterday(monkeypatch):
+    """R-SR-17：「回檔期間」＝從最近一個轉折頭部到現在，前提是這個頭部確實是目前最新的
+    轉折點(比最近一個轉折底部更晚)，才套用bull_trend_strength——用假轉折點強制頭部較新。
+    真實db驗證時發現一開始沒加「今天vs昨天」比較會導致「多頭進入盤整」這類狀態一旦觸發
+    就每天重複回報(佔全部觸發次數74%)，所以mock要對「今天」跟「昨天」回傳不同結果，
+    才能驗證只在狀態剛好變化的那天回報。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    fake_points = [
+        TurningPoint(type="bottom", price=90, index=idx[20]),
+        TurningPoint(type="head", price=110, index=idx[40]),
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    today_close = float(df["close"].iloc[-1])
+    monkeypatch.setattr(
+        rule_scan, "bull_trend_strength",
+        lambda close_t, *a, **k: "多頭趨勢改變" if close_t == today_close else "多頭趨勢不變，可續做多",
+    )
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-SR-17"] == "多頭：多頭趨勢改變"
+
+
+def test_scan_golden_tier_reports_sr17_bear_trend_strength_only_when_changed_from_yesterday(monkeypatch):
+    """R-SR-17：「反彈期間」的鏡射版本(底部較新，套用bear_trend_strength)。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    fake_points = [
+        TurningPoint(type="head", price=110, index=idx[20]),
+        TurningPoint(type="bottom", price=90, index=idx[40]),
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    today_close = float(df["close"].iloc[-1])
+    monkeypatch.setattr(
+        rule_scan, "bear_trend_strength",
+        lambda close_t, *a, **k: "空頭趨勢改變" if close_t == today_close else "空頭趨勢不變，可續做空",
+    )
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-SR-17"] == "空頭：空頭趨勢改變"
+
+
+def test_scan_golden_tier_skips_sr17_when_no_notable_change(monkeypatch):
+    df = _trend_df(60, "up")
+    idx = df.index
+    fake_points = [
+        TurningPoint(type="bottom", price=90, index=idx[20]),
+        TurningPoint(type="head", price=110, index=idx[40]),
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    monkeypatch.setattr(rule_scan, "bull_trend_strength", lambda *a, **k: "趨勢持續，無明確變化訊號")
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-SR-17" not in rule_ids
+
+
+def test_scan_golden_tier_skips_sr17_when_state_unchanged_from_yesterday(monkeypatch):
+    """核心防呆：昨天已經是同一個狀態(例如已經連續好幾天都是「強勢多頭」)，今天不該
+    再重複回報，這正是這批修正要解決的「進入盤整」黏著問題的直接驗證。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    fake_points = [
+        TurningPoint(type="bottom", price=90, index=idx[20]),
+        TurningPoint(type="head", price=110, index=idx[40]),
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    monkeypatch.setattr(rule_scan, "bull_trend_strength", lambda *a, **k: "強勢多頭")
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-SR-17" not in rule_ids
