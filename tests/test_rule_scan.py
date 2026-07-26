@@ -730,6 +730,67 @@ def test_scan_golden_tier_reports_classic32_island_reversal(monkeypatch):
     assert "島型反轉" in results["R-CLASSIC-32"]
 
 
+def test_scan_golden_tier_reports_strategy01_short_swing_entry_ready(monkeypatch):
+    """R-STRATEGY-01：20條守則裡只有第1條(進場)是純新候選訊號，每次掃描都會呼叫
+    short_swing_entry_ready(無if閘門)，直接mock驗證wiring；其餘19條依賴持倉狀態(停損/
+    停利/加碼)，性質上跟停損停利資金管理同一類，這批不接。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "short_swing_entry_ready", lambda *a, **k: True)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "短線波段進場" in results["R-STRATEGY-01"]
+
+
+def test_scan_golden_tier_reports_strategy07_bull_to_bear_reversal(monkeypatch):
+    """R-STRATEGY-07口訣7：直接複用短期(日線)趨勢分類，比較「今天」跟「昨天」是否剛好
+    發生多頭→空頭的狀態切換，用len(c)區分mock回傳今天/昨天各自的分類結果。"""
+    df = _trend_df(60, "up")
+
+    def fake_classify(h, l, c):
+        if len(c) == len(df):
+            return {
+                "短期": ("日線", rule_scan.TREND_BEAR, "mock"),
+                "中期": ("週線", rule_scan.TREND_BEAR, "mock"),
+                "長期": ("月線", rule_scan.TREND_BEAR, "mock"),
+            }
+        return {
+            "短期": ("日線", rule_scan.TREND_BULL, "mock"),
+            "中期": ("週線", rule_scan.TREND_BULL, "mock"),
+            "長期": ("月線", rule_scan.TREND_BULL, "mock"),
+        }
+
+    monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", fake_classify)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "多頭完成反轉" in results["R-STRATEGY-07"]
+
+
+def test_scan_golden_tier_reports_strategy07_bear_to_bull_reversal(monkeypatch):
+    """R-STRATEGY-07口訣8：口訣7的鏡射版本(空頭→多頭)。"""
+    df = _trend_df(60, "up")
+
+    def fake_classify(h, l, c):
+        if len(c) == len(df):
+            return {
+                "短期": ("日線", rule_scan.TREND_BULL, "mock"),
+                "中期": ("週線", rule_scan.TREND_BULL, "mock"),
+                "長期": ("月線", rule_scan.TREND_BULL, "mock"),
+            }
+        return {
+            "短期": ("日線", rule_scan.TREND_BEAR, "mock"),
+            "中期": ("週線", rule_scan.TREND_BEAR, "mock"),
+            "長期": ("月線", rule_scan.TREND_BEAR, "mock"),
+        }
+
+    monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", fake_classify)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "空頭完成反轉" in results["R-STRATEGY-07"]
+
+
 def test_scan_golden_tier_reports_candle01_when_prev_bar_signal_not_neutral(monkeypatch):
     """R-CANDLE-01：前一日高低點支撐壓力，直接mock底層prev_bar_support_resistance_signal
     驗證wiring，判斷邏輯本身已有專屬測試。"""

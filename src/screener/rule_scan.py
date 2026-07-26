@@ -96,9 +96,10 @@ from src.patterns.classic_patterns import (
     island_reversal,
     ma_tangle_breakout,
 )
-from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_states_multi_horizon
+from src.patterns.trend_state import TREND_BEAR, TREND_BULL, TREND_RANGE, classify_trend_states_multi_horizon
 from src.screener.screening_rules import double_bottom_breakout_signal
 from src.strategies.ma_strategies import ma_tangle_breakout_long_entry
+from src.strategies.operation_sop import bear_to_bull_reversal_signal, bull_to_bear_reversal_signal, short_swing_entry_ready
 
 MIN_DAYS = 30  # 均線/MACD/KD/RSI/布林通道都需要暖身天數，資料不足就整批不評估(不逐一判斷各自門檻)
 GAP_FILL_LOOKBACK = 20  # R-GAP-19/20往回搜尋「最近一次缺口」的天數上限，避免抓到太久以前已經沒有參考意義的舊缺口
@@ -667,5 +668,36 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
                     if classic32_note:
                         add("R-CLASSIC-32", classic32_note)
                 break
+
+    # --- 綜合操作SOP(R-STRATEGY-01短線波段進場守則第1條) ---
+    # 20條守則裡只有第1條(進場)不需要「已持有部位」的profit_pct/停損價，是純粹的新候選
+    # 訊號；第2-19條(停損/停利/加碼)都依賴持倉狀態，性質上跟停損停利資金管理同一類，
+    # 這裡先不接，等使用者確認顯示位置後再處理。
+    entry_ready_01 = short_swing_entry_ready(
+        trend_today == TREND_BULL, float(close.iloc[-1]), float(open_.iloc[-1]), float(ma_frame["MA5"].iloc[-1]),
+        float(high.iloc[-2]), 1.0 if str(ma20_direction.iloc[-1]) == "上揚" else -1.0,
+        float(kd_df["K"].iloc[-1] - kd_df["K"].iloc[-2]),
+        float(volume.iloc[-1]), float(ma5_volume.iloc[-1]), float(volume.iloc[-2]),
+    )
+    if entry_ready_01:
+        add("R-STRATEGY-01", "短線波段進場：多頭架構+站上MA5及前高+紅K實體漲幅≥2%+MA20/KD_K向上+量增或量平")
+
+    # --- 綜合操作SOP(R-STRATEGY-07多空完成反轉後續強力走勢口訣) ---
+    # 直接複用已經算好的短期(日線)趨勢分類，比較「今天」跟「昨天」(少一天資料重算一次)
+    # 是否剛好發生多頭→空頭或空頭→多頭的狀態切換。
+    if len(df) > 1:
+        trend_yesterday_horizons = classify_trend_states_multi_horizon(
+            trend_high.iloc[:-1], trend_low.iloc[:-1], trend_close.iloc[:-1],
+        )
+        trend_yesterday_07 = trend_yesterday_horizons["短期"][1]
+        trend_state_map_07 = {TREND_BULL: "多頭確認", TREND_BEAR: "空頭確認", TREND_RANGE: "盤整"}
+        prev_state_07 = trend_state_map_07.get(trend_yesterday_07, "盤整")
+        curr_state_07 = trend_state_map_07.get(trend_today, "盤整")
+        bull_to_bear_07 = bull_to_bear_reversal_signal(prev_state_07, curr_state_07)
+        if bull_to_bear_07:
+            add("R-STRATEGY-07", bull_to_bear_07)
+        bear_to_bull_07 = bear_to_bull_reversal_signal(prev_state_07, curr_state_07)
+        if bear_to_bull_07:
+            add("R-STRATEGY-07", bear_to_bull_07)
 
     return results
