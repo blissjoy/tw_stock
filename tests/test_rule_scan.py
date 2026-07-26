@@ -955,3 +955,93 @@ def test_scan_golden_tier_skips_classic16_when_not_currently_at_low(monkeypatch)
     rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
 
     assert "R-CLASSIC-16" not in rule_ids
+
+
+def test_scan_golden_tier_reports_volprice08_classify_big_volume_bar(monkeypatch):
+    """R-VOLPRICE-08：往回搜尋最近一根大量K棒，今天收盤突破其高點、昨天還沒突破才回報，
+    跟R-CLASSIC-05/25的「往回搜尋+今天vs昨天」慣例同一個形狀。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-5] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    bar_high = float(df["high"].iloc[-5])
+    df.loc[idx[-2], "close"] = bar_high - 1
+    df.loc[idx[-1], "close"] = bar_high + 5
+    monkeypatch.setattr(rule_scan, "classify_big_volume_bar", lambda *a, **k: ("攻擊進貨量／未來支撐", bar_high - 3))
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "攻擊進貨量" in results["R-VOLPRICE-08"]
+
+
+def test_scan_golden_tier_reports_volprice06_bear_decline_big_black_role(monkeypatch):
+    """R-VOLPRICE-06：往回搜尋最近一根「下跌中的大量長黑K」，今天收盤跌破其低點、昨天還沒
+    跌破才回報。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-5] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    black_at_minus5 = pd.Series([i == len(df) - 5 for i in range(len(df))], index=idx)
+    monkeypatch.setattr(rule_scan, "is_mid_long_black_candle", lambda o, c: black_at_minus5)
+    bar_low = float(df["low"].iloc[-5])
+    df.loc[idx[-2], "close"] = bar_low + 1
+    df.loc[idx[-1], "close"] = bar_low - 5
+    monkeypatch.setattr(rule_scan, "bear_decline_big_black_role", lambda *a, **k: "空方換手失敗，持續下跌")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-VOLPRICE-06"] == "空方換手失敗，持續下跌"
+
+
+def test_scan_golden_tier_reports_volprice10_bear_low_divergence(monkeypatch):
+    """R-VOLPRICE-10第5點(低檔量價背離)：每次掃描都會呼叫bear_low_divergence_signal(只受
+    len(close)長度閘門保護，_trend_df(60,...)遠超過門檻)，直接mock驗證wiring。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "bear_low_divergence_signal", lambda *a, **k: "量價背離（低檔）")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-VOLPRICE-10"] == "量價背離（低檔）"
+
+
+def test_scan_golden_tier_reports_volprice11_resistance_zone_response(monkeypatch):
+    """R-VOLPRICE-11：重用R-SR-15/16已經在用的MA20支撐壓力觸價定義，這裡mock掉
+    compute_ma_set讓MA20固定在100，昨天K棒觸及100附近+爆量，今天評估後續反應。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    fixed_ma = pd.DataFrame(
+        {"MA5": [100.0] * len(df), "MA10": [100.0] * len(df), "MA20": [100.0] * len(df)}, index=idx,
+    )
+    monkeypatch.setattr(rule_scan, "compute_ma_set", lambda close, periods=(5, 10, 20): fixed_ma)
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-2] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    df.loc[idx[-2], ["open", "high", "low", "close"]] = [100.0, 101.0, 99.0, 100.0]
+    monkeypatch.setattr(rule_scan, "resistance_zone_big_volume_next_day_response", lambda *a, **k: "回檔")
+    monkeypatch.setattr(rule_scan, "support_zone_big_volume_next_day_response", lambda *a, **k: None)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-VOLPRICE-11"] == "回檔"
+
+
+def test_scan_golden_tier_reports_volprice11_support_zone_response(monkeypatch):
+    """R-VOLPRICE-11：支撐版本的鏡射測試。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    fixed_ma = pd.DataFrame(
+        {"MA5": [100.0] * len(df), "MA10": [100.0] * len(df), "MA20": [100.0] * len(df)}, index=idx,
+    )
+    monkeypatch.setattr(rule_scan, "compute_ma_set", lambda close, periods=(5, 10, 20): fixed_ma)
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-2] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    df.loc[idx[-2], ["open", "high", "low", "close"]] = [100.0, 101.0, 99.0, 100.0]
+    monkeypatch.setattr(rule_scan, "resistance_zone_big_volume_next_day_response", lambda *a, **k: None)
+    monkeypatch.setattr(rule_scan, "support_zone_big_volume_next_day_response", lambda *a, **k: "反彈")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-VOLPRICE-11"] == "反彈"

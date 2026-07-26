@@ -80,7 +80,7 @@ from src.indicators.support_resistance import (
 from src.indicators.trend import bear_trend_change_warning, bull_high_volume_exhaustion_signal, bull_trend_change_warning, daily_bear_trend_state, daily_bull_trend_state
 from src.indicators.trend_position import compute_trend_position
 from src.indicators.trendlines import check_channel_breakdown, check_channel_breakout
-from src.indicators.volume_price import basic_volume, bear_low_key_point_rebound_signal, bull_high_key_point_pullback_signal, is_accumulation_volume, is_big_volume_vs_ma5, is_big_volume_vs_prev_day
+from src.indicators.volume_price import basic_volume, bear_decline_big_black_role, bear_low_divergence_signal, bear_low_key_point_rebound_signal, bull_high_key_point_pullback_signal, classify_big_volume_bar, is_accumulation_volume, is_big_volume_vs_ma5, is_big_volume_vs_prev_day, resistance_zone_big_volume_next_day_response, support_zone_big_volume_next_day_response
 from src.patterns.chart_overlays import compute_trendlines
 from src.patterns.classic_patterns import (
     bear_rebound_consolidate_above_ma20_breakout,
@@ -113,6 +113,9 @@ CLASSIC_TWO_DAY_VOLUME_LOOKBACK = 20  # R-CLASSIC-05/25往回搜尋「連續2日
 CLASSIC_BOUNCE_LOOKBACK = 10  # R-CLASSIC-09往回搜尋「反彈紅K」的天數上限，書中無明確數字
 CLASSIC_ISLAND_LOOKBACK = 30  # R-CLASSIC-32往回搜尋孤島反轉「前一個向下缺口」的天數上限，書中無明確數字
 CLASSIC16_LOOKBACK = 20  # R-CLASSIC-16「低檔短時間內反覆出現大量長紅K」的計數窗口，書中無明確數字
+VOLPRICE08_LOOKBACK = 20  # R-VOLPRICE-08往回搜尋「任一大量K棒」的天數上限，書中無明確數字
+VOLPRICE06_LOOKBACK = 20  # R-VOLPRICE-06往回搜尋「下跌大量長黑K」的天數上限，書中無明確數字
+VOLPRICE10_NEW_LOW_LOOKBACK = 20  # R-VOLPRICE-10「低檔創新低」的比較窗口，書中無明確數字
 
 
 def _last_bool(series: pd.Series) -> bool:
@@ -721,7 +724,8 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
     # R-VOLPRICE-09多頭轉折關鍵大量K線操作對應/R-VOLPRICE-10空頭轉折關鍵大量K線操作對應(鏡射
     # 部分)：兩者都是「昨天在高檔/低檔出現大量K棒，今天評估後續反應」的隔日確認模式，跟
     # R-VOLPRICE-07凹洞量、R-GAP-19/20同一套「日落後確認」慣例。R-VOLPRICE-10另外3個子函式
-    # 需要is_start_of_decline/is_low_continuous_decline等更細緻的階段判斷，這裡不接。
+    # (第1/2/4點，需要is_start_of_decline/is_low_continuous_decline等更細緻的階段判斷)
+    # 這裡不接；第5點(量價背離)見下方獨立區塊。
     candle_color_09 = "紅" if close.iloc[-2] > open_.iloc[-2] else "黑"
     pullback_signal_09 = bull_high_key_point_pullback_signal(
         bool(is_at_high.iloc[-2]), candle_color_09, bool(is_big_volume_vs_prev_day(volume).iloc[-2]),
@@ -736,6 +740,82 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
     )
     if rebound_signal_10:
         add("R-VOLPRICE-10", rebound_signal_10)
+
+    # R-VOLPRICE-10第5點(低檔量價背離)：昨天收盤創新低(近VOLPRICE10_NEW_LOW_LOOKBACK天，
+    # 書中無明確天數)且量增，今天收紅且沒有續跌才回報——跟上面的bear_low_key_point_rebound_
+    # signal是同一個rule_id底下互相獨立的另一個訊號來源。
+    if len(close) > VOLPRICE10_NEW_LOW_LOOKBACK + 1:
+        made_new_low_10 = float(close.iloc[-2]) < float(close.iloc[-VOLPRICE10_NEW_LOW_LOOKBACK - 2:-2].min())
+        volume_increasing_10 = float(volume.iloc[-2]) > float(ma5_volume.iloc[-2])
+        divergence_signal_10 = bear_low_divergence_signal(
+            made_new_low_10, volume_increasing_10,
+            bool(is_red_candle(open_, close).iloc[-1]), float(close.iloc[-1]) >= float(close.iloc[-2]),
+        )
+        if divergence_signal_10:
+            add("R-VOLPRICE-10", divergence_signal_10)
+
+    # R-VOLPRICE-08大量K線支撐壓力回溯標記通用規則：往回搜尋最近一根大量K棒(VOLPRICE08_
+    # LOOKBACK=20天，書中無明確數字)，今天收盤突破其高點或跌破其低點(且昨天還沒突破/跌破)
+    # 才回報，跟R-CLASSIC-05/25的「往回搜尋+今天vs昨天」慣例同一個形狀；trend_state直接
+    # 用trend_today(已經算好的短期日線多空盤整標籤，剛好就是這條規則要的三態字串)。
+    volprice08_note = None
+    search_start_08 = max(today_idx - VOLPRICE08_LOOKBACK, 1)
+    for j in range(today_idx - 1, search_start_08, -1):
+        if bool(big_vol_days.iloc[j]):
+            bar_high_08, bar_low_08 = float(high.iloc[j]), float(low.iloc[j])
+            broke_out_08 = float(close.iloc[today_idx]) > bar_high_08
+            broke_out_yesterday_08 = float(close.iloc[today_idx - 1]) > bar_high_08
+            broke_down_08 = float(close.iloc[today_idx]) < bar_low_08
+            broke_down_yesterday_08 = float(close.iloc[today_idx - 1]) < bar_low_08
+            if (broke_out_08 and not broke_out_yesterday_08) or (broke_down_08 and not broke_down_yesterday_08):
+                label_08, price_08 = classify_big_volume_bar(trend_today, bar_high_08, bar_low_08, broke_out_08, broke_down_08)
+                if price_08 is not None:
+                    volprice08_note = f"{label_08}(價位約{price_08:.2f})"
+            break
+    if volprice08_note:
+        add("R-VOLPRICE-08", volprice08_note)
+
+    # R-VOLPRICE-06空頭下跌大量支撐壓力轉化：往回搜尋最近一根「下跌中的大量長黑K」，今天
+    # 突破其高點(多方轉強反彈確認)或跌破其低點(空方換手失敗)才回報，跟R-VOLPRICE-08同一個
+    # 「往回搜尋+今天vs昨天」形狀；書中第3點(`bear_decline_retro_accumulation_label`，需要
+    # 「反彈後再跌不破前低」3事件序列追蹤)不接，超出這批範圍。
+    volprice06_note = None
+    search_start_06 = max(today_idx - VOLPRICE06_LOOKBACK, 1)
+    for j in range(today_idx - 1, search_start_06, -1):
+        if bool(big_vol_days.iloc[j]) and bool(is_mid_long_black_candle(open_, close).iloc[j]):
+            bar_high_06, bar_low_06 = float(high.iloc[j]), float(low.iloc[j])
+            broke_out_06 = float(close.iloc[today_idx]) > bar_high_06
+            broke_out_yesterday_06 = float(close.iloc[today_idx - 1]) > bar_high_06
+            broke_down_06 = float(close.iloc[today_idx]) < bar_low_06
+            broke_down_yesterday_06 = float(close.iloc[today_idx - 1]) < bar_low_06
+            if (broke_out_06 and not broke_out_yesterday_06) or (broke_down_06 and not broke_down_yesterday_06):
+                volprice06_note = bear_decline_big_black_role(broke_out_06, broke_down_06)
+            break
+    if volprice06_note:
+        add("R-VOLPRICE-06", volprice06_note)
+
+    # R-VOLPRICE-11壓力支撐區大量K線隔日應對規則：重用R-SR-15/16已經在用的MA20支撐壓力
+    # 觸價定義(2%容忍帶)，這裡看的是「昨天」觸價但收盤未突破/跌破，「今天」評估後續反應。
+    ma20_yesterday_11 = float(ma20.iloc[-2])
+    touched_resistance_yesterday_11 = (
+        float(high.iloc[-2]) >= ma20_yesterday_11 * 0.98 and float(close.iloc[-2]) <= ma20_yesterday_11 * 1.02
+    )
+    touched_support_yesterday_11 = (
+        float(low.iloc[-2]) <= ma20_yesterday_11 * 1.02 and float(close.iloc[-2]) >= ma20_yesterday_11 * 0.98
+    )
+    is_big_volume_yesterday_11 = bool(big_vol_days.iloc[-2])
+    if touched_resistance_yesterday_11 and is_big_volume_yesterday_11:
+        signal_11a = resistance_zone_big_volume_next_day_response(
+            True, bool(is_black_candle(open_, close).iloc[-1]), float(close.iloc[-1]) <= float(close.iloc[-2]),
+        )
+        if signal_11a:
+            add("R-VOLPRICE-11", signal_11a)
+    if touched_support_yesterday_11 and is_big_volume_yesterday_11:
+        signal_11b = support_zone_big_volume_next_day_response(
+            True, bool(is_red_candle(open_, close).iloc[-1]), float(close.iloc[-1]) >= float(close.iloc[-2]),
+        )
+        if signal_11b:
+            add("R-VOLPRICE-11", signal_11b)
 
     # R-CLASSIC-01高檔大量長黑一日反轉圖：is_top_zone對應is_at_high，重用candle_patterns_2.py
     # 已經在latest_day_summary.py用過的bearish_engulfing_at_high()當「高檔長黑吞噬」判斷，

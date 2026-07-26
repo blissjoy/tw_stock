@@ -2531,3 +2531,54 @@ trend欄位本身因為轉折點還沒確認、仍顯示「多頭」——使用
 對本機真實db跑300檔股票掃`classify_trend_states_multi_horizon()`驗證：0筆crash，
 297檔股票、3種天期共891次評估裡，412次觸發freshness警示，比例合理(顯示這個「未確認波段」
 情境在真實市場資料裡確實普遍存在，不是2634的特例)。
+
+## 全面重新檢視「先前暫時忽略的規則」，補強4條(2026-07-26)
+
+使用者要求仔細檢視還有哪些先前被排除的規則，趁這次新增的building block(trend_position、
+simplify_turning_points)看能不能補強。逐條重新核對整個「114條都接上」過程中所有「確認
+排除」段落(約60條)後發現：多數排除理由(需要基本面/籌碼資料、市場指數排名、持倉狀態、
+全新多日幾何型態辨識、書中無精確定義)跟這次新增的模組完全無關，維持排除；但有4條被**重新
+發現其實不是真的卡在「趨勢位置」**，是先前批次分析時錯誤歸類——它們真正需要的其實是
+**這個專案更早批次就已經算好、但沒被對應起來的既有building block**：
+
+- R-VOLPRICE-08(大量K線支撐壓力回溯標記通用規則，信心91)：`classify_big_volume_bar()`
+  需要的`trend_state`參數是純字串"多頭"/"空頭"/"盤整"，根本不是趨勢位置，就是`trend_
+  today`(短期日線多空盤整標籤，均線批次就已經算好)；`broke_out_above`/`broke_down_below`
+  則是「往回搜尋最近一根大量K棒，今天收盤有沒有突破/跌破其高低點」，跟R-CLASSIC-05/25的
+  「往回搜尋+今天vs昨天」慣例同一個形狀，不是新問題。
+- R-VOLPRICE-06(空頭下跌大量支撐壓力轉化，信心90)：只接第2點`bear_decline_big_black_
+  role()`(下跌大量長黑K的高低點回溯標記支撐壓力)，跟R-VOLPRICE-08同一個「往回搜尋+今天
+  vs昨天」形狀；第3點(`bear_decline_retro_accumulation_label`，需要「反彈後再跌不破前低」
+  3事件序列追蹤)仍然不接，超出這批範圍。
+- R-VOLPRICE-10(空頭轉折關鍵大量K線操作對應，信心91)：補上第5點`bear_low_divergence_
+  signal()`(低檔量價背離)——`made_new_low`只是單純的N日新低比較(VOLPRICE10_NEW_LOW_
+  LOOKBACK=20天)，`volume_increasing`重用既有的ma5_volume，兩者都跟趨勢位置無關；第1/2/4
+  點(需要`is_start_of_decline`/`is_low_continuous_decline`等更細緻的階段判斷，不是簡單的
+  is_at_high/is_at_low)仍然不接。
+- R-VOLPRICE-11(壓力支撐區大量K線隔日應對規則，信心90)：直接重用R-SR-15/16已經在用的
+  MA20支撐壓力觸價定義(2%容忍帶)，只是這裡看「昨天」觸價未突破/跌破、「今天」評估後續
+  反應——支撐壓力價位這個前提本來就已經解決了，先前只是沒有想到可以直接借用。
+
+**重新確認維持排除的候選**(避免之後又被問「為什麼沒接」)：
+- R-VOLPRICE-03(高檔爆量三分類)：`is_bull_early_or_main_stage`要區分「初升段」跟「主升段」
+  兩種更細的子階段，`trend_position.py`目前只有二元的is_at_high/is_at_low，沒有這種細
+  分——用swing_pct門檻硬猜「多大算主升段」等於是發明書中沒有的數字，不接。
+- R-GAP-11/16(高檔末升段/低檔末跌段竭盡缺口)：同樣需要`is_late_stage_rally`/`is_late_
+  stage_decline`這種「末」字輩的子階段判斷，跟R-VOLPRICE-03同一個問題，不接。
+- R-CLASSIC-22(空轉多過空高大漲圖)：`bear_rebound_high`(空頭反彈高點)仍然需要全新的
+  狀態追蹤，`is_bull_confirm`雖然可以用trend_today替代，但另一半問題沒解決，不接。
+- R-CANDLE-23(大量長紅K進場位置篩選規則)：10個布林參數裡`consecutive_up_days_ge_3_at_
+  high`現在可以用is_at_high計數解決，但`near_resistance_before_rise`/`is_bear_rebound`
+  仍然沒有對應的building block——維持先前的判斷：只解決3條裡的1條、其餘用預設值硬湊，
+  失敗模式是產生假的「可以買」訊號，風險比不接更高，不接。
+- R-SR-14/17：先前的排除理由是「需要重新設計已寫好規則的wiring方式」/「需要回檔區間狀態
+  追蹤」，跟趨勢位置無關，這次新增的模組不影響這個判斷，維持排除。
+
+新增測試：`tests/test_rule_scan.py`新增5個測試(R-VOLPRICE-06/08各1個、R-VOLPRICE-10的
+第5點1個、R-VOLPRICE-11壓力/支撐各1個)。659個測試全過。
+
+對本機真實db跑600檔股票驗證：0筆crash。R-VOLPRICE-06(6)、R-VOLPRICE-08(44)、
+R-VOLPRICE-10(29，含既有的bear_low_key_point_rebound_signal與新增的bear_low_divergence_
+signal兩個來源合計)、R-VOLPRICE-11(5)。
+
+**至此「信心≥80分且未接入」的114條規則裡，累計接上64條**(前批60+這批4)。
