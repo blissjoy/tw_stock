@@ -1,6 +1,7 @@
 import pandas as pd
 
 import src.screener.rule_scan as rule_scan
+from src.indicators.pivots import TurningPoint
 from src.screener.rule_scan import scan_golden_tier
 
 
@@ -175,3 +176,69 @@ def test_scan_golden_tier_skips_ma15_when_no_cross_today(monkeypatch):
     rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
 
     assert "R-MA-15" not in rule_ids
+
+
+def test_scan_golden_tier_reports_macd_and_kd_divergence_from_turning_points(monkeypatch):
+    """R-INDICATOR-07(MACD趨勢級背離)/R-INDICATOR-12(KD背離)都需要「股價轉折頭/底」配合
+    同一天的MACD OSC/KD K值——用假的轉折點(日期取自df.index，確保能對應到真實算出來的
+    MACD/KD數值)驗證wiring本身沒有接錯，底層背離判斷邏輯已有kd.py/macd.py各自的測試。"""
+    df = _trend_df(60, "up")
+    dates = df.index
+    fake_points = [
+        TurningPoint(type="bottom", price=90, index=dates[10]),
+        TurningPoint(type="head", price=100, index=dates[20]),
+        TurningPoint(type="bottom", price=95, index=dates[30]),
+        TurningPoint(type="head", price=105, index=dates[40]),
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    monkeypatch.setattr(rule_scan, "macd_trend_level_bullish_divergence", lambda heads, osc_peaks: True)
+    monkeypatch.setattr(rule_scan, "macd_trend_level_bearish_divergence", lambda bottoms, osc_troughs: False)
+    monkeypatch.setattr(rule_scan, "kd_peak_divergence", lambda heads, k_peaks: "KD峰背離，趨勢反轉風險升高")
+    monkeypatch.setattr(rule_scan, "kd_trough_divergence", lambda bottoms, k_troughs: None)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "股價頭頭高但OSC紅柱峰值頭頭低" in results["R-INDICATOR-07"]
+    assert results["R-INDICATOR-12"] == "KD峰背離，趨勢反轉風險升高"
+
+
+def test_scan_golden_tier_skips_macd_kd_divergence_when_fewer_than_two_turning_points(monkeypatch):
+    """轉折點不足2組頭或2組底時，不應該呼叫背離判斷函式(避免用不足的資料誤判)。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: [
+        TurningPoint(type="bottom", price=90, index=df.index[10]),
+    ])
+    called = []
+    monkeypatch.setattr(rule_scan, "macd_trend_level_bullish_divergence", lambda heads, osc_peaks: called.append("macd") or False)
+    monkeypatch.setattr(rule_scan, "kd_peak_divergence", lambda heads, k_peaks: called.append("kd") or None)
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert called == []
+    assert "R-INDICATOR-07" not in rule_ids
+    assert "R-INDICATOR-12" not in rule_ids
+
+
+def test_scan_golden_tier_reports_ma_channel_breakout(monkeypatch):
+    """R-INDICATOR-18 MA通道突破：函式回傳文字裡不是「常態」字樣時才列入，避免每天都出現。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(
+        rule_scan, "ma_channel_breakout_signal",
+        lambda close, upper, lower, is_large_volume: pd.Series("帶量突破上軌，偏多趨勢轉強", index=df.index),
+    )
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-INDICATOR-18"] == "帶量突破上軌，偏多趨勢轉強"
+
+
+def test_scan_golden_tier_skips_ma_channel_when_normal_range(monkeypatch):
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(
+        rule_scan, "ma_channel_breakout_signal",
+        lambda close, upper, lower, is_large_volume: pd.Series("軌道內游走（常態）", index=df.index),
+    )
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-INDICATOR-18" not in rule_ids

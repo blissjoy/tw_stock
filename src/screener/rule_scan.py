@@ -52,11 +52,19 @@ from src.indicators.granville import (
     granville_sell_signal_3,
     granville_sell_signal_4,
 )
-from src.indicators.kd import compute_kd, is_high_dull, is_low_dull, kd_cross_signal_by_trend
-from src.indicators.macd import compute_macd, macd_zero_axis_bear_signal, macd_zero_axis_bull_signal
+from src.indicators.kd import compute_kd, is_high_dull, is_low_dull, kd_cross_signal_by_trend, kd_peak_divergence, kd_trough_divergence
+from src.indicators.ma_channel import ma_channel_bands, ma_channel_breakout_signal
+from src.indicators.macd import (
+    compute_macd,
+    macd_trend_level_bearish_divergence,
+    macd_trend_level_bullish_divergence,
+    macd_zero_axis_bear_signal,
+    macd_zero_axis_bull_signal,
+)
 from src.indicators.moving_average import compute_ma_set, is_bearish_aligned, is_bullish_aligned, is_ma_converged, is_ma_tangled, sma
+from src.indicators.pivots import compute_turning_points
 from src.indicators.rsi import rsi, rsi_overbought_oversold_signal, rsi_short_long_cross_signal
-from src.indicators.volume_price import basic_volume, is_accumulation_volume
+from src.indicators.volume_price import basic_volume, is_accumulation_volume, is_big_volume_vs_prev_day
 from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_states_multi_horizon
 
 MIN_DAYS = 30  # 均線/MACD/KD/RSI/布林通道都需要暖身天數，資料不足就整批不評估(不逐一判斷各自門檻)
@@ -126,6 +134,42 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         add("R-INDICATOR-11", "K、D連續3天在80以上，KD高檔鈍化")
     if _last_bool(is_low_dull(kd_df["K"], kd_df["D"])):
         add("R-INDICATOR-11", "K、D連續3天在20以下，KD低檔鈍化")
+
+    # --- 轉折點(供R-INDICATOR-07 MACD趨勢級背離／R-INDICATOR-12 KD背離共用) ---
+    # 兩條背離規則都需要「股價轉折頭/底」對應「同一波段某指標的峰/谷值」——這裡用轉折點
+    # 當天的指標數值當作那個波段的代表值(工程近似，不是逐波段另外找指標自己的局部峰谷，
+    # 書中也沒有規定要多精確比對，抓轉折點當天的數值是最直接、可重現的做法)。
+    turning_points = compute_turning_points(high, low, close, n=5)
+    tp_heads = [tp for tp in turning_points if tp.type == "head"]
+    tp_bottoms = [tp for tp in turning_points if tp.type == "bottom"]
+    head_prices = [tp.price for tp in tp_heads]
+    bottom_prices = [tp.price for tp in tp_bottoms]
+
+    if len(tp_heads) >= 2:
+        osc_peaks = [float(macd_df["OSC"].loc[tp.index]) for tp in tp_heads]
+        if macd_trend_level_bullish_divergence(head_prices, osc_peaks):
+            add("R-INDICATOR-07", "股價頭頭高但OSC紅柱峰值頭頭低，趨勢級高檔背離，提示多轉空")
+        k_peaks = [float(kd_df["K"].loc[tp.index]) for tp in tp_heads]
+        peak_divergence = kd_peak_divergence(head_prices, k_peaks)
+        if peak_divergence:  # 函式本身回傳文字已經區分「真背離」跟「背離但落在鈍化區、可信度低」兩種情境
+            add("R-INDICATOR-12", peak_divergence)
+    if len(tp_bottoms) >= 2:
+        osc_troughs = [float(macd_df["OSC"].loc[tp.index]) for tp in tp_bottoms]
+        if macd_trend_level_bearish_divergence(bottom_prices, osc_troughs):
+            add("R-INDICATOR-07", "股價底底低但OSC綠柱谷值(絕對值)底底高，趨勢級低檔背離，提示空轉多")
+        k_troughs = [float(kd_df["K"].loc[tp.index]) for tp in tp_bottoms]
+        trough_divergence = kd_trough_divergence(bottom_prices, k_troughs)
+        if trough_divergence:
+            add("R-INDICATOR-12", trough_divergence)
+
+    # --- MA通道(R-INDICATOR-18正負乖離軌道突破) ---
+    ma20_for_channel = ma_frame["MA20"]
+    channel = ma_channel_bands(ma20_for_channel)
+    channel_sig = _last_text(ma_channel_breakout_signal(
+        close, channel["upper"], channel["lower"], is_big_volume_vs_prev_day(volume),
+    ))
+    if channel_sig and "常態" not in channel_sig:
+        add("R-INDICATOR-18", channel_sig)
 
     # --- RSI ---
     rsi9 = rsi(close, n=9)
