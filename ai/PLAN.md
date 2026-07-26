@@ -2106,3 +2106,39 @@ R-GAP-20觸發86次；R-GAP-14/R-GAP-09(已接的既有規則)當天實測都是
 新增測試：`tests/test_rule_scan.py`新增4個測試(R-GAP-01觸發/不觸發、R-GAP-19/20
 wiring驗證)；`tests/test_daily_screener.py`新增3個R-GAP-14測試(觸發/無缺口/無盤整區
 前提)。601個測試全過。
+
+## 第6批「切線軌道線」11條裡接上3條(+1條附帶條)(2026-07-26)
+
+這批的重大發現：`src/patterns/chart_overlays.py`的`compute_trendlines()`(圖表疊圖已經
+在用，畫K線圖上的切線/軌道線)本身就已經完整串接了R-LINE-01~06(切線畫法+動態更新)跟
+R-LINE-11/12(跌破突破分級與角色互換)——只是這些計算結果被拿去「畫圖」，沒有被當成
+`scan_golden_tier()`裡的「訊號」回報過。這批不重新實作取點/畫線演算法，直接重用
+`compute_trendlines()`的輸出：
+
+- R-LINE-11(上升切線跌破分級與角色互換)/R-LINE-12(下降切線突破分級，附帶接的，信心
+  可能<80但跟R-LINE-11是同一組鏡射、同一段程式碼，一併接上)：role已經被`compute_
+  trendlines()`內部的`classify_break_and_role_swap()`就地互換過，這裡多算一次「昨天
+  (少一天資料)」的版本比較，只在「今天剛好變化」時才回報，避免角色互換後每天重複列出。
+- R-LINE-14(上升軌道線突破)/R-LINE-15(下降軌道線跌破)：`compute_trendlines()`已經算好
+  `up_channel`/`down_channel`，`check_channel_breakout`/`check_channel_breakdown`本身
+  只是單點比較(不分今天昨天)，這裡一樣用「今天」vs「昨天」的比較抓出剛好突破的那一天。
+
+對本機真實db跑200檔股票驗證：0筆crash(約26秒，因為多算一次「昨天」的`compute_
+trendlines()`，比其他規則稍慢，但`scan_golden_tier()`只在使用者點開單一股票的「個股
+分析」面板時呼叫、不是批次選股路徑，效能可接受)，R-LINE-11觸發10次、R-LINE-12觸發4次、
+R-LINE-14觸發1次、R-LINE-15觸發3次。
+
+**確認排除、暫緩接入的8條**：
+- R-LINE-01/02/03/04/05/06(切線畫法本身：原始切線/線不蓋線判準/動態更新)：這些是
+  `compute_trendlines()`內部依賴的**建構演算法**，不是獨立訊號本身，性質上跟R-MA-01
+  (均線計算公式)同一類，已經透過`compute_trendlines()`間接被使用。
+- R-LINE-09(上升切線支撐力道遞減與角度強弱)：`support_strength_by_touch_count()`/
+  `angle_strength()`需要「這條切線被觸碰過幾次」跟「切線歷史」，但`compute_trendlines()`
+  目前只回傳「最新一條在用的切線」，沒有保留完整觸碰次數/歷史紀錄，需要先擴充
+  `chart_overlays.py`的回傳結構才能接，範圍超出這次批次。
+- R-LINE-13(切線突破跌破後退出觀察期進場規則)：`exit_observation_period_state()`需要
+  一段「觀察期」的獨立狀態追蹤(突破後等待幾天確認)，是全新的中介狀態，不是單純接上
+  既有函式，跳過。
+
+新增測試：`tests/test_rule_scan.py`新增6個測試(R-LINE-11/12/14/15觸發驗證、R-LINE-11/14
+「昨天已經是這個狀態就不重複回報」驗證)。607個測試全過。

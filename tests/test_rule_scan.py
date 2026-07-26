@@ -2,6 +2,7 @@ import pandas as pd
 
 import src.screener.rule_scan as rule_scan
 from src.indicators.pivots import TurningPoint
+from src.indicators.trendlines import LinePoint, TrendLine
 from src.screener.rule_scan import scan_golden_tier
 
 
@@ -364,3 +365,82 @@ def test_scan_golden_tier_reports_true_and_false_gap_fill(monkeypatch):
     results2 = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
     assert "假封口" in results2["R-GAP-20"]
     assert "量縮" in results2["R-GAP-20"]
+
+
+def test_scan_golden_tier_reports_line11_when_up_tangent_broken_today(monkeypatch):
+    """R-LINE-11：重用chart_overlays.compute_trendlines()已經算好的role(角色互換就地更新
+    在裡面)，這裡只驗證「今天」跟「昨天(少一天資料)」比較後，只在剛好變化的那天回報。"""
+    df = _trend_df(60, "up")
+    support_line = TrendLine(a=LinePoint(0, 90), b=LinePoint(10, 95), role="support")
+    resistance_line = TrendLine(a=LinePoint(0, 90), b=LinePoint(10, 95), role="resistance")
+
+    def fake_compute_trendlines(d, ma_window=5):
+        return {"up_tangent": resistance_line if len(d) == len(df) else support_line}
+
+    monkeypatch.setattr(rule_scan, "compute_trendlines", fake_compute_trendlines)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "轉為壓力" in results["R-LINE-11"]
+
+
+def test_scan_golden_tier_skips_line11_when_already_broken_yesterday(monkeypatch):
+    df = _trend_df(60, "up")
+    resistance_line = TrendLine(a=LinePoint(0, 90), b=LinePoint(10, 95), role="resistance")
+    monkeypatch.setattr(rule_scan, "compute_trendlines", lambda d, ma_window=5: {"up_tangent": resistance_line})
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-LINE-11" not in rule_ids
+
+
+def test_scan_golden_tier_reports_line12_when_down_tangent_broken_today(monkeypatch):
+    """R-LINE-12：R-LINE-11的鏡射版本(下降切線遭突破，原壓力轉支撐)。"""
+    df = _trend_df(60, "up")
+    resistance_line = TrendLine(a=LinePoint(0, 90), b=LinePoint(10, 95), role="resistance")
+    support_line = TrendLine(a=LinePoint(0, 90), b=LinePoint(10, 95), role="support")
+
+    def fake_compute_trendlines(d, ma_window=5):
+        return {"down_tangent": support_line if len(d) == len(df) else resistance_line}
+
+    monkeypatch.setattr(rule_scan, "compute_trendlines", fake_compute_trendlines)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "轉為支撐" in results["R-LINE-12"]
+
+
+def test_scan_golden_tier_reports_line14_when_channel_breakout_today(monkeypatch):
+    """R-LINE-14：股價突破上升軌道線上緣，只在「今天」剛好突破時回報(不是每天都在軌道
+    線上方就重複列出)。"""
+    df = _trend_df(60, "up")
+    channel = TrendLine(a=LinePoint(0, 90), b=LinePoint(1, 91), role="resistance")
+    monkeypatch.setattr(rule_scan, "compute_trendlines", lambda d, ma_window=5: {"up_channel": channel})
+    monkeypatch.setattr(rule_scan, "check_channel_breakout", lambda line, x, close: x == len(df) - 1)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "突破上升軌道線" in results["R-LINE-14"]
+
+
+def test_scan_golden_tier_skips_line14_when_broken_out_since_yesterday(monkeypatch):
+    df = _trend_df(60, "up")
+    channel = TrendLine(a=LinePoint(0, 90), b=LinePoint(1, 91), role="resistance")
+    monkeypatch.setattr(rule_scan, "compute_trendlines", lambda d, ma_window=5: {"up_channel": channel})
+    monkeypatch.setattr(rule_scan, "check_channel_breakout", lambda line, x, close: True)  # 昨天今天都算突破
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-LINE-14" not in rule_ids
+
+
+def test_scan_golden_tier_reports_line15_when_channel_breakdown_today(monkeypatch):
+    """R-LINE-15：R-LINE-14的鏡射版本(跌破下降軌道線下緣)。"""
+    df = _trend_df(60, "up")
+    channel = TrendLine(a=LinePoint(0, 90), b=LinePoint(1, 89), role="support")
+    monkeypatch.setattr(rule_scan, "compute_trendlines", lambda d, ma_window=5: {"down_channel": channel})
+    monkeypatch.setattr(rule_scan, "check_channel_breakdown", lambda line, x, close: x == len(df) - 1)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "跌破下降軌道線" in results["R-LINE-15"]

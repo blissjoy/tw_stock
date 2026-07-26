@@ -75,7 +75,9 @@ from src.indicators.support_resistance import (
     ma_resistance_conversion_short,
     ma_support_conversion_long,
 )
+from src.indicators.trendlines import check_channel_breakdown, check_channel_breakout
 from src.indicators.volume_price import basic_volume, is_accumulation_volume, is_big_volume_vs_prev_day
+from src.patterns.chart_overlays import compute_trendlines
 from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_states_multi_horizon
 
 MIN_DAYS = 30  # 均線/MACD/KD/RSI/布林通道都需要暖身天數，資料不足就整批不評估(不逐一判斷各自門檻)
@@ -361,6 +363,37 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
             )
             if reasons:
                 add("R-GAP-20", f"假封口（{'；'.join(reasons)}），缺口({gap_range})支撐/壓力仍然有效")
+
+    # --- 切線軌道線(R-LINE-11/12跌破突破分級與角色互換、R-LINE-14/15軌道線突破) ---
+    # 重用src/patterns/chart_overlays.py已經在圖表疊圖路徑用的compute_trendlines()——
+    # 裡面已經內建R-LINE-01~06(切線畫法+動態更新)+R-LINE-11/12(角色互換)，這裡不重新
+    # 實作取點/畫線邏輯，只是多做「今天」跟「昨天」的比較，抓出「剛好是今天發生」的事件
+    # (角色互換/軌道突破都是「一旦發生就維持」的狀態，不比較昨天會每天都重複回報)。
+    trendlines_today = compute_trendlines(df)
+    trendlines_yesterday = compute_trendlines(df.iloc[:-1]) if len(df) > 1 else {}
+    x_today, x_yesterday = len(df) - 1, len(df) - 2
+
+    up_tangent = trendlines_today.get("up_tangent")
+    up_tangent_prev = trendlines_yesterday.get("up_tangent")
+    if up_tangent is not None and up_tangent.role == "resistance":
+        if up_tangent_prev is None or up_tangent_prev.role != "resistance":
+            add("R-LINE-11", f"上升切線遭收盤跌破，原支撐角色轉為壓力（切線約{up_tangent.at(x_today):.2f}）")
+
+    down_tangent = trendlines_today.get("down_tangent")
+    down_tangent_prev = trendlines_yesterday.get("down_tangent")
+    if down_tangent is not None and down_tangent.role == "support":
+        if down_tangent_prev is None or down_tangent_prev.role != "support":
+            add("R-LINE-12", f"下降切線遭收盤突破，原壓力角色轉為支撐（切線約{down_tangent.at(x_today):.2f}）")
+
+    up_channel = trendlines_today.get("up_channel")
+    if up_channel is not None and check_channel_breakout(up_channel, x_today, close):
+        if not check_channel_breakout(up_channel, x_yesterday, close):
+            add("R-LINE-14", f"股價突破上升軌道線上緣（約{up_channel.at(x_today):.2f}），偏多轉強")
+
+    down_channel = trendlines_today.get("down_channel")
+    if down_channel is not None and check_channel_breakdown(down_channel, x_today, close):
+        if not check_channel_breakdown(down_channel, x_yesterday, close):
+            add("R-LINE-15", f"股價跌破下降軌道線下緣（約{down_channel.at(x_today):.2f}），偏空轉強")
 
     # --- 量能 ---
     ma5_volume = basic_volume(volume)
