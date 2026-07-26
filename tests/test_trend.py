@@ -1,5 +1,6 @@
 import pandas as pd
 
+from src.indicators.pivots import TurningPoint
 from src.indicators.trend import (
     base_building_leg1_signal,
     base_building_leg2_confirmed,
@@ -32,6 +33,7 @@ from src.indicators.trend import (
     mid_wave_simplify,
     one_day_reversal_high,
     short_entry_taboo_check,
+    simplify_turning_points,
     topping_leg1_signal,
     topping_leg2_confirmed,
     topping_ma_lock_signal,
@@ -323,3 +325,33 @@ def test_classify_pullback_correction_four_scenarios():
     assert classify_pullback_correction(pullback_pct=0.6, broke_ma20_or_prior_extreme=True, is_consolidation_breakout=False, is_abc_correction_resolved=False) == "情況2 強勢回檔：容易進入頭頭低/底底高盤整，需等重新符合原趨勢架構再進場"
     assert classify_pullback_correction(pullback_pct=0.6, broke_ma20_or_prior_extreme=False, is_consolidation_breakout=True, is_abc_correction_resolved=False) == "情況3 盤整突破：原趨勢繼續"
     assert classify_pullback_correction(pullback_pct=0.6, broke_ma20_or_prior_extreme=False, is_consolidation_breakout=False, is_abc_correction_resolved=True) == "情況4 ABC修正結束：原趨勢繼續"
+
+
+def _tp(kind: str, price: float, day: int) -> TurningPoint:
+    return TurningPoint(type=kind, price=price, index=pd.Timestamp("2026-01-01") + pd.Timedelta(days=day))
+
+
+def test_simplify_turning_points_drops_single_noise_swing():
+    # H1=100 -> B1=95(振幅5%，雜訊) -> H2=110(相對B1振幅15.8%，有效)：H1應該被丟棄，
+    # 只留下B1、H2這組真正代表完整波段的配對。
+    points = [_tp("head", 100.0, 1), _tp("bottom", 95.0, 2), _tp("head", 110.0, 3)]
+    result = simplify_turning_points(points, min_swing_pct=0.10)
+    assert [(tp.type, tp.price) for tp in result] == [("bottom", 95.0), ("head", 110.0)]
+
+
+def test_simplify_turning_points_drops_multiple_consecutive_noise_swings():
+    # H1=100 -> B1=98(2%,雜訊) -> H2=99(1%,雜訊) -> B2=80(19.2%,有效)：中間兩個雜訊點
+    # 應該連續被丟棄，只留下代表整段跌勢起訖的H2、B2。
+    points = [_tp("head", 100.0, 1), _tp("bottom", 98.0, 2), _tp("head", 99.0, 3), _tp("bottom", 80.0, 4)]
+    result = simplify_turning_points(points, min_swing_pct=0.10)
+    assert [(tp.type, tp.price) for tp in result] == [("head", 99.0), ("bottom", 80.0)]
+
+
+def test_simplify_turning_points_keeps_all_when_every_swing_is_significant():
+    points = [_tp("head", 100.0, 1), _tp("bottom", 80.0, 2), _tp("head", 120.0, 3), _tp("bottom", 90.0, 4)]
+    result = simplify_turning_points(points, min_swing_pct=0.10)
+    assert result == points
+
+
+def test_simplify_turning_points_returns_empty_for_empty_input():
+    assert simplify_turning_points([]) == []

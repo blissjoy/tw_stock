@@ -7,10 +7,11 @@ docstring寫著需要「趨勢位置模組（尚未實作）」或「外部注�
 一批原本被這個前置需求卡住的規則庫規則（KD依趨勢判讀、布林通道買訊①②/做空訊①②、
 黃金死亡交叉配合主趨勢判讀等）。
 
-⚠️ 這裡只解決「現在算多頭還是空頭」，不解決「現在處於多頭的哪個階段(起漲/主升段/末升段/
-高檔)」這個更細的「趨勢位置」問題——後者是另一批規則(R-CANDLE-06/08/09/10/11等candle_
-patterns_2.py的函式、R-VOLPRICE-03/04/09/10等)需要的`is_at_high`/`is_at_low`/
-`wave_pattern_bullish`類參數，本模組不提供，維持排除在外。
+⚠️ 這裡的主任務是解決「現在算多頭還是空頭」，不是「現在處於多頭的哪個階段(起漲/主升段/
+末升段/高檔)」這個更細的「趨勢位置」問題——後者的`is_at_high`/`is_at_low`已經由
+`src/indicators/trend_position.py`的`compute_trend_position()`提供(2026-07-26新增)，
+本模組2026-07-26起也重用它算`freshness`欄位(見下方第四次修正)，但完整的初升/主升/末升
+等子階段分類仍然不在這裡的範圍內。
 
 ⚠️ 2026-07-24第一次修正：一開始只用單一N=5(短線)判斷「目前趨勢」，被使用者指出「用幾天
 資料判斷大趨勢太草率」——書中R-TREND-01原文明確定義了短/中/長三種天期(5日/10日/20日)，
@@ -40,6 +41,23 @@ desktop的個股分析面板)因此改成額外抓一份更長期(見`src/presen
 低/底底高低的判讀」直接組成文字回傳，呼叫端(UI)可以原文顯示，讓使用者自己核對，不用只
 相信一個結論字串。也把顯示標籤從「短線/中線/長線」改成使用者要求的「短期/中期/長期」
 (避免跟R-TREND-01原本「短線轉折波=5日」的舊用法混淆——那是另一個已經不再使用的定義)。
+
+⚠️ 2026-07-26第四次修正：使用者拿2634實際結果(週線/月線判斷成空頭，但股價明明正在噴出)
+反問「為什麼」，追出兩個問題：(1)轉折點取點演算法(`compute_turning_points`)本身沒有做
+任何雜訊過濾，書中R-TREND-02「轉折波簡化降噪」原本就是要解決這個問題，但之前沒有接上；
+(2)更根本的問題是「轉折點是事後才確認的」——股價正在噴出、還沒回頭時，這段走勢的頭部
+根本還沒被記錄下來，`trend`/`reason`用的還是噴出之前的舊轉折點，這不是bug、是任何轉折點
+確認機制的固有滯後性，不可能靠補更多歷史資料解決(問題不是「資料不夠多」，是「現在」這個
+時間點本身就正好卡在一段尚未走完的波段中間，任何時候往回看歷史都會有一段最新的、還沒
+被確認的走勢)。這裡做兩件事回應：(1)`classify_trend_state()`／
+`classify_trend_states_multi_horizon()`都改成先呼叫`src.indicators.trend.
+simplify_turning_points()`(R-TREND-02)把振幅不足10%(同R-TREND-18門檻)的雜訊轉折點
+合併掉，讓「最近兩個頭/底」的比較不會被雜訊小波動干擾；(2)`TrendHorizonResult`新增
+`freshness`欄位，重用`trend_position.py`的`is_at_high`/`is_at_low`/`swing_pct`，明確
+告訴使用者「目前是否正處於一段還沒被確認的新波段中、已經走了多少%」，把「轉折點確認
+必然滯後」這個限制對使用者攤開，而不是假裝這個限制不存在——如果使用者需要更即時、不等
+確認的判斷，`trend_position.py`本身提供的is_at_high/is_at_low就是這個更即時(但也更容易
+被雜訊反覆觸發)版本的原始素材。
 """
 
 from __future__ import annotations
@@ -49,7 +67,8 @@ from typing import NamedTuple
 import pandas as pd
 
 from src.indicators.pivots import TurningPoint, compute_turning_points
-from src.indicators.trend import is_bear_trend, is_bull_trend
+from src.indicators.trend import is_bear_trend, is_bull_trend, simplify_turning_points
+from src.indicators.trend_position import compute_trend_position
 
 TREND_BULL = "多頭"
 TREND_BEAR = "空頭"
@@ -69,9 +88,14 @@ TREND_TURNING_POINT_N = 5
 
 
 class TrendHorizonResult(NamedTuple):
+    # 轉折點本質上是「事後才確認」的：一個頭部要等股價真的回頭下跌才能被記錄下來，如果股價
+    # 正在噴出、還沒回頭，這段走勢不會反映在trend/reason裡——freshness欄位(見
+    # `_describe_freshness()`)就是用來提醒使用者這一點，附上最近一次確認轉折點的日期，以及
+    # 是否有還沒被確認的新波段正在形成中，讓使用者自己判斷trend/reason的資訊夠不夠新鮮。
     timeframe: str   # 這個天期對應的K棒週期："日線"/"週線"/"月線"
     trend: str       # "多頭"/"空頭"/"盤整"
     reason: str      # 判斷依據：最近兩個頭部/底部的價格、日期與頭頭高低/底底高低的比較結果
+    freshness: str
 
 
 def classify_trend_state(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 5) -> str:
@@ -87,7 +111,7 @@ def classify_trend_state(high: pd.Series, low: pd.Series, close: pd.Series, n: i
     自行把high/low/close截到那一天為止——跟daily_screener.py裡各screen_*函式「今天=
     資料最後一列」的既有慣例相同。
     """
-    turning_points = compute_turning_points(high, low, close, n=n)
+    turning_points = simplify_turning_points(compute_turning_points(high, low, close, n=n))
     heads = [tp.price for tp in turning_points if tp.type == "head"]
     bottoms = [tp.price for tp in turning_points if tp.type == "bottom"]
 
@@ -140,6 +164,29 @@ def _describe_trend_basis(turning_points: list[TurningPoint]) -> str:
     )
 
 
+def _describe_freshness(
+    turning_points: list[TurningPoint], is_at_high_today: bool, is_at_low_today: bool, swing_pct_today: float,
+) -> str:
+    """提醒使用者trend/reason用的轉折點是「事後才確認」的——如果股價正處於一段還沒回頭的
+    噴出/破底走勢中(重用`src/indicators/trend_position.py`已經算好的is_at_high/is_at_low/
+    swing_pct，同一套N=5轉折點基礎)，這段走勢不會反映在trend/reason的「最近兩個頭/底」
+    比較裡，直接說明「還在延續中、尚未確認」，附上目前這段走勢的漲跌幅，讓使用者自己判斷
+    trend/reason的結論是不是已經跟不上盤面。"""
+    if not turning_points:
+        return "尚無確認轉折點"
+    last_tp = turning_points[-1]
+    last_tp_text = f"最近一次確認的轉折點：{_fmt_turning_point(last_tp)}"
+    if is_at_high_today or is_at_low_today:
+        direction = "上漲" if is_at_high_today else "下跌"
+        return (
+            f"⚠️ {last_tp_text}，但目前股價正處於一段還沒回頭確認的{direction}走勢中"
+            f"(自這段走勢的起點至今已經{direction}{swing_pct_today * 100:.1f}%)——"
+            f"這段走勢還沒反映在上面的多空判斷裡，要等真正拉回/反轉才會被記錄成新的轉折點，"
+            f"trend/reason的結論可能已經跟不上盤面"
+        )
+    return last_tp_text
+
+
 def _resample_ohlc(high: pd.Series, low: pd.Series, close: pd.Series, rule: str | None) -> tuple[pd.Series, pd.Series, pd.Series]:
     """把日線high/low/close重新取樣成`rule`週期的K棒(high取區間最高、low取區間最低、
     close取區間最後一筆收盤)；rule為None時代表本來就是日線，原樣傳回。要求high/low/close
@@ -156,13 +203,14 @@ def _resample_ohlc(high: pd.Series, low: pd.Series, close: pd.Series, rule: str 
 def classify_trend_states_multi_horizon(
     high: pd.Series, low: pd.Series, close: pd.Series,
 ) -> dict[str, TrendHorizonResult]:
-    """回傳{"短期": TrendHorizonResult(timeframe="日線", trend=..., reason=...),
+    """回傳{"短期": TrendHorizonResult(timeframe="日線", trend=..., reason=..., freshness=...),
     "中期": TrendHorizonResult(timeframe="週線", ...), "長期": TrendHorizonResult(timeframe=
     "月線", ...)}——依R-INDICATOR-10「做短線看日線、中期看週線、長期看月線」的定義，把同一套
-    N=5轉折波演算法分別套用在日/週/月三種週期重新取樣後的K棒上。三者可能不一致(例如日線走
-    短空、週線仍是多頭)，這正是分開判斷的意義所在——呼叫端(UI)應該三個都顯示，不要合併成
-    一個籠統的「目前趨勢」。`reason`是給使用者核對用的判斷依據文字，見`_describe_trend_
-    basis()`。
+    N=5轉折波演算法(先經過`simplify_turning_points()`降噪)分別套用在日/週/月三種週期重新
+    取樣後的K棒上。三者可能不一致(例如日線走短空、週線仍是多頭)，這正是分開判斷的意義
+    所在——呼叫端(UI)應該三個都顯示，不要合併成一個籠統的「目前趨勢」。`reason`是給使用者
+    核對用的判斷依據文字，見`_describe_trend_basis()`；`freshness`是提醒使用者這個判斷依據
+    是否已經跟不上盤面，見`_describe_freshness()`。
 
     ⚠️ 週線/月線需要足夠長的日線歷史才能取樣出夠多根K棒，資料不足時該天期會偏向回傳「盤整」
     (轉折點不足2組頭與2組底)，不代表真的盤整，呼叫端若用短窗口(例如只抓120天日線)資料
@@ -173,9 +221,14 @@ def classify_trend_states_multi_horizon(
         h, l, c = _resample_ohlc(high, low, close, rule)
         if len(c) > 0:
             trend = classify_trend_state(h, l, c, n=TREND_TURNING_POINT_N)
-            turning_points = compute_turning_points(h, l, c, n=TREND_TURNING_POINT_N)
+            turning_points = simplify_turning_points(compute_turning_points(h, l, c, n=TREND_TURNING_POINT_N))
             reason = _describe_trend_basis(turning_points)
+            position = compute_trend_position(h, l, c, n=TREND_TURNING_POINT_N)
+            freshness = _describe_freshness(
+                turning_points, bool(position["is_at_high"].iloc[-1]), bool(position["is_at_low"].iloc[-1]),
+                float(position["swing_pct"].iloc[-1]),
+            )
         else:
-            trend, reason = TREND_RANGE, "資料不足，無法重新取樣出任何K棒"
-        result[label] = TrendHorizonResult(timeframe=timeframe, trend=trend, reason=reason)
+            trend, reason, freshness = TREND_RANGE, "資料不足，無法重新取樣出任何K棒", "資料不足"
+        result[label] = TrendHorizonResult(timeframe=timeframe, trend=trend, reason=reason, freshness=freshness)
     return result

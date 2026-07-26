@@ -14,7 +14,15 @@ def _fake_points(pairs):
     return [TurningPoint(type=t, price=p, index=i) for i, (t, p) in enumerate(pairs)]
 
 
+def _bypass_simplify(monkeypatch):
+    """這些測試要驗證的是is_bull_trend/is_bear_trend的wiring本身，不是R-TREND-02降噪
+    邏輯(降噪有tests/test_trend.py專屬測試)——用固定的小振幅假資料時，降噪可能會把
+    測試特別設計的頭/底配對合併掉，所以這裡把simplify_turning_points短路成原樣傳回。"""
+    monkeypatch.setattr(trend_state, "simplify_turning_points", lambda tps, min_swing_pct=0.10: tps)
+
+
 def test_classify_trend_state_returns_bull_when_heads_and_bottoms_both_rising(monkeypatch):
+    _bypass_simplify(monkeypatch)
     monkeypatch.setattr(trend_state, "compute_turning_points", lambda h, l, c, n=5: _fake_points([
         ("bottom", 90), ("head", 100), ("bottom", 95), ("head", 105),
     ]))
@@ -24,6 +32,7 @@ def test_classify_trend_state_returns_bull_when_heads_and_bottoms_both_rising(mo
 
 
 def test_classify_trend_state_returns_bear_when_heads_and_bottoms_both_falling(monkeypatch):
+    _bypass_simplify(monkeypatch)
     monkeypatch.setattr(trend_state, "compute_turning_points", lambda h, l, c, n=5: _fake_points([
         ("head", 110), ("bottom", 100), ("head", 105), ("bottom", 95),
     ]))
@@ -54,6 +63,7 @@ def test_classify_trend_state_returns_range_when_signals_mixed(monkeypatch):
 def test_classify_trend_state_separates_heads_and_bottoms_by_chronological_order(monkeypatch):
     """確認heads/bottoms清單各自保留原始交替序列裡的時間順序(不是重新排序)，
     is_bull_trend/is_bear_trend比較的是"最後一個"跟"倒數第二個"，順序顛倒會誤判。"""
+    _bypass_simplify(monkeypatch)
     captured = {}
 
     def _fake_is_bull_trend(heads, bottoms):
@@ -167,6 +177,7 @@ def test_classify_trend_states_multi_horizon_reason_shows_actual_head_and_bottom
     """使用者質疑「短線顯示空頭/中長線顯示盤整的依據是什麼」——reason必須附上實際的頭部/
     底部價格與頭頭高低/底底高低的判讀，不能只回傳一個「多頭/空頭/盤整」結論字串，使用者才能
     自己核對演算法有沒有算錯。"""
+    _bypass_simplify(monkeypatch)
     points = _fake_points([("bottom", 90), ("head", 100), ("bottom", 95), ("head", 105)])
     monkeypatch.setattr(trend_state, "compute_turning_points", lambda h, l, c, n=5: points)
     high, low, close = _make_daily_series()
@@ -190,3 +201,73 @@ def test_classify_trend_states_multi_horizon_reason_explains_insufficient_turnin
 
     assert result["短期"].trend == "盤整"
     assert "轉折點不足" in result["短期"].reason
+
+
+def _make_series_with_one_reversal(n_days: int = 400):
+    """跟_make_daily_series()不同：造一段「先跌later漲」的價格路徑，確保compute_turning_
+    points()至少能找到1組頭/底，供freshness測試使用(純單調上升的_make_daily_series()永遠
+    不會觸發任何轉折，freshness會固定回傳「尚無確認轉折點」，測不到警語分支)。"""
+    dates = pd.date_range("2024-01-01", periods=n_days, freq="B")
+    half = n_days // 2
+    close = pd.Series(
+        [100 - i * 0.1 for i in range(half)] + [100 - half * 0.1 + i * 0.1 for i in range(n_days - half)],
+        index=dates,
+    )
+    return close + 1, close - 1, close
+
+
+def test_classify_trend_states_multi_horizon_freshness_warns_when_unconfirmed_swing_in_progress(monkeypatch):
+    """使用者拿2634實際案例反問「週線/月線明明正在噴出，為什麼還顯示空頭」——freshness要
+    明確標註「目前正處於一段還沒被確認的新波段中」，不能讓使用者誤以為trend/reason反映的
+    是最新盤面。"""
+    monkeypatch.setattr(
+        trend_state, "compute_trend_position",
+        lambda h, l, c, n=5: pd.DataFrame(
+            {"is_at_high": [True], "is_at_low": [False], "swing_pct": [0.519]}, index=c.index[-1:],
+        ),
+    )
+    high, low, close = _make_series_with_one_reversal()
+
+    result = classify_trend_states_multi_horizon(high, low, close)
+
+    assert "⚠️" in result["短期"].freshness
+    assert "還沒回頭確認" in result["短期"].freshness
+    assert "51.9%" in result["短期"].freshness
+
+
+def test_classify_trend_states_multi_horizon_freshness_plain_when_no_unconfirmed_swing(monkeypatch):
+    monkeypatch.setattr(
+        trend_state, "compute_trend_position",
+        lambda h, l, c, n=5: pd.DataFrame(
+            {"is_at_high": [False], "is_at_low": [False], "swing_pct": [0.0]}, index=c.index[-1:],
+        ),
+    )
+    high, low, close = _make_series_with_one_reversal()
+
+    result = classify_trend_states_multi_horizon(high, low, close)
+
+    assert "⚠️" not in result["短期"].freshness
+    assert "最近一次確認的轉折點" in result["短期"].freshness
+
+
+def test_classify_trend_states_multi_horizon_denoises_insignificant_turning_points():
+    """端對端驗證R-TREND-02降噪確實接上了：造一段「先有一個振幅<10%的小雜訊擺動、再走出
+    一段真正>=10%的波段」的真實價格路徑，reason裡不應該出現那個雜訊轉折點的價格。"""
+    n = 120
+    dates = pd.date_range("2024-01-01", periods=n, freq="B")
+    close = []
+    for i in range(n):
+        if i < 40:
+            close.append(100.0)  # 暖身用平盤
+        elif i < 50:
+            close.append(100 + (i - 40) * 0.2)  # 100->102，振幅2%，雜訊
+        elif i < 60:
+            close.append(102 - (i - 50) * 0.2)  # 102->100，雜訊回落
+        else:
+            close.append(100 + (i - 60) * 0.5)  # 100->130，振幅30%，真正的波段
+    close = pd.Series(close, index=dates)
+    high, low = close + 0.3, close - 0.3
+
+    result = classify_trend_states_multi_horizon(high, low, close)
+
+    assert "102.00" not in result["短期"].reason

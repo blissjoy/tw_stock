@@ -40,6 +40,7 @@ from src.indicators.bollinger import (
     bollinger_sell_signal_2,
     bollinger_sell_signal_3,
 )
+from src.indicators.candle_patterns_2 import bearish_engulfing_at_high
 from src.indicators.candles import candle_shadows, is_black_candle, is_hammer_candle, is_inverted_hammer_candle, is_mid_long_black_candle, is_mid_long_red_candle, is_red_candle, is_reversal_candle_at_high, is_reversal_candle_at_low, prev_bar_support_resistance_signal
 from src.indicators.consolidation import detect_consolidation_breakout
 from src.indicators.crossovers import interpret_cross, is_death_cross, is_golden_cross
@@ -76,9 +77,10 @@ from src.indicators.support_resistance import (
     ma_resistance_conversion_short,
     ma_support_conversion_long,
 )
-from src.indicators.trend import bear_trend_change_warning, bull_trend_change_warning, daily_bear_trend_state, daily_bull_trend_state
+from src.indicators.trend import bear_trend_change_warning, bull_high_volume_exhaustion_signal, bull_trend_change_warning, daily_bear_trend_state, daily_bull_trend_state
+from src.indicators.trend_position import compute_trend_position
 from src.indicators.trendlines import check_channel_breakdown, check_channel_breakout
-from src.indicators.volume_price import basic_volume, is_accumulation_volume, is_big_volume_vs_ma5, is_big_volume_vs_prev_day
+from src.indicators.volume_price import basic_volume, bear_low_key_point_rebound_signal, bull_high_key_point_pullback_signal, is_accumulation_volume, is_big_volume_vs_ma5, is_big_volume_vs_prev_day
 from src.patterns.chart_overlays import compute_trendlines
 from src.patterns.classic_patterns import (
     bear_rebound_consolidate_above_ma20_breakout,
@@ -94,7 +96,10 @@ from src.patterns.classic_patterns import (
     gap_down_black_reversal_at_high,
     gap_down_continuation,
     island_reversal,
+    low_zone_big_lower_shadow_reversal,
+    low_zone_big_red_confirmation,
     ma_tangle_breakout,
+    one_day_reversal_at_high,
 )
 from src.patterns.trend_state import TREND_BEAR, TREND_BULL, TREND_RANGE, classify_trend_states_multi_horizon
 from src.screener.screening_rules import double_bottom_breakout_signal
@@ -107,6 +112,7 @@ CANDLE04_CONSOLIDATION_MIN_BARS = 20  # R-CANDLE-04盤整天數門檻，書中�
 CLASSIC_TWO_DAY_VOLUME_LOOKBACK = 20  # R-CLASSIC-05/25往回搜尋「連續2日大量交易日」的天數上限，書中無明確數字
 CLASSIC_BOUNCE_LOOKBACK = 10  # R-CLASSIC-09往回搜尋「反彈紅K」的天數上限，書中無明確數字
 CLASSIC_ISLAND_LOOKBACK = 30  # R-CLASSIC-32往回搜尋孤島反轉「前一個向下缺口」的天數上限，書中無明確數字
+CLASSIC16_LOOKBACK = 20  # R-CLASSIC-16「低檔短時間內反覆出現大量長紅K」的計數窗口，書中無明確數字
 
 
 def _last_bool(series: pd.Series) -> bool:
@@ -276,7 +282,7 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
     else:
         trend_high, trend_low, trend_close = high, low, close
     trend_horizons = classify_trend_states_multi_horizon(trend_high, trend_low, trend_close)
-    for label, (timeframe, trend, reason) in trend_horizons.items():
+    for label, (timeframe, trend, reason, *_freshness) in trend_horizons.items():
         if trend == TREND_BULL:
             add("R-TREND-03", f"{label}({timeframe}轉折波)：頭頭高且底底高，多頭趨勢成立（依據：{reason}）")
         elif trend == TREND_BEAR:
@@ -699,5 +705,69 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         bear_to_bull_07 = bear_to_bull_reversal_signal(prev_state_07, curr_state_07)
         if bear_to_bull_07:
             add("R-STRATEGY-07", bear_to_bull_07)
+
+    # --- 趨勢位置模組(2026-07-26新增)解鎖的規則：is_at_high/is_at_low不再是全True佔位符，
+    # 重新檢視先前因「趨勢位置未實作」被排除的規則，把參數需求剛好就是is_at_high/is_at_low
+    # (不需要更細的初升/主升/末升等子階段)的部分接上；其餘(is_bull_early_or_main_stage、
+    # is_start_of_decline、is_late_stage_rally等更細緻的子階段判斷)本模組尚未提供，維持排除。
+    trend_position = compute_trend_position(high, low, close)
+    is_at_high, is_at_low = trend_position["is_at_high"], trend_position["is_at_low"]
+
+    # R-TREND-12多頭高檔爆量停利訊號：is_at_bull_high直接對應is_at_high。
+    exhaustion_signal_12 = bull_high_volume_exhaustion_signal(volume, open_, close, ma5_volume, is_at_high)
+    if bool(exhaustion_signal_12.iloc[-1]):
+        add("R-TREND-12", "多頭高檔爆量停利訊號：單日爆量(前一日3倍以上)長黑K，或近3天內至少2天爆量(5日均量2倍以上)且股價不漲，建議停利")
+
+    # R-VOLPRICE-09多頭轉折關鍵大量K線操作對應/R-VOLPRICE-10空頭轉折關鍵大量K線操作對應(鏡射
+    # 部分)：兩者都是「昨天在高檔/低檔出現大量K棒，今天評估後續反應」的隔日確認模式，跟
+    # R-VOLPRICE-07凹洞量、R-GAP-19/20同一套「日落後確認」慣例。R-VOLPRICE-10另外3個子函式
+    # 需要is_start_of_decline/is_low_continuous_decline等更細緻的階段判斷，這裡不接。
+    candle_color_09 = "紅" if close.iloc[-2] > open_.iloc[-2] else "黑"
+    pullback_signal_09 = bull_high_key_point_pullback_signal(
+        bool(is_at_high.iloc[-2]), candle_color_09, bool(is_big_volume_vs_prev_day(volume).iloc[-2]),
+        float(close.iloc[-1]), float(low.iloc[-2]), float(open_.iloc[-1]), float(close.iloc[-2]),
+    )
+    if pullback_signal_09:
+        add("R-VOLPRICE-09", pullback_signal_09)
+
+    rebound_signal_10 = bear_low_key_point_rebound_signal(
+        bool(is_at_low.iloc[-2]), bool(is_mid_long_black_candle(open_, close).iloc[-2]),
+        float(close.iloc[-1]), float(high.iloc[-2]), float(open_.iloc[-1]), float(close.iloc[-2]),
+    )
+    if rebound_signal_10:
+        add("R-VOLPRICE-10", rebound_signal_10)
+
+    # R-CLASSIC-01高檔大量長黑一日反轉圖：is_top_zone對應is_at_high，重用candle_patterns_2.py
+    # 已經在latest_day_summary.py用過的bearish_engulfing_at_high()當「高檔長黑吞噬」判斷，
+    # 沿用同一套「昨天大量吞噬K、今天評估是否全部出清」的隔日確認模式。
+    engulfing_at_high_series = bearish_engulfing_at_high(open_, low, close, is_at_high)
+    classic01_note = one_day_reversal_at_high(
+        bool(is_at_high.iloc[-2]), bool(engulfing_at_high_series.iloc[-2]),
+        bool(is_big_volume_vs_prev_day(volume).iloc[-2]),
+        float(close.iloc[-1]), float(low.iloc[-2]),
+    )
+    if classic01_note:
+        add("R-CLASSIC-01", classic01_note)
+
+    # R-CLASSIC-26低檔大量長下影線圖：is_at_bottom對應is_at_low，是「當天」反轉K棒本身的
+    # 幾何+位置+量能條件，不像R-CLASSIC-01/R-VOLPRICE-09/10是隔日確認模式。
+    hammer_big_volume_26 = bool(is_hammer_candle(open_, high, low, close).iloc[-1]) and bool(
+        is_big_volume_vs_ma5(volume, ma5_volume).iloc[-1]
+    )
+    classic26_note = low_zone_big_lower_shadow_reversal(
+        hammer_big_volume_26, bool(is_at_low.iloc[-1]), float(close.iloc[-1]) > float(ma20.iloc[-1]),
+    )
+    if classic26_note:
+        add("R-CLASSIC-26", classic26_note)
+
+    # R-CLASSIC-16低檔大量長紅K圖：「低檔短時間內反覆出現(>=2次)帶爆大量的長紅K」，用
+    # is_at_low往回搭配大量長紅K計數，窗口取CLASSIC16_LOOKBACK(書中無明確數字，工程估計值)。
+    big_red_at_low_16 = (
+        is_mid_long_red_candle(open_, close) & is_big_volume_vs_ma5(volume, ma5_volume) & is_at_low
+    )
+    big_red_count_16 = int(big_red_at_low_16.iloc[-CLASSIC16_LOOKBACK:].sum())
+    classic16_note = low_zone_big_red_confirmation(big_red_count_16)
+    if classic16_note and bool(is_at_low.iloc[-1]):
+        add("R-CLASSIC-16", classic16_note)
 
     return results

@@ -163,14 +163,19 @@ def main() -> None:
         # 日線走空、週線仍是多頭)，只看一種天期容易誤判。每個天期都附上「依據」(最近兩個
         # 頭部/底部的實際價格、日期、頭頭高低/底底高低的判讀)，讓使用者能自己核對演算法的
         # 判斷，不是只丟一個「多頭/空頭/盤整」結論字串——改成每行一種天期，不是併成一行，
-        # 附上依據後單行會過長不好讀。
+        # 附上依據後單行會過長不好讀。freshness額外用st.caption另起一行顯示(2026-07-26新增
+        # ——轉折點是事後才確認的，trend/reason用的可能是噴出/破底之前的舊轉折點，這一行
+        # 明確標註「最近一次確認轉折點的日期」跟「目前是否有還沒被確認的新波段正在進行中」，
+        # 讓使用者自己判斷trend/reason的結論夠不夠新鮮，見trend_state.py第四次修正說明)。
         st.write("目前趨勢：")
-        for label, (timeframe, trend, reason) in summary["trend"].items():
+        for label, (timeframe, trend, reason, *freshness_rest) in summary["trend"].items():
             st.write(f"　- {label}（{timeframe}）：{trend}（依據：{reason}）")
+            if freshness_rest:
+                st.caption(f"　　{freshness_rest[0]}")
         st.write(f"K棒名稱：{summary['candle_name']}")
         st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
         st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))
-        st.caption("⚠️ 型態訊號僅判斷幾何條件是否成立，尚未確認是否位於真正的高檔/低檔位置（趨勢位置模組尚未實作）。")
+        st.caption("⚠️ 型態訊號的「高檔/低檔」判斷已接上趨勢位置模組(is_at_high/is_at_low)，但目前只用單一容忍帶門檻，還沒有初升/主升/末升等更細的子階段分類。")
 
     title_col, status_col = st.columns([4, 1])
     with title_col:

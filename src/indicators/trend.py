@@ -18,6 +18,40 @@ def heads_and_bottoms(turning_points: list[TurningPoint]) -> tuple[list[float], 
     return heads, bottoms
 
 
+@implements_rule("R-TREND-02")
+def simplify_turning_points(turning_points: list[TurningPoint], min_swing_pct: float = 0.10) -> list[TurningPoint]:
+    """轉折波簡化降噪：合併振幅小於`min_swing_pct`(預設10%，跟R-TREND-18「波段須達10%~15%
+    以上才算有效波段」同一個門檻，理由同`src/indicators/trend_position.py`的MIN_SWING_PCT)
+    的雜訊轉折點，只保留真正代表一個完整波段的頭/底。
+
+    書中R-TREND-02原文描述的做法(`mid_wave_simplify`/`k_line_range_simplify`/`trend_wave_
+    pivot`，見本檔案下方)是「先框出盤整區間，再從區間裡取1~2個代表點」，需要先有獨立的
+    盤整區間辨識模組當前置輸入，這裡沒有那個模組可用；改用一個更直接、可以馬上套用在
+    `compute_turning_points()`原始輸出上的等價做法：掃描相鄰的頭/底配對，振幅未達門檻的
+    視為雜訊直接丟棄，退回去跟更早、還留著的那個點重新比較(逐步往回收斂，不是完全穩定
+    不動點的遞迴收斂，書中沒有給出明確演算法，這是符合直覺的最小工程實作)。
+    """
+    if not turning_points:
+        return []
+    result: list[TurningPoint] = [turning_points[0]]
+    for tp in turning_points[1:]:
+        while result:
+            last = result[-1]
+            if last.type == tp.type:
+                # 理論上不會出現在原始交替序列裡，但保守起見：同型態時只留下較極端的那一個。
+                if (tp.type == "head" and tp.price > last.price) or (tp.type == "bottom" and tp.price < last.price):
+                    result[-1] = tp
+                break
+            swing_pct = abs(tp.price - last.price) / last.price if last.price else 0.0
+            if swing_pct >= min_swing_pct:
+                result.append(tp)
+                break
+            result.pop()
+        else:
+            result.append(tp)
+    return result
+
+
 @implements_rule("R-TREND-03")
 def is_bull_trend(heads: list[float], bottoms: list[float]) -> bool:
     """頭頭高底底高：最近一個頭比前一個頭高，且最近一個底比前一個底高，兩者缺一不可。"""

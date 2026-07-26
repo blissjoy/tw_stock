@@ -2453,3 +2453,81 @@ latest_day_summary.py`3個既有測試(basic_reversal_at_high/evening_star/morni
 `scan_golden_tier()`/`daily_screener.py`裡先前因為「趨勢位置未實作」被排除的規則
 (R-CANDLE-23、R-CLASSIC-01/16/26、R-TREND-12等)重新接上——那是後續要不要做的獨立範圍，
 先跟使用者確認再繼續。
+
+## 回頭接上「趨勢位置模組」解鎖的6條規則(2026-07-26)
+
+使用者確認要做，逐一重新檢視先前因「趨勢位置」被排除的規則，只接參數需求剛好就是
+is_at_high/is_at_low(不需要更細的初升/主升/末升等子階段)的部分：
+
+- R-TREND-12(多頭高檔爆量停利訊號，信心93)：`bull_high_volume_exhaustion_signal()`的
+  `is_at_bull_high`參數直接對應is_at_high，是這批裡最單純的一條。
+- R-VOLPRICE-09(多頭轉折關鍵大量K線操作對應，信心90)：`bull_high_key_point_pullback_
+  signal()`的`is_high_position`對應is_at_high，是「昨天在高檔出現大量K棒，今天評估後續
+  反應」的隔日確認模式，跟R-VOLPRICE-07凹洞量、R-GAP-19/20同一套慣例。
+- R-VOLPRICE-10(空頭轉折關鍵大量K線操作對應，信心91)：只接`bear_low_key_point_rebound_
+  signal()`這個鏡射版本(`is_low_position`對應is_at_low)，同規則下其餘4個子函式(需要
+  `is_start_of_decline`/`is_low_continuous_decline`等更細緻的階段判斷，不是簡單的
+  is_at_high/is_at_low)這批不接。
+- R-CLASSIC-01(高檔大量長黑一日反轉圖，信心87)：`one_day_reversal_at_high()`的
+  `is_top_zone`對應is_at_high，重用`candle_patterns_2.py`已經在`latest_day_summary.py`
+  用過的`bearish_engulfing_at_high()`當「高檔長黑吞噬」判斷，同樣是隔日確認模式。
+- R-CLASSIC-26(低檔大量長下影線圖，信心87)：`low_zone_big_lower_shadow_reversal()`的
+  `is_at_bottom`對應is_at_low，是「當天」反轉K棒本身的幾何+位置+量能條件，不像上面幾條
+  是隔日確認模式。
+- R-CLASSIC-16(低檔大量長紅K圖，信心87)：`low_zone_big_red_confirmation()`要求「低檔
+  短時間內反覆出現(>=2次)大量長紅K」，用is_at_low往回搭配大量長紅K計數(窗口
+  CLASSIC16_LOOKBACK=20天，書中無明確數字)，並且要求「今天」仍在is_at_low容忍帶內才回報
+  (避免打底確認後每天都持續列出)。
+
+新增測試：`tests/test_rule_scan.py`新增7個測試，皆採用「mock最終組合函式或關鍵building
+block驗證wiring」的既有慣例。647個測試全過。
+
+對本機真實db跑600檔股票掃「今天」驗證：0筆crash。R-TREND-12(1)、R-VOLPRICE-09(6)、
+R-VOLPRICE-10(5)、R-CLASSIC-01(1)、R-CLASSIC-26(0)、R-CLASSIC-16(0)——26/16在這批快照
+掛零，比照前面經典型態總覽先例(多重AND複合事件本來就比單一訊號罕見)，不視為異常。
+
+**至此「信心≥80分且未接入」的114條規則裡，累計接上60條**(114條初始批次54+這批6)。
+
+## 修正轉折點確認機制的滯後性：R-TREND-02降噪+freshness新鮮度標註(2026-07-26)
+
+使用者拿2634實際案例質疑：週線/月線明明正在噴出(2634從2026-06-12的43.00一路漲到
+07-22的75.30)，為什麼`classify_trend_states_multi_horizon()`還是判斷成空頭？追出兩個
+問題並修正：
+
+**問題1：轉折點取點演算法完全沒有做雜訊過濾**。書中R-TREND-02「轉折波簡化降噪」原本就是
+要解決這個問題，但先前一直沒有接上——`trend_state.py`原本直接吃`compute_turning_points()`
+的原始輸出，任何振幅極小的SMA(5)雜訊擺動都會被當成一個「有效」轉折點。新增
+`src/indicators/trend.py`的`simplify_turning_points(turning_points, min_swing_pct=0.10)`
+(門檻沿用R-TREND-18「波段須達10%~15%以上」)：書中R-TREND-02原文描述的做法(`mid_wave_
+simplify`/`k_line_range_simplify`/`trend_wave_pivot`)需要先有獨立的盤整區間辨識當前置
+輸入，這裡沒有那個模組，改用更直接可執行的等價做法——掃描相鄰轉折點配對，振幅未達門檻的
+視為雜訊丟棄、退回去跟更早的點重新比較。`classify_trend_state()`／
+`classify_trend_states_multi_horizon()`都改成先呼叫這個函式再判斷多空。
+
+**問題2：轉折點本質上是「事後才確認」的，不是資料不夠多的問題**。使用者追問「db已有3年
+資料，為什麼同一段噴出走勢還不夠格形成完整確認循環」——這裡的答案已經在對話中對使用者
+說明清楚：一個「頭」要等股價真的回頭下跌，SMA(n)由正翻負，才會被記錄下來；股價還在漲的
+每一刻，這個頭根本還沒發生，不是「歷史資料不夠」的問題，是「現在」這個時間點本身正好卡在
+一段尚未走完的波段中間——無論累積多少年的歷史資料都無法讓「未來」提前發生。新增
+`TrendHorizonResult.freshness`欄位，重用`trend_position.py`的is_at_high/is_at_low/
+swing_pct(同一套N=5基礎)，明確告訴使用者「最近一次確認轉折點的日期」+「目前是否正處於
+一段還沒被確認的新波段中、已經走了多少%」，把這個限制對使用者攤開，不是假裝它不存在。
+`dashboard/app.py`也同步更新，freshness用`st.caption()`另起一行顯示在每個天期趨勢下方，
+並修正一句已經過時的說明文字(型態訊號的高低檔判斷早就已經接上趨勢位置模組，不再是「尚未
+實作」)。
+
+用2634真實資料驗證這個修正確實有效：日線的freshness正確標註「目前正處於一段還沒回頭確認
+的下跌走勢中(已經下跌20.1%)」，精準反映07-22見高75.30後急跌到07-24收62.8這件事，即使
+trend欄位本身因為轉折點還沒確認、仍顯示「多頭」——使用者現在看得到這個落差，不會被單一
+結論字串誤導。週線因為這波急跌相對週線雜訊容忍帶還不夠顯著，freshness維持不警示，這是
+合理的天期差異，不是bug。
+
+新增測試：`tests/test_trend.py`新增4個`simplify_turning_points`測試(丟棄單一/連續雜訊
+擺動、振幅皆達標時保持不變、空輸入)；`tests/test_trend_state.py`新增3個測試(freshness在
+未確認波段時正確警示、平常狀態不警示、端對端驗證雜訊轉折點確實被過濾掉)，並修正4個既有
+測試(改用固定資料時原本會被新降噪邏輯意外合併掉，改mock`simplify_turning_points`短路成
+原樣傳回，只驗證這幾個測試原本要驗證的wiring本身)。654個測試全過。
+
+對本機真實db跑300檔股票掃`classify_trend_states_multi_horizon()`驗證：0筆crash，
+297檔股票、3種天期共891次評估裡，412次觸發freshness警示，比例合理(顯示這個「未確認波段」
+情境在真實市場資料裡確實普遍存在，不是2634的特例)。

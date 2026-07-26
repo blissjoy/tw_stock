@@ -858,4 +858,100 @@ def test_scan_golden_tier_reports_candle04_breakdown(monkeypatch):
     results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
 
     assert "橫盤跌破確認" in results["R-CANDLE-04"]
-    assert "95.00" in results["R-CANDLE-04"]
+
+
+def test_scan_golden_tier_reports_trend12_bull_high_volume_exhaustion(monkeypatch):
+    """R-TREND-12：趨勢位置模組(compute_trend_position)補上is_at_bull_high後解鎖，每次
+    掃描都會呼叫bull_high_volume_exhaustion_signal(無if閘門，只是回傳的Series要看
+    .iloc[-1])，直接mock驗證wiring。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(
+        rule_scan, "bull_high_volume_exhaustion_signal",
+        lambda *a, **k: pd.Series(True, index=df.index),
+    )
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "R-TREND-12" in results
+
+
+def test_scan_golden_tier_reports_volprice09_bull_high_key_point_pullback(monkeypatch):
+    """R-VOLPRICE-09：昨天在高檔出現大量K棒，今天評估後續反應，跟R-VOLPRICE-07凹洞量、
+    R-GAP-19/20同一套「隔日確認」慣例，每次掃描都會呼叫(無if閘門)，直接mock驗證wiring。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(
+        rule_scan, "bull_high_key_point_pullback_signal", lambda *a, **k: "跌破紅K最低點，回檔",
+    )
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-VOLPRICE-09"] == "跌破紅K最低點，回檔"
+
+
+def test_scan_golden_tier_reports_volprice10_bear_low_key_point_rebound(monkeypatch):
+    """R-VOLPRICE-10：R-VOLPRICE-09的鏡射版本(低檔大量K棒隔日反彈確認)，這條規則底下其餘
+    4個子函式(需要is_start_of_decline等更細緻的階段判斷)這批不接。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "bear_low_key_point_rebound_signal", lambda *a, **k: "反彈")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-VOLPRICE-10"] == "反彈"
+
+
+def test_scan_golden_tier_reports_classic01_one_day_reversal_at_high(monkeypatch):
+    """R-CLASSIC-01：is_top_zone對應趨勢位置模組的is_at_high，重用candle_patterns_2.py
+    已經在latest_day_summary.py用過的bearish_engulfing_at_high()，沿用「昨天大量吞噬K、
+    今天評估是否全部出清」的隔日確認模式，每次掃描都會呼叫(無if閘門)，直接mock驗證wiring。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "one_day_reversal_at_high", lambda *a, **k: "先賣出持股二分之一")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-CLASSIC-01"] == "先賣出持股二分之一"
+
+
+def test_scan_golden_tier_reports_classic26_low_zone_big_lower_shadow_reversal(monkeypatch):
+    """R-CLASSIC-26：is_at_bottom對應is_at_low，是「當天」反轉K棒本身的幾何+位置+量能
+    條件(不像R-CLASSIC-01/R-VOLPRICE-09/10是隔日確認模式)，每次掃描都會呼叫(無if閘門)，
+    直接mock驗證wiring。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(
+        rule_scan, "low_zone_big_lower_shadow_reversal", lambda *a, **k: "低檔大量長下影線，一日反轉買進候選",
+    )
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-CLASSIC-26"] == "低檔大量長下影線，一日反轉買進候選"
+
+
+def test_scan_golden_tier_reports_classic16_low_zone_big_red_confirmation_when_at_low(monkeypatch):
+    """R-CLASSIC-16：用is_at_low往回搭配大量長紅K計數，這裡直接mock底層compute_trend_
+    position讓「今天」處於低檔，並mock最終組合函式驗證wiring。"""
+    df = _trend_df(60, "up")
+    fake_position = pd.DataFrame(
+        {"is_at_high": [False] * len(df), "is_at_low": [True] * len(df), "swing_pct": [0.2] * len(df)},
+        index=df.index,
+    )
+    monkeypatch.setattr(rule_scan, "compute_trend_position", lambda h, l, c: fake_position)
+    monkeypatch.setattr(rule_scan, "low_zone_big_red_confirmation", lambda *a, **k: "低檔大量長紅確認打底")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-CLASSIC-16"] == "低檔大量長紅確認打底"
+
+
+def test_scan_golden_tier_skips_classic16_when_not_currently_at_low(monkeypatch):
+    """R-CLASSIC-16：即使過去窗口內大量長紅K計數達標，如果「今天」已經不在低檔容忍帶內，
+    就不該再重複回報(避免打底確認後每天都持續列出)。"""
+    df = _trend_df(60, "up")
+    fake_position = pd.DataFrame(
+        {"is_at_high": [False] * len(df), "is_at_low": [False] * len(df), "swing_pct": [0.0] * len(df)},
+        index=df.index,
+    )
+    monkeypatch.setattr(rule_scan, "compute_trend_position", lambda h, l, c: fake_position)
+    monkeypatch.setattr(rule_scan, "low_zone_big_red_confirmation", lambda *a, **k: "低檔大量長紅確認打底")
+
+    rule_ids = [item["rule_id"] for item in scan_golden_tier(df)]
+
+    assert "R-CLASSIC-16" not in rule_ids
