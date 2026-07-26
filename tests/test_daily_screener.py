@@ -497,6 +497,67 @@ def test_screen_breakaway_gap_down_returns_none_without_prior_topping_box():
     assert daily_screener.screen_breakaway_gap_down(df, min_days=60) is None
 
 
+def test_screen_mechanical_long_fires_when_close_breaks_above_prev_high():
+    """R-CANDLE-32：機械化多頭K線交易規則本身是純粹的逐日狀態機(不依賴任何K線型態
+    辨識)，直接用真實資料觸發即可，不需要mock。"""
+    n_days = 65
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    close = [100.0] * n_days
+    close[-1] = 112.0  # 最後一天收盤突破前一天高點(100.5)
+    high = [100.5] * n_days
+    low = [99.5] * n_days
+    open_ = [100.0] * n_days
+    volume = [1000] * n_days
+    df = pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+    result = daily_screener.screen_mechanical_long(df, min_days=60)
+    assert result is not None
+    assert result["signal_name"] == "R-CANDLE-32機械化多頭K線交易規則（89%）"
+    assert result["entry_price"] == 112.0
+    assert result["stop_loss"] < result["entry_price"]
+
+
+def test_screen_mechanical_long_returns_none_when_no_breakout():
+    n_days = 65
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    df = pd.DataFrame(
+        {"open": [100.0] * n_days, "high": [100.5] * n_days, "low": [99.5] * n_days,
+         "close": [100.0] * n_days, "volume": [1000] * n_days},
+        index=dates,
+    )
+    assert daily_screener.screen_mechanical_long(df, min_days=60) is None
+
+
+def test_screen_mechanical_short_fires_when_close_breaks_below_prev_low():
+    """R-CANDLE-33：R-CANDLE-32的鏡射版本。"""
+    n_days = 65
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    close = [100.0] * n_days
+    close[-1] = 88.0  # 最後一天收盤跌破前一天低點(99.5)
+    high = [100.5] * n_days
+    low = [99.5] * n_days
+    open_ = [100.0] * n_days
+    volume = [1000] * n_days
+    df = pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=dates)
+
+    result = daily_screener.screen_mechanical_short(df, min_days=60)
+    assert result is not None
+    assert result["signal_name"] == "R-CANDLE-33機械化空頭K線交易規則（89%）"
+    assert result["entry_price"] == 88.0
+    assert result["stop_loss"] > result["entry_price"]
+
+
+def test_screen_mechanical_short_returns_none_when_no_breakdown():
+    n_days = 65
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    df = pd.DataFrame(
+        {"open": [100.0] * n_days, "high": [100.5] * n_days, "low": [99.5] * n_days,
+         "close": [100.0] * n_days, "volume": [1000] * n_days},
+        index=dates,
+    )
+    assert daily_screener.screen_mechanical_short(df, min_days=60) is None
+
+
 def test_screen_all_stocks_aggregates_multiple_candidates(monkeypatch):
     monkeypatch.setattr(
         daily_screener, "daily_bull_trend_state",

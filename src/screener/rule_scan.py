@@ -40,7 +40,8 @@ from src.indicators.bollinger import (
     bollinger_sell_signal_2,
     bollinger_sell_signal_3,
 )
-from src.indicators.candles import candle_shadows, is_hammer_candle, is_inverted_hammer_candle, is_reversal_candle_at_high, is_reversal_candle_at_low
+from src.indicators.candles import candle_shadows, is_hammer_candle, is_inverted_hammer_candle, is_reversal_candle_at_high, is_reversal_candle_at_low, prev_bar_support_resistance_signal
+from src.indicators.consolidation import detect_consolidation_breakout
 from src.indicators.crossovers import interpret_cross, is_death_cross, is_golden_cross
 from src.indicators.gaps import detect_gap, false_fill_reasons, is_true_fill
 from src.indicators.granville import (
@@ -83,6 +84,7 @@ from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_stat
 
 MIN_DAYS = 30  # 均線/MACD/KD/RSI/布林通道都需要暖身天數，資料不足就整批不評估(不逐一判斷各自門檻)
 GAP_FILL_LOOKBACK = 20  # R-GAP-19/20往回搜尋「最近一次缺口」的天數上限，避免抓到太久以前已經沒有參考意義的舊缺口
+CANDLE04_CONSOLIDATION_MIN_BARS = 20  # R-CANDLE-04盤整天數門檻，書中無明確數字，跟R-GAP-09/14同一個工程估計值
 
 
 def _last_bool(series: pd.Series) -> bool:
@@ -425,5 +427,23 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         add("R-CANDLE-25", "下影線>=實體2倍、上影線短，槌子線")
     if _last_bool(is_inverted_hammer_candle(open_, high, low, close)):
         add("R-CANDLE-25", "上影線>=實體2倍、下影線短，倒槌K線")
+
+    # --- K棒型態(R-CANDLE-01前一日高低點支撐壓力) ---
+    # prev_bar_support_resistance_signal()永遠有值(多空未表態/買方力量轉強/賣方力量轉強)，
+    # 只在不是「多空未表態」這個中性狀態時才回報，避免每天都列出。
+    prev_bar_sig = _last_text(prev_bar_support_resistance_signal(close, high, low))
+    if prev_bar_sig and prev_bar_sig != "多空未表態":
+        add("R-CANDLE-01", prev_bar_sig)
+
+    # --- K棒型態(R-CANDLE-04橫盤突破確認) ---
+    # 重用daily_screener.py已經在用的detect_consolidation_breakout()，只是這裡評估的是
+    # 「今天」單點觸發、不含進場價/停損建議(黃金層訊號的一貫定位)，不是候選清單性質的
+    # screen_*函式；CANDLE04_CONSOLIDATION_MIN_BARS取20天(約1個月)，跟R-GAP-09/14的
+    # 盤整天數門檻同一個工程估計值，書中這條規則本身沒有另外給出明確天數。
+    consolidation_box = detect_consolidation_breakout(open_, high, low, close, min_bars=CANDLE04_CONSOLIDATION_MIN_BARS)
+    if _last_bool(consolidation_box["breakout_up"]):
+        add("R-CANDLE-04", f"中長紅K收盤突破盤整區上緣{float(consolidation_box['upper_neckline'].iloc[-1]):.2f}，橫盤突破確認")
+    if _last_bool(consolidation_box["breakout_down"]):
+        add("R-CANDLE-04", f"中長黑K收盤跌破盤整區下緣{float(consolidation_box['lower_neckline'].iloc[-1]):.2f}，橫盤跌破確認")
 
     return results

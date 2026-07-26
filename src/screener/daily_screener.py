@@ -48,6 +48,7 @@ from src.indicators.trend import (
 from src.indicators.volume_price import is_big_volume_vs_prev_day
 from src.patterns import chart_overlays
 from src.screener.screening_rules import narrow_range_bottom_breakout, slow_rally_channel_breakout
+from src.strategies.candle_mechanical import mechanical_long_trading_rule, mechanical_short_trading_rule
 from src.strategies.ma_strategies import (
     dual_ma_long_term_long_strategy,
     dual_ma_long_term_short_strategy,
@@ -486,6 +487,48 @@ def screen_breakaway_gap_down(df: pd.DataFrame, min_days: int = 60) -> dict | No
     }
 
 
+def screen_mechanical_long(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票的OHLCV資料判斷「今天」是否觸發R-CANDLE-32機械化多頭K線交易規則進場。
+
+    `mechanical_long_trading_rule()`本身就是完整的逐日狀態機(全書docstring明言是最接近
+    可直接程式化的規則：只用「前一日高低點」為唯一比較基準，不依賴任何K線型態辨識)，
+    這裡只需要跑一次整段序列、檢查「今天」的action是不是「進場」，entry_price/stop_loss
+    直接讀狀態機自己算出來的值，不需要另外計算。
+    """
+    if len(df) < min_days:
+        return None
+    high, low, close = df["high"], df["low"], df["close"]
+    result = mechanical_long_trading_rule(high, low, close)
+    t = len(close) - 1
+    if result["action"].iloc[t] != "進場":
+        return None
+    return {
+        "signal_name": "R-CANDLE-32機械化多頭K線交易規則（89%）",
+        "entry_price": float(result["entry_price"].iloc[t]),
+        "stop_loss": float(result["stop_loss"].iloc[t]),
+        "note": "收盤突破前一日高點進場；跌破前一日低點或觸及7%停損出場",
+    }
+
+
+def screen_mechanical_short(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票的OHLCV資料判斷「今天」是否觸發R-CANDLE-33機械化空頭K線交易規則進場，
+    是`screen_mechanical_long()`(R-CANDLE-32)的鏡射版本。
+    """
+    if len(df) < min_days:
+        return None
+    high, low, close = df["high"], df["low"], df["close"]
+    result = mechanical_short_trading_rule(high, low, close)
+    t = len(close) - 1
+    if result["action"].iloc[t] != "進場":
+        return None
+    return {
+        "signal_name": "R-CANDLE-33機械化空頭K線交易規則（89%）",
+        "entry_price": float(result["entry_price"].iloc[t]),
+        "stop_loss": float(result["stop_loss"].iloc[t]),
+        "note": "收盤跌破前一日低點放空；突破前一日高點或觸及7%停損回補",
+    }
+
+
 _SCREEN_FUNCTIONS = (
     screen_bull_short_term_entry,
     screen_bear_short_term_entry,
@@ -494,6 +537,8 @@ _SCREEN_FUNCTIONS = (
     screen_breakout_above_big_black_candle,
     screen_breakaway_gap_up,
     screen_breakaway_gap_down,
+    screen_mechanical_long,
+    screen_mechanical_short,
     screen_single_ma_short_term_long,
     screen_single_ma_short_term_short,
     screen_single_ma_mid_term_long,

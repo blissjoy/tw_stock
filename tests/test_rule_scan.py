@@ -501,3 +501,69 @@ def test_scan_golden_tier_reports_trend09_bear_change_warning(monkeypatch):
     results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
 
     assert "底底高" in results["R-TREND-09"]
+
+
+def test_scan_golden_tier_reports_candle01_when_prev_bar_signal_not_neutral(monkeypatch):
+    """R-CANDLE-01：前一日高低點支撐壓力，直接mock底層prev_bar_support_resistance_signal
+    驗證wiring，判斷邏輯本身已有專屬測試。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(
+        rule_scan, "prev_bar_support_resistance_signal",
+        lambda close, high, low, lookback=1: pd.Series(["買方力量轉強"] * len(df), index=df.index),
+    )
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-CANDLE-01"] == "買方力量轉強"
+
+
+def test_scan_golden_tier_skips_candle01_when_prev_bar_signal_neutral(monkeypatch):
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(
+        rule_scan, "prev_bar_support_resistance_signal",
+        lambda close, high, low, lookback=1: pd.Series(["多空未表態"] * len(df), index=df.index),
+    )
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "R-CANDLE-01" not in results
+
+
+def test_scan_golden_tier_reports_candle04_breakout_up(monkeypatch):
+    """R-CANDLE-04：橫盤突破確認，直接mock底層detect_consolidation_breakout驗證wiring，
+    橫盤/突破判斷邏輯本身已有tests/test_consolidation.py專屬測試。"""
+    df = _trend_df(60, "up")
+    fake_box = pd.DataFrame(
+        {
+            "breakout_up": [False] * (len(df) - 1) + [True],
+            "breakout_down": [False] * len(df),
+            "upper_neckline": [110.0] * len(df),
+            "lower_neckline": [95.0] * len(df),
+        },
+        index=df.index,
+    )
+    monkeypatch.setattr(rule_scan, "detect_consolidation_breakout", lambda o, h, l, c, min_bars=20: fake_box)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "橫盤突破確認" in results["R-CANDLE-04"]
+    assert "110.00" in results["R-CANDLE-04"]
+
+
+def test_scan_golden_tier_reports_candle04_breakdown(monkeypatch):
+    df = _trend_df(60, "up")
+    fake_box = pd.DataFrame(
+        {
+            "breakout_up": [False] * len(df),
+            "breakout_down": [False] * (len(df) - 1) + [True],
+            "upper_neckline": [110.0] * len(df),
+            "lower_neckline": [95.0] * len(df),
+        },
+        index=df.index,
+    )
+    monkeypatch.setattr(rule_scan, "detect_consolidation_breakout", lambda o, h, l, c, min_bars=20: fake_box)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "橫盤跌破確認" in results["R-CANDLE-04"]
+    assert "95.00" in results["R-CANDLE-04"]

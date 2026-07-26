@@ -2169,3 +2169,60 @@ R-LINE-14觸發1次、R-LINE-15觸發3次。
 技術指標3+量價1+支撐壓力5+缺口4+切線軌道線4+趨勢判定2+R-TREND-15算在均線那批一起提)。
 剩餘4大類：K棒型態(20)/經典型態總覽(22)/選股策略+綜合操作SOP(6)/停損停利資金管理(4)，
 共52條，繼續往下接。
+
+## 第8批「K棒型態」20條裡接上4條(2026-07-26)
+
+這批一開始的重大發現(修正了原本「未接入」的計算方式)：`src/patterns/latest_day_summary.py`
+的`detect_latest_day_candle_patterns()`早就已經呼叫了這批20條裡的**14條**底層判斷函式，
+只是這14條是透過「最新交易日分析」面板顯示型態名稱，不是透過`scan_golden_tier()`的
+`add(rule_id, note)`路徑回報，之前計算「未接入」時只檢查了`rule_scan.py`+
+`daily_screener.py`兩個路徑，漏算了這第三個既有路徑，導致原本以為的20條「未接入」
+其實已經有14條被接過了：R-CANDLE-06(高檔紅K黑K基本反轉型態)、R-CANDLE-08(高檔長黑覆蓋/
+dark_cloud_cover)、R-CANDLE-09(高檔長黑吞噬/bearish_engulfing_at_high，注意函式名跟
+規則描述「母子懷抱」對應關係已核對過)、R-CANDLE-10(高檔長黑貫穿/bearish_harami_at_high)、
+R-CANDLE-14(低檔黑K紅K基本反轉型態)、R-CANDLE-16(低檔長紅覆蓋/bullish_cover_low)、
+R-CANDLE-17(低檔長紅貫穿/bullish_harami_at_low)、R-CANDLE-18(低檔長紅吞噬/
+bullish_engulfing_at_low)、R-CANDLE-19(低檔長紅遭遇/bullish_piercing_at_low)、
+R-CANDLE-24(紡錘K線/is_spindle_candle)、R-CANDLE-26(上升三法/rising_three_methods)、
+R-CANDLE-28(上漲連3紅/rising_three_red_candles)、R-CANDLE-29(下降三法/
+falling_three_methods)、R-CANDLE-31(下跌連3黑/falling_three_black_candles)。另外
+R-CANDLE-25(槌子線與倒槌K線)也已經在更早的批次(K棒幾何R-CANDLE-05/13/25那批)接進
+`rule_scan.py`了，所以一開始就不在這次「未接入」清單裡。
+
+扣掉這15條，這批真正還沒接的只剩5條：
+
+- R-CANDLE-01(前一日高低點支撐壓力規則，信心88)：接進`rule_scan.py`，直接呼叫既有的
+  `prev_bar_support_resistance_signal()`(3態文字函式：買方力量轉強/賣方力量轉強/多空
+  未表態)，只在非中性狀態時回報。
+- R-CANDLE-04(K線橫盤突破確認規則，信心88)：接進`rule_scan.py`，重用`daily_screener.py`
+  的R-GAP-09/14已經在用的`detect_consolidation_breakout()`，橫盤天數門檻沿用同一個
+  工程估計值`min_bars=20`(書中無明確數字)。
+- R-CANDLE-32(機械化多頭K線交易規則，信心89)/R-CANDLE-33(機械化空頭K線交易規則，
+  信心89)：新增`screen_mechanical_long`/`screen_mechanical_short`到`daily_screener.py`
+  的`_SCREEN_FUNCTIONS`。`src/strategies/candle_mechanical.py`裡的`mechanical_long_
+  trading_rule`/`mechanical_short_trading_rule`本身書中docstring就明言是「全書最接近
+  可直接程式化的規則」——純粹的逐日狀態機，只用「前一日高低點」為唯一比較基準，7%
+  停損，不依賴任何K線型態辨識或趨勢位置，是這次少見的「不用動判斷邏輯、單純補一個
+  screen_*進場包裝」的乾淨案例。
+
+**確認排除、暫緩接入的1條**：
+- R-CANDLE-23(大量長紅K進場位置篩選規則，信心90)：`big_red_candle_entry_filter()`要求
+  10個布林參數，其中好幾個(`near_resistance_before_rise`/`is_bear_rebound`/
+  `consecutive_up_days_ge_3_at_high`等)依賴趨勢位置或多日事件追蹤，這兩種基礎設施都
+  還沒做。跟其他被趨勢位置卡住的規則不同的是：這條的失敗模式更危險——如果只算得出
+  部分布林參數、其餘用預設值硬湊，可能算出「可以買」的假訊號(該擋的危險位置沒被
+  正確標記為危險)，比乾脆不接風險更高，所以這條寧可先跳過。
+
+新增測試：`tests/test_rule_scan.py`新增4個測試(R-CANDLE-01觸發/中性不觸發、R-CANDLE-04
+突破/跌破觸發，皆mock底層函式驗證wiring)；`tests/test_daily_screener.py`新增4個測試
+(R-CANDLE-32/33觸發/不觸發驗證，用真實資料直接觸發不用mock，因為機械化規則本身就是
+純粹的逐日比較，不需要mock任何依賴)。618個測試全過。
+
+對本機真實db驗證：400檔股票掃「今天」，0筆crash，R-CANDLE-01觸發212次；R-CANDLE-04
+在同一批「今天」快照沒有觸發(單日事件本來就罕見，額外對全部2383檔股票的**全部歷史**
+跑`detect_consolidation_breakout()`交叉驗證，確認全歷史裡breakout_up觸發799次、
+breakout_down觸發387次，證實邏輯正確、不是bug，只是特定某一天剛好沒撞到)。
+
+**至此「信心≥80分且未接入」的114條規則裡，已逐批檢視完8大類、實際接上38條**(前7批34+
+K棒型態4)。剩餘3大類：經典型態總覽(22)/選股策略+綜合操作SOP(6)/停損停利資金管理(4)，
+共32條，繼續往下接。
