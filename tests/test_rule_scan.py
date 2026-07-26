@@ -1045,3 +1045,36 @@ def test_scan_golden_tier_reports_volprice11_support_zone_response(monkeypatch):
     results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
 
     assert results["R-VOLPRICE-11"] == "反彈"
+
+
+def test_scan_golden_tier_reports_classic22_bear_to_bull_break_rebound_high(monkeypatch):
+    """R-CLASSIC-22：往回找「最近一個在空頭趨勢中確認」的轉折底部(重用daily_bear_trend_
+    state，跟R-CLASSIC-13同一個「往回找確認時仍在該趨勢中的轉折點」模式)，這個底部之後
+    的走勢視為一段空頭反彈，bear_rebound_high是反彈期間(不含今天)至今的最高價，今天收盤
+    突破、昨天還沒突破才回報。用全平盤資料(而非_trend_df的平滑上升資料)才能精準控制哪一天
+    是反彈期間最高點，避免被平滑趨勢本身的自然漲幅干擾判斷。"""
+    dates = pd.date_range("2026-01-01", periods=60, freq="B")
+    df = pd.DataFrame(
+        {"open": [100.0] * 60, "high": [101.0] * 60, "low": [99.0] * 60, "close": [100.0] * 60, "volume": [1000] * 60},
+        index=dates,
+    )
+    fake_bottoms = [
+        TurningPoint(type="bottom", price=80, index=dates[20]),
+        TurningPoint(type="bottom", price=85, index=dates[40]),  # 底底高，確認is_bull_confirm
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_bottoms)
+    bear_state = pd.Series(False, index=df.index)
+    bear_state.iloc[20] = True
+    monkeypatch.setattr(rule_scan, "daily_bear_trend_state", lambda h, l, c, n=5: bear_state)
+    big_vol = pd.Series(False, index=df.index)
+    big_vol.iloc[20] = True
+    big_vol.iloc[-1] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    df.loc[dates[25], "high"] = 110.0  # 反彈期間最高價
+    df.loc[dates[-2], "close"] = 95.0  # 昨天還沒突破110
+    df.loc[dates[-1], ["close", "high"]] = [115.0, 116.0]  # 今天突破
+    monkeypatch.setattr(rule_scan, "bear_to_bull_break_rebound_high", lambda *a, **k: "突破空頭反彈高點，趨勢空轉多確認")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-CLASSIC-22"] == "突破空頭反彈高點，趨勢空轉多確認"

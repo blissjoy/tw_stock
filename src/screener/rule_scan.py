@@ -84,6 +84,7 @@ from src.indicators.volume_price import basic_volume, bear_decline_big_black_rol
 from src.patterns.chart_overlays import compute_trendlines
 from src.patterns.classic_patterns import (
     bear_rebound_consolidate_above_ma20_breakout,
+    bear_to_bull_break_rebound_high,
     big_black_breaks_uptrend_line,
     break_above_two_day_low_volume_high,
     break_below_down_channel,
@@ -849,5 +850,36 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
     classic16_note = low_zone_big_red_confirmation(big_red_count_16)
     if classic16_note and bool(is_at_low.iloc[-1]):
         add("R-CLASSIC-16", classic16_note)
+
+    # R-CLASSIC-22空轉多過空高大漲圖：往回找「最近一個在空頭趨勢中確認」的轉折底部(重用
+    # daily_bear_trend_state逐日狀態機，跟R-CLASSIC-13「往回找確認時仍在該趨勢中的轉折點」
+    # 同一個模式)，這個底部之後的走勢視為一段「空頭反彈」：bear_rebound_high是這段反彈期間
+    # (不含今天，避免今天自己的高點把自己算進門檻裡)至今的最高價；is_bull_confirm是「這個
+    # 底部之後有沒有出現更高的下一個底部」(首次底底高)；今天收盤突破bear_rebound_high、
+    # 昨天還沒突破才回報。
+    bear_state_series_22 = daily_bear_trend_state(high, low, close, n=5)
+    anchor_bottom_22, anchor_list_pos_22 = None, None
+    for pos in range(len(tp_bottoms) - 1, -1, -1):
+        tp = tp_bottoms[pos]
+        idx_pos_22 = close.index.get_loc(tp.index)
+        if idx_pos_22 < len(bear_state_series_22) and bool(bear_state_series_22.iloc[idx_pos_22]):
+            anchor_bottom_22, anchor_list_pos_22 = tp, pos
+            break
+    if anchor_bottom_22 is not None:
+        anchor_date_pos_22 = close.index.get_loc(anchor_bottom_22.index)
+        is_bear_reversal_22 = bool(big_vol_days.iloc[anchor_date_pos_22])
+        later_bottoms_22 = tp_bottoms[anchor_list_pos_22 + 1:]
+        is_bull_confirm_22 = any(tp.price > anchor_bottom_22.price for tp in later_bottoms_22)
+        rebound_window_22 = high.iloc[anchor_date_pos_22:-1]
+        bear_rebound_high_22 = float(rebound_window_22.max()) if len(rebound_window_22) > 0 else anchor_bottom_22.price
+        broke_today_22 = float(close.iloc[-1]) > bear_rebound_high_22
+        broke_yesterday_22 = len(close) > 1 and float(close.iloc[-2]) > bear_rebound_high_22
+        if broke_today_22 and not broke_yesterday_22:
+            classic22_note = bear_to_bull_break_rebound_high(
+                is_bear_reversal_22, is_bull_confirm_22, float(close.iloc[-1]),
+                bear_rebound_high_22, bool(big_vol_days.iloc[-1]),
+            )
+            if classic22_note:
+                add("R-CLASSIC-22", classic22_note)
 
     return results
