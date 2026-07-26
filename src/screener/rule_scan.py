@@ -40,10 +40,10 @@ from src.indicators.bollinger import (
     bollinger_sell_signal_2,
     bollinger_sell_signal_3,
 )
-from src.indicators.candles import candle_shadows, is_hammer_candle, is_inverted_hammer_candle, is_reversal_candle_at_high, is_reversal_candle_at_low, prev_bar_support_resistance_signal
+from src.indicators.candles import candle_shadows, is_black_candle, is_hammer_candle, is_inverted_hammer_candle, is_mid_long_black_candle, is_mid_long_red_candle, is_red_candle, is_reversal_candle_at_high, is_reversal_candle_at_low, prev_bar_support_resistance_signal
 from src.indicators.consolidation import detect_consolidation_breakout
 from src.indicators.crossovers import interpret_cross, is_death_cross, is_golden_cross
-from src.indicators.gaps import detect_gap, false_fill_reasons, is_true_fill
+from src.indicators.gaps import detect_gap, detect_island_reversal_bottom, false_fill_reasons, is_true_fill
 from src.indicators.granville import (
     granville_buy_signal_1,
     granville_buy_signal_2,
@@ -78,13 +78,34 @@ from src.indicators.support_resistance import (
 )
 from src.indicators.trend import bear_trend_change_warning, bull_trend_change_warning, daily_bear_trend_state, daily_bull_trend_state
 from src.indicators.trendlines import check_channel_breakdown, check_channel_breakout
-from src.indicators.volume_price import basic_volume, is_accumulation_volume, is_big_volume_vs_prev_day
+from src.indicators.volume_price import basic_volume, is_accumulation_volume, is_big_volume_vs_ma5, is_big_volume_vs_prev_day
 from src.patterns.chart_overlays import compute_trendlines
+from src.patterns.classic_patterns import (
+    bear_rebound_consolidate_above_ma20_breakout,
+    big_black_breaks_uptrend_line,
+    break_above_two_day_low_volume_high,
+    break_below_down_channel,
+    break_below_two_day_high_volume_low,
+    breakout_above_up_channel,
+    bull_to_bear_break_last_low,
+    chase_short_on_bounce_break,
+    double_bottom_platform_breakout,
+    double_top_neckline_break,
+    gap_down_black_reversal_at_high,
+    gap_down_continuation,
+    island_reversal,
+    ma_tangle_breakout,
+)
 from src.patterns.trend_state import TREND_BEAR, TREND_BULL, classify_trend_states_multi_horizon
+from src.screener.screening_rules import double_bottom_breakout_signal
+from src.strategies.ma_strategies import ma_tangle_breakout_long_entry
 
 MIN_DAYS = 30  # 均線/MACD/KD/RSI/布林通道都需要暖身天數，資料不足就整批不評估(不逐一判斷各自門檻)
 GAP_FILL_LOOKBACK = 20  # R-GAP-19/20往回搜尋「最近一次缺口」的天數上限，避免抓到太久以前已經沒有參考意義的舊缺口
 CANDLE04_CONSOLIDATION_MIN_BARS = 20  # R-CANDLE-04盤整天數門檻，書中無明確數字，跟R-GAP-09/14同一個工程估計值
+CLASSIC_TWO_DAY_VOLUME_LOOKBACK = 20  # R-CLASSIC-05/25往回搜尋「連續2日大量交易日」的天數上限，書中無明確數字
+CLASSIC_BOUNCE_LOOKBACK = 10  # R-CLASSIC-09往回搜尋「反彈紅K」的天數上限，書中無明確數字
+CLASSIC_ISLAND_LOOKBACK = 30  # R-CLASSIC-32往回搜尋孤島反轉「前一個向下缺口」的天數上限，書中無明確數字
 
 
 def _last_bool(series: pd.Series) -> bool:
@@ -445,5 +466,206 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         add("R-CANDLE-04", f"中長紅K收盤突破盤整區上緣{float(consolidation_box['upper_neckline'].iloc[-1]):.2f}，橫盤突破確認")
     if _last_bool(consolidation_box["breakout_down"]):
         add("R-CANDLE-04", f"中長黑K收盤跌破盤整區下緣{float(consolidation_box['lower_neckline'].iloc[-1]):.2f}，橫盤跌破確認")
+
+    # --- 經典型態總覽：本模組不重新實作任何底層判斷邏輯，只把上面已經算好的切線/轉折點/
+    # 缺口/均線糾結/雙頂雙底等building block「組」成書中33張精華圖描述的複合訊號，餵給
+    # src/patterns/classic_patterns.py裡對應的組合函式。today_idx指向「今天」那一列。
+    today_idx = len(close) - 1
+    avg_vol_5d = float(volume.iloc[-6:-1].mean()) if len(volume) >= 6 else float(volume.iloc[:-1].mean())
+    is_big_black_today = bool(is_mid_long_black_candle(open_, close).iloc[-1]) and float(volume.iloc[-1]) >= 2 * avg_vol_5d
+    is_big_red_today = bool(is_mid_long_red_candle(open_, close).iloc[-1]) and float(volume.iloc[-1]) >= 2 * avg_vol_5d
+    has_lower_high = len(tp_heads) >= 2 and tp_heads[-1].price <= tp_heads[-2].price
+
+    # R-CLASSIC-02大量長黑破切反轉圖：頭頭低+大量長黑+今天剛好跌破上升切線(重用R-LINE-11
+    # 已經算好的「今天角色變成壓力、昨天還不是」判斷，同一個跌破事件，不重新畫線)。
+    close_below_uptrend_line = (
+        up_tangent is not None and up_tangent.role == "resistance"
+        and (up_tangent_prev is None or up_tangent_prev.role != "resistance")
+    )
+    classic02_note = big_black_breaks_uptrend_line(has_lower_high, is_big_black_today, close_below_uptrend_line)
+    if classic02_note:
+        add("R-CLASSIC-02", classic02_note)
+
+    # R-CLASSIC-03大量雙頭反轉圖(M頭)：用最近2個轉折高點當雙頭，中間夾的最低轉折低點當頸線。
+    if len(tp_heads) >= 2:
+        head1, head2 = tp_heads[-2], tp_heads[-1]
+        between_bottoms_03 = [tp for tp in tp_bottoms if head1.index < tp.index < head2.index]
+        if between_bottoms_03:
+            neckline_03 = min(tp.price for tp in between_bottoms_03)
+            classic03_note = double_top_neckline_break(
+                head2.price <= head1.price, float(close.iloc[-1]) < neckline_03,
+                float(volume.iloc[-1]) >= 2 * avg_vol_5d,
+            )
+            if classic03_note:
+                add("R-CLASSIC-03", f"{classic03_note}（頸線約{neckline_03:.2f}）")
+
+    # R-CLASSIC-05高檔連2日大量被黑K跌破/R-CLASSIC-25低檔連2日大量被突破：書中的「高檔」/
+    # 「低檔」情境沒有另外的判定式，這裡不額外加趨勢位置門檻(跟R-SR-15/16同一個簡化原則)，
+    # 只往回找最近一次「連續2日大量」，多空各自檢查今天是否剛好跌破/突破這個2日大量區間
+    # (「今天」vs「昨天」比較，避免同一次事件連續多天重複回報)。
+    big_vol_days = is_big_volume_vs_ma5(volume, basic_volume(volume))
+    is_black_series = is_black_candle(open_, close)
+    cluster_low_05, cluster_high_05 = None, None
+    search_start_05 = max(today_idx - CLASSIC_TWO_DAY_VOLUME_LOOKBACK, 1)
+    for j in range(today_idx - 1, search_start_05, -1):
+        if bool(big_vol_days.iloc[j]) and bool(big_vol_days.iloc[j - 1]):
+            cluster_low_05 = min(float(low.iloc[j]), float(low.iloc[j - 1]))
+            cluster_high_05 = max(float(high.iloc[j]), float(high.iloc[j - 1]))
+            break
+
+    if cluster_low_05 is not None:
+        broke_low_today = float(close.iloc[today_idx]) < cluster_low_05 and bool(is_black_series.iloc[today_idx])
+        broke_low_yesterday = float(close.iloc[today_idx - 1]) < cluster_low_05
+        if broke_low_today and not broke_low_yesterday:
+            classic05_note = break_below_two_day_high_volume_low(
+                True, True, cluster_low_05, cluster_low_05, float(close.iloc[today_idx]), True,
+            )
+            if classic05_note:
+                add("R-CLASSIC-05", classic05_note)
+
+        broke_high_today = float(close.iloc[today_idx]) > cluster_high_05 and bool(big_vol_days.iloc[today_idx])
+        broke_high_yesterday = float(close.iloc[today_idx - 1]) > cluster_high_05
+        if broke_high_today and not broke_high_yesterday:
+            classic25_note = break_above_two_day_low_volume_high(
+                True, True, cluster_high_05, cluster_high_05, float(close.iloc[today_idx]), True,
+            )
+            if classic25_note:
+                add("R-CLASSIC-25", classic25_note)
+
+    # R-CLASSIC-07高檔跳空黑K回檔反轉圖：跳空黑K(重用today_gap)+跌破月線(月線下彎)+頭頭低+
+    # 底底低同時成立；KD死亡交叉(K/D今天剛好黃金/死亡交叉)可加強，非必要條件。
+    is_lower_low_07 = len(tp_bottoms) >= 2 and tp_bottoms[-1].price < tp_bottoms[-2].price
+    gap_down_big_volume_07 = (
+        today_gap is not None and today_gap.type == "down_gap" and float(volume.iloc[-1]) >= 2 * avg_vol_5d
+    )
+    is_break_ma20_07 = float(close.iloc[-1]) < ma20_now and str(ma20_direction.iloc[-1]) == "下彎"
+    kd_bearish_cross_07 = bool(
+        kd_df["K"].iloc[-1] < kd_df["D"].iloc[-1] and kd_df["K"].iloc[-2] >= kd_df["D"].iloc[-2]
+    )
+    classic07_note = gap_down_black_reversal_at_high(
+        gap_down_big_volume_07, is_break_ma20_07, has_lower_high, is_lower_low_07, kd_bearish_cross_07,
+    )
+    if classic07_note:
+        add("R-CLASSIC-07", classic07_note)
+
+    # R-CLASSIC-09反彈大量紅K跌破追空圖：空頭中(重用短期日線的頭頭低底底低分類trend_today)
+    # 往回找最近一根帶量反彈紅K，今天剛好跌破它的低點才回報。
+    if trend_today == TREND_BEAR:
+        is_red_series_09 = is_red_candle(open_, close)
+        search_start_09 = max(today_idx - CLASSIC_BOUNCE_LOOKBACK, 1)
+        for j in range(today_idx - 1, search_start_09, -1):
+            if bool(is_red_series_09.iloc[j]) and float(volume.iloc[j]) >= avg_vol_5d:
+                bounce_low_09 = float(low.iloc[j])
+                broke_today_09 = float(close.iloc[today_idx]) < bounce_low_09
+                broke_yesterday_09 = float(close.iloc[today_idx - 1]) < bounce_low_09
+                if broke_today_09 and not broke_yesterday_09:
+                    classic09_note = chase_short_on_bounce_break(True, True, bounce_low_09, float(close.iloc[today_idx]))
+                    if classic09_note:
+                        add("R-CLASSIC-09", classic09_note)
+                break
+
+    # R-CLASSIC-12缺口之下續空圖：重用R-GAP-19/20已經找到的最近一次缺口(recent_gap)，篩選
+    # 向下缺口且尚未真封口，今天收盤跌破盤整區下緣(重用R-CANDLE-04的consolidation_box)。
+    if recent_gap is not None and recent_gap.type == "down_gap":
+        gap_not_covered_12 = not is_true_fill(
+            recent_gap, is_black_today, is_red_today, has_long_shadow_today,
+            float(volume.iloc[-1]), avg_volume_20, float(close.iloc[-1]),
+        )
+        consolidation_low_12 = float(consolidation_box["lower_neckline"].iloc[-1])
+        ma20_broken_before_gap_12 = str(ma20_direction.iloc[-1]) == "下彎"
+        classic12_note = gap_down_continuation(
+            True, gap_not_covered_12, float(close.iloc[-1]) < consolidation_low_12, ma20_broken_before_gap_12,
+        )
+        if classic12_note:
+            add("R-CLASSIC-12", classic12_note)
+
+    # R-CLASSIC-13多轉空破多底大跌圖：往回找最近一個「當時仍在多頭趨勢中」確認的轉折低點
+    # (重用daily_bull_trend_state逐日狀態機)，今天剛好跌破才回報。
+    bull_state_series_13 = daily_bull_trend_state(high, low, close, n=5)
+    last_bull_low_13 = None
+    for tp in reversed(tp_bottoms):
+        idx_pos = close.index.get_loc(tp.index)
+        if idx_pos < len(bull_state_series_13) and bool(bull_state_series_13.iloc[idx_pos]):
+            last_bull_low_13 = tp.price
+            break
+    if last_bull_low_13 is not None:
+        broke_today_13 = float(close.iloc[-1]) < last_bull_low_13
+        broke_yesterday_13 = float(close.iloc[-2]) < last_bull_low_13
+        if broke_today_13 and not broke_yesterday_13:
+            classic13_note = bull_to_bear_break_last_low(
+                float(close.iloc[-1]), last_bull_low_13, float(volume.iloc[-1]) >= 2 * avg_vol_5d,
+            )
+            if classic13_note:
+                add("R-CLASSIC-13", classic13_note)
+
+    # R-CLASSIC-15跌破下降軌道線大跌圖/R-CLASSIC-33突破上升軌道線大漲圖：重用R-LINE-14/15
+    # 已經算好的軌道線(up_channel/down_channel)，多加一個「今天是大量長紅/長黑K」的門檻。
+    if down_channel is not None:
+        classic15_note = break_below_down_channel(float(close.iloc[-1]), float(down_channel.at(x_today)), is_big_black_today)
+        if classic15_note:
+            add("R-CLASSIC-15", classic15_note)
+    if up_channel is not None:
+        classic33_note = breakout_above_up_channel(float(close.iloc[-1]), float(up_channel.at(x_today)), is_big_red_today)
+        if classic33_note:
+            add("R-CLASSIC-33", classic33_note)
+
+    # R-CLASSIC-27空頭反彈在月線上盤整圖：重用R-CANDLE-04的consolidation_box，檢查「昨天
+    # 為止已經確立」的盤整區間裡每一天都站在月線之上，今天剛好帶量突破盤整區上緣。
+    prior_is_consolidating_27 = bool(consolidation_box["is_consolidating"].shift(1).iloc[-1])
+    if prior_is_consolidating_27:
+        group_len_27 = int(consolidation_box["group_len"].shift(1).iloc[-1])
+        window_low_27 = low.iloc[-1 - group_len_27:-1]
+        window_ma20_27 = ma20.iloc[-1 - group_len_27:-1]
+        stayed_above_ma20_27 = len(window_low_27) > 0 and bool((window_low_27 >= window_ma20_27).all())
+        is_breakout_27 = bool(consolidation_box["breakout_up"].iloc[-1])
+        classic27_note = bear_rebound_consolidate_above_ma20_breakout(stayed_above_ma20_27, is_breakout_27)
+        if classic27_note:
+            add("R-CLASSIC-27", classic27_note)
+
+    # R-CLASSIC-28雙盤底大量紅K突破圖：跟R-CLASSIC-03(雙頭)鏡射，用最近2個轉折低點當雙底，
+    # 中間夾的最高轉折高點當共同壓力線，直接呼叫書中原文指定沿用的雙盤底突破規則(R-SCREEN-13)。
+    if len(tp_bottoms) >= 2:
+        bottom1, bottom2 = tp_bottoms[-2], tp_bottoms[-1]
+        between_heads_28 = [tp for tp in tp_heads if bottom1.index < tp.index < bottom2.index]
+        if between_heads_28:
+            resistance_28 = max(tp.price for tp in between_heads_28)
+            breakout_signal_28 = double_bottom_breakout_signal(
+                bottom2.price >= bottom1.price, bool(is_red_candle(open_, close).iloc[-1]),
+                float(close.iloc[-1]), resistance_28, float(volume.iloc[-1]), avg_vol_5d,
+            )
+            classic28_note = double_bottom_platform_breakout(breakout_signal_28)
+            if classic28_note:
+                add("R-CLASSIC-28", f"{classic28_note}（壓力約{resistance_28:.2f}）")
+
+    # R-CLASSIC-30均線糾結紅K突破圖：書中原文直接沿用「均線糾結向上突破做多SOP」(R-MA-17)，
+    # 這裡只做直通，was_converged_yesterday重用R-MA-12已經在用的is_ma_tangled()。
+    was_converged_yesterday_30 = is_ma_tangled(ma_frame).shift(1).fillna(False)
+    convergence_high_30 = pd.concat(
+        [ma_frame["MA5"], ma_frame["MA10"], ma_frame["MA20"]], axis=1,
+    ).max(axis=1).shift(1)
+    ma_tangle_signal_30 = ma_tangle_breakout_long_entry(
+        close, volume, was_converged_yesterday_30, convergence_high_30, is_mid_long_red_candle(open_, close),
+    )
+    classic30_note = ma_tangle_breakout(bool(ma_tangle_signal_30.iloc[-1]))
+    if classic30_note:
+        add("R-CLASSIC-30", classic30_note)
+
+    # R-CLASSIC-32島型反轉圖：書中原文直接沿用「低檔島型反轉規則」，只在「今天」剛好出現
+    # 向上缺口(重用today_gap)時，往回找中間盤整、再更早的向下缺口，兩缺口不重疊才成立孤島。
+    if today_gap is not None and today_gap.type == "up_gap":
+        search_start_32 = max(today_idx - 1 - CLASSIC_ISLAND_LOOKBACK, 1)
+        for j in range(today_idx - 1, search_start_32 - 1, -1):
+            down_gap_32 = detect_gap(
+                prev_high=float(high.iloc[j - 1]), prev_low=float(low.iloc[j - 1]),
+                curr_high=float(high.iloc[j]), curr_low=float(low.iloc[j]),
+            )
+            if down_gap_32 is not None and down_gap_32.type == "down_gap":
+                consolidation_days_32 = today_idx - j - 1
+                island_dict = detect_island_reversal_bottom(down_gap_32, today_gap, consolidation_days_32)
+                if island_dict is not None:
+                    classic32_note = island_reversal(True)
+                    if classic32_note:
+                        add("R-CLASSIC-32", classic32_note)
+                break
 
     return results

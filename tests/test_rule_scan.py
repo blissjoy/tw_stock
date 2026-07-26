@@ -503,6 +503,233 @@ def test_scan_golden_tier_reports_trend09_bear_change_warning(monkeypatch):
     assert "底底高" in results["R-TREND-09"]
 
 
+def test_scan_golden_tier_reports_classic02_big_black_breaks_uptrend_line(monkeypatch):
+    """R-CLASSIC-02：每次掃描都會呼叫big_black_breaks_uptrend_line(無if閘門)，直接mock
+    它驗證wiring即可，底層邏輯本身已有tests/test_classic_patterns.py專屬測試。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "big_black_breaks_uptrend_line", lambda *a, **k: "空頭確認：上升切線轉壓力")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-CLASSIC-02"] == "空頭確認：上升切線轉壓力"
+
+
+def test_scan_golden_tier_reports_classic03_double_top_and_classic28_double_bottom(monkeypatch):
+    """R-CLASSIC-03(M頭頸線)/R-CLASSIC-28(雙盤底，鏡射)：用假轉折點組出「兩頭夾一底」與
+    「兩底夾一頭」，驗證頸線/壓力線的抓取邏輯，再mock最終組合函式驗證wiring。"""
+    df = _trend_df(60, "up")
+    dates = df.index
+    fake_points = [
+        TurningPoint(type="head", price=110, index=dates[10]),
+        TurningPoint(type="bottom", price=95, index=dates[20]),
+        TurningPoint(type="head", price=108, index=dates[30]),
+        TurningPoint(type="bottom", price=100, index=dates[40]),
+        TurningPoint(type="head", price=105, index=dates[50]),
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_points)
+    monkeypatch.setattr(rule_scan, "double_top_neckline_break", lambda *a, **k: "M頭頸線跌破，空頭確認")
+    monkeypatch.setattr(rule_scan, "double_bottom_breakout_signal", lambda *a, **k: True)
+    monkeypatch.setattr(rule_scan, "double_bottom_platform_breakout", lambda sig: "雙盤底大量紅K突破進場" if sig else None)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "M頭頸線跌破" in results["R-CLASSIC-03"]
+    assert "雙盤底" in results["R-CLASSIC-28"]
+
+
+def test_scan_golden_tier_reports_classic05_break_below_two_day_volume_low(monkeypatch):
+    """R-CLASSIC-05：往回找連續2日大量交易日(mock is_big_volume_vs_ma5)，今天黑K跌破這2日
+    低點、昨天還沒跌破才回報。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-5] = True
+    big_vol.iloc[-6] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    df.loc[idx[-6], ["open", "high", "low", "close"]] = [102, 103, 100, 101]
+    df.loc[idx[-5], ["open", "high", "low", "close"]] = [101, 102, 100, 101.5]
+    df.loc[idx[-2], ["open", "high", "low", "close"]] = [103, 104, 100.5, 103.5]
+    df.loc[idx[-1], ["open", "high", "low", "close"]] = [103, 103.5, 98, 99]
+    monkeypatch.setattr(rule_scan, "break_below_two_day_high_volume_low", lambda *a, **k: "跌破高檔連2日大量低點，一日反轉停利")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "一日反轉停利" in results["R-CLASSIC-05"]
+
+
+def test_scan_golden_tier_reports_classic25_break_above_two_day_volume_high(monkeypatch):
+    """R-CLASSIC-25：R-CLASSIC-05的多空鏡射版本(低檔連2日大量被突破)。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    big_vol = pd.Series(False, index=idx)
+    big_vol.iloc[-5] = True
+    big_vol.iloc[-6] = True
+    big_vol.iloc[-1] = True
+    monkeypatch.setattr(rule_scan, "is_big_volume_vs_ma5", lambda v, ma5v: big_vol)
+    df.loc[idx[-6], ["open", "high", "low", "close"]] = [100, 105, 99, 104]
+    df.loc[idx[-5], ["open", "high", "low", "close"]] = [104, 106, 103, 105]
+    df.loc[idx[-2], ["open", "high", "low", "close"]] = [100, 105.5, 99, 101]
+    df.loc[idx[-1], ["open", "high", "low", "close"]] = [101, 108, 100.5, 107]
+    monkeypatch.setattr(rule_scan, "break_above_two_day_low_volume_high", lambda *a, **k: "突破低檔連2日大量高點，一日反轉轉強")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "一日反轉轉強" in results["R-CLASSIC-25"]
+
+
+def test_scan_golden_tier_reports_classic07_gap_down_black_reversal_at_high(monkeypatch):
+    """R-CLASSIC-07：每次掃描都會呼叫gap_down_black_reversal_at_high(無if閘門)，直接mock
+    驗證wiring。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "gap_down_black_reversal_at_high", lambda *a, **k: "高檔跳空黑K回檔反轉，空頭確認")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert results["R-CLASSIC-07"] == "高檔跳空黑K回檔反轉，空頭確認"
+
+
+def test_scan_golden_tier_reports_classic09_chase_short_on_bounce_break(monkeypatch):
+    """R-CLASSIC-09：空頭趨勢中(_trend_df(60,"down")天然滿足頭頭低底底低)，往回找一根帶量
+    反彈紅K，今天跌破它的低點、昨天還沒跌破才回報。"""
+    df = _trend_df(60, "down")
+    idx = df.index
+    df.loc[idx[-5], ["open", "high", "low", "close", "volume"]] = [90, 96, 89, 95, 5000]
+    df.loc[idx[-4], ["open", "high", "low", "close"]] = [94, 95, 92, 93]
+    df.loc[idx[-3], ["open", "high", "low", "close"]] = [93, 94, 91, 92]
+    df.loc[idx[-2], ["open", "high", "low", "close"]] = [97, 98, 95, 96]
+    df.loc[idx[-1], ["open", "high", "low", "close"]] = [88, 89, 83, 85]
+    monkeypatch.setattr(
+        rule_scan, "classify_trend_states_multi_horizon",
+        lambda h, l, c: {
+            "短期": ("日線", rule_scan.TREND_BEAR, "mock"),
+            "中期": ("週線", rule_scan.TREND_BEAR, "mock"),
+            "長期": ("月線", rule_scan.TREND_BEAR, "mock"),
+        },
+    )
+    monkeypatch.setattr(rule_scan, "chase_short_on_bounce_break", lambda *a, **k: "跌破反彈紅K低點，追空點確認")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "追空點確認" in results["R-CLASSIC-09"]
+
+
+def test_scan_golden_tier_reports_classic12_gap_down_continuation(monkeypatch):
+    """R-CLASSIC-12：重用R-GAP-19/20已經在用的recent_gap往回搜尋機制，篩選向下缺口且尚未
+    真封口，直接mock最終組合函式驗證wiring。"""
+    df = _trend_df(60, "up")
+    prev_low = float(df["low"].iloc[-3])
+    df.loc[df.index[-2], ["open", "high", "low", "close"]] = [
+        prev_low - 5, prev_low - 4, prev_low - 6, prev_low - 4.5,
+    ]
+    monkeypatch.setattr(rule_scan, "is_true_fill", lambda *a, **k: False)
+    monkeypatch.setattr(rule_scan, "false_fill_reasons", lambda *a, **k: ["量縮，跌破力道不足"])
+    monkeypatch.setattr(rule_scan, "gap_down_continuation", lambda *a, **k: "缺口下再破底，續空/加碼放空點")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "續空" in results["R-CLASSIC-12"]
+
+
+def test_scan_golden_tier_reports_classic13_bull_to_bear_break_last_low(monkeypatch):
+    """R-CLASSIC-13：往回找最近一個「當時仍在多頭趨勢中」確認的轉折低點(mock
+    daily_bull_trend_state)，今天跌破、昨天還沒跌破才回報。"""
+    df = _trend_df(60, "up")
+    dates = df.index
+    fake_bottoms = [
+        TurningPoint(type="bottom", price=95, index=dates[20]),
+        TurningPoint(type="bottom", price=98, index=dates[40]),
+    ]
+    monkeypatch.setattr(rule_scan, "compute_turning_points", lambda h, l, c, n=5: fake_bottoms)
+    bull_state = pd.Series(False, index=df.index)
+    bull_state.iloc[40] = True
+    monkeypatch.setattr(rule_scan, "daily_bull_trend_state", lambda h, l, c, n=5: bull_state)
+    monkeypatch.setattr(rule_scan, "bull_to_bear_break_last_low", lambda *a, **k: "跌破多頭最後低點，多頭趨勢終結，快速下跌警訊")
+    df.loc[df.index[-2], "close"] = 99
+    df.loc[df.index[-1], "close"] = 90
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "多頭趨勢終結" in results["R-CLASSIC-13"]
+
+
+def test_scan_golden_tier_reports_classic15_break_below_down_channel(monkeypatch):
+    """R-CLASSIC-15：重用R-LINE-15已經算好的down_channel，直接mock最終組合函式驗證wiring。"""
+    df = _trend_df(60, "up")
+    channel = TrendLine(a=LinePoint(0, 90), b=LinePoint(1, 89), role="support")
+    monkeypatch.setattr(rule_scan, "compute_trendlines", lambda d, ma_window=5: {"down_channel": channel})
+    monkeypatch.setattr(rule_scan, "break_below_down_channel", lambda *a, **k: "支撐轉壓力，跌勢由緩降轉為急跌")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "急跌" in results["R-CLASSIC-15"]
+
+
+def test_scan_golden_tier_reports_classic33_breakout_above_up_channel(monkeypatch):
+    """R-CLASSIC-33：R-CLASSIC-15的鏡射版本(重用R-LINE-14的up_channel)。"""
+    df = _trend_df(60, "up")
+    channel = TrendLine(a=LinePoint(0, 90), b=LinePoint(1, 91), role="resistance")
+    monkeypatch.setattr(rule_scan, "compute_trendlines", lambda d, ma_window=5: {"up_channel": channel})
+    monkeypatch.setattr(rule_scan, "breakout_above_up_channel", lambda *a, **k: "漲勢自緩步盤堅轉為加速噴出，全書最強力多頭訊號")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "加速噴出" in results["R-CLASSIC-33"]
+
+
+def test_scan_golden_tier_reports_classic27_bear_rebound_consolidate_above_ma20_breakout(monkeypatch):
+    """R-CLASSIC-27：重用R-CANDLE-04的consolidation_box，「昨天為止」已經確立盤整才成立
+    前提(shift後看的是倒數第2天)，直接mock最終組合函式驗證wiring。"""
+    df = _trend_df(60, "up")
+    fake_box = pd.DataFrame(
+        {
+            "breakout_up": [False] * len(df),
+            "breakout_down": [False] * len(df),
+            "upper_neckline": [110.0] * len(df),
+            "lower_neckline": [95.0] * len(df),
+            "is_consolidating": [False] * (len(df) - 2) + [True, True],
+            "group_len": [1] * len(df),
+        },
+        index=df.index,
+    )
+    monkeypatch.setattr(rule_scan, "detect_consolidation_breakout", lambda o, h, l, c, min_bars=20: fake_box)
+    monkeypatch.setattr(rule_scan, "bear_rebound_consolidate_above_ma20_breakout", lambda *a, **k: "反彈站穩月線盤整後突破買點")
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "突破買點" in results["R-CLASSIC-27"]
+
+
+def test_scan_golden_tier_reports_classic30_ma_tangle_breakout(monkeypatch):
+    """R-CLASSIC-30：書中原文直接沿用「均線糾結向上突破做多SOP」(R-MA-17)，這裡只做直通，
+    mock底層ma_tangle_breakout_long_entry驗證wiring，真的ma_tangle_breakout()是純函式
+    直接讓它跑。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "ma_tangle_breakout_long_entry", lambda *a, **k: pd.Series(True, index=df.index))
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "均線糾結" in results["R-CLASSIC-30"]
+
+
+def test_scan_golden_tier_reports_classic32_island_reversal(monkeypatch):
+    """R-CLASSIC-32：往回找「今天」向上缺口之前的向下缺口+中間盤整天數(用真實價格造出
+    兩個真缺口，不mock detect_gap，避免影響R-GAP-01/19/20共用的偵測邏輯)，只mock最終的
+    低檔島型反轉判定+組合函式驗證wiring。"""
+    df = _trend_df(60, "up")
+    idx = df.index
+    gap_pos = len(idx) - 25
+    df.loc[idx[gap_pos], ["open", "high", "low", "close"]] = [55, 58, 50, 56]
+    for i in range(gap_pos + 1, len(idx) - 1):
+        df.loc[idx[i], ["open", "high", "low", "close"]] = [55, 58, 52, 56]
+    df.loc[idx[-1], ["open", "high", "low", "close"]] = [200, 205, 195, 202]
+    monkeypatch.setattr(rule_scan, "detect_island_reversal_bottom", lambda *a, **k: {"category": "低檔島型反轉"})
+    monkeypatch.setattr(rule_scan, "island_reversal", lambda sig: "島型反轉，強烈低檔反轉訊號" if sig else None)
+
+    results = {item["rule_id"]: item["note"] for item in scan_golden_tier(df)}
+
+    assert "島型反轉" in results["R-CLASSIC-32"]
+
+
 def test_scan_golden_tier_reports_candle01_when_prev_bar_signal_not_neutral(monkeypatch):
     """R-CANDLE-01：前一日高低點支撐壓力，直接mock底層prev_bar_support_resistance_signal
     驗證wiring，判斷邏輯本身已有專屬測試。"""
@@ -539,6 +766,8 @@ def test_scan_golden_tier_reports_candle04_breakout_up(monkeypatch):
             "breakout_down": [False] * len(df),
             "upper_neckline": [110.0] * len(df),
             "lower_neckline": [95.0] * len(df),
+            "is_consolidating": [False] * len(df),
+            "group_len": [1] * len(df),
         },
         index=df.index,
     )
@@ -558,6 +787,8 @@ def test_scan_golden_tier_reports_candle04_breakdown(monkeypatch):
             "breakout_down": [False] * (len(df) - 1) + [True],
             "upper_neckline": [110.0] * len(df),
             "lower_neckline": [95.0] * len(df),
+            "is_consolidating": [False] * len(df),
+            "group_len": [1] * len(df),
         },
         index=df.index,
     )
