@@ -346,6 +346,12 @@ class MainWindow(QMainWindow):
         """「大盤分析」分頁：跟個股分析共用同一套規則比對渲染邏輯(_build_analysis_html())，
         只是分析對象固定是大盤(TAIEX_STOCK_ID)，不是使用者目前選取的個股。
 
+        ⚠️ 2026-07-29修正：使用者反映不需要像個股分析那樣按鈕才展開——大盤只有一檔、
+        資料量固定，不會像候選清單那樣「選了才知道要分析誰」，改成K線圖(含MACD/KD/SAR)
+        跟規則比對清單都常駐顯示，不需要額外點擊；也移除了原本的「大盤分析」/「收合」
+        按鈕，改在_refresh_market_tab()裡於視窗啟動、手動抓取/立即重新篩選完成時主動
+        重新整理，確保顯示的一直是資料庫裡最新的大盤資料。
+
         這裡直接用QVBoxLayout(不是候選清單分頁那種QSplitter)包在QScrollArea裡——
         2026-07-29修正個股分析截斷bug時發現QSplitter不會把子元件sizeHint的變化轉發給
         外層QScrollArea，這裡沒有QSplitter，一般QVBoxLayout+QScrollArea(setWidgetResizable
@@ -360,24 +366,40 @@ class MainWindow(QMainWindow):
         market_scroll.setWidget(market_content)
         market_layout = QVBoxLayout(market_content)
 
-        self.market_analysis_btn = QPushButton("📊 大盤分析")
-        self.market_analysis_btn.setCheckable(True)
-        self.market_analysis_btn.setToolTip(f"顯示{TAIEX_DISPLAY_NAME}目前符合規則庫中哪些訊號，依信心分數排序")
-        self.market_analysis_btn.toggled.connect(self._on_market_analysis_toggled)
-        market_layout.addWidget(self.market_analysis_btn)
+        self.market_chart_view = QWebEngineView()
+        self.market_chart_view.setMinimumHeight(450)  # 避免在QScrollArea裡被壓縮到看不出圖表內容
+        market_layout.addWidget(self.market_chart_view)
+        # 跟self._chart_html_path(個股圖表用)分開的暫存檔案，避免兩個分頁互相覆寫對方的
+        # 圖表內容(見__init__裡_chart_html_path的說明：QWebEngineView.setHtml()對內容
+        # 大小有隱性限制，兩邊都是寫進暫存檔案再load()開啟)。
+        self._market_chart_html_path = Path(tempfile.gettempdir()) / f"tw_stock_market_chart_{id(self)}.html"
 
         self.market_analysis_view = QTextEdit()
         self.market_analysis_view.setReadOnly(True)
         self.market_analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.market_analysis_view.setVisible(False)
         market_layout.addWidget(self.market_analysis_view)
 
-        self.market_analysis_collapse_btn = QPushButton("🔼 收合大盤分析")
-        self.market_analysis_collapse_btn.setVisible(False)
-        self.market_analysis_collapse_btn.clicked.connect(lambda: self.market_analysis_btn.setChecked(False))
-        market_layout.addWidget(self.market_analysis_collapse_btn)
-
         market_layout.addStretch()
+
+        self._refresh_market_tab()
+
+    def _refresh_market_tab(self) -> None:
+        """重新整理「大盤分析」分頁的K線圖(含MACD/KD/SAR)與規則比對清單，在分頁初次建立、
+        手動抓取今日資料/立即重新篩選完成時都要呼叫，確保顯示的是資料庫裡最新的大盤資料。
+        """
+        if self.conn is None:
+            return
+        price_df = chart_data.load_price_history(self.conn, TAIEX_STOCK_ID)
+        if not price_df.empty:
+            holidays, _holidays_ok = chart_data.load_holidays_for_chart(price_df)
+            fig = chart_data.build_candlestick_figure(
+                price_df, holidays=holidays, ma_periods=FULL_PERIODS,
+                show_macd=True, show_kd=True, show_sar=True,
+            )
+            html_content = render_chart_html(fig, price_df, stock_label=TAIEX_DISPLAY_NAME)
+            self._market_chart_html_path.write_text(html_content, encoding="utf-8")
+            self.market_chart_view.load(QUrl.fromLocalFile(str(self._market_chart_html_path)))
+        self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
 
     # ------------------------------------------------------------------
     # 候選清單／圖表
@@ -691,20 +713,6 @@ class MainWindow(QMainWindow):
         stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
         self._set_analysis_html(self._build_analysis_html(self._current_stock_id, f"個股分析：{stock_label}"))
 
-    def _on_market_analysis_toggled(self, checked: bool) -> None:
-        self.market_analysis_view.setVisible(checked)
-        self.market_analysis_collapse_btn.setVisible(checked)
-        if checked:
-            self._refresh_market_analysis_view()
-
-    def _refresh_market_analysis_view(self) -> None:
-        """填入「大盤分析」面板內容，跟個股分析(_refresh_analysis_view())共用
-        _build_analysis_html()，分析對象固定是大盤(TAIEX_STOCK_ID)。"""
-        if self.conn is None:
-            self._set_market_analysis_html("<p>尚未連線資料庫。</p>")
-            return
-        self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
-
     def _set_market_analysis_html(self, html_content: str) -> None:
         """設定「大盤分析」面板內容並依實際內容量重新算出剛好的高度，跟_set_analysis_html()
         邏輯一致，但不需要呼叫_sync_central_height_to_content()——大盤分析分頁用的是
@@ -730,6 +738,7 @@ class MainWindow(QMainWindow):
         self._poll_pipeline_status()  # 立即刷新狀態列的「候選清單算至：...」，不等下一次5秒輪詢
         if self._current_stock_id:
             self._rerender_chart()
+        self._refresh_market_tab()
 
     def _on_fetch_clicked(self) -> None:
         if self._pipeline_worker is not None and self._pipeline_worker.isRunning():
@@ -749,6 +758,7 @@ class MainWindow(QMainWindow):
         self._refresh_date_list()
         self._reload_candidates()
         self._poll_pipeline_status()  # 立即刷新狀態列成「資料更新至：...」，不等下一次5秒輪詢
+        self._refresh_market_tab()  # 手動抓取也會更新大盤資料(見fetch_today_taiex())，一併刷新
         QMessageBox.information(self, "完成", f"今日資料抓取完成，候選清單共{candidate_count}檔。")
 
     def _on_fetch_failed(self, message: str) -> None:

@@ -82,7 +82,7 @@ def main() -> None:
 
     conn = get_conn()
 
-    def render_price_chart(stock_id: str, widget_key: str) -> None:
+    def render_price_chart(stock_id: str, widget_key: str, always_show_analysis: bool = False) -> None:
         price_df = load_price_history(conn, stock_id)
         if price_df.empty:
             st.warning(f"查無股票代號 {stock_id} 的價格資料。")
@@ -118,8 +118,12 @@ def main() -> None:
             show_sar = st.checkbox("顯示SAR", value=True, key=f"{widget_key}_sar_checkbox")
         analysis_state_key = f"{widget_key}_show_analysis"
         with col6:
-            if st.button("📊 個股分析", key=f"{widget_key}_analysis_btn"):
-                st.session_state[analysis_state_key] = not st.session_state.get(analysis_state_key, False)
+            # always_show_analysis=True(目前只有大盤分析用)時不需要這顆按鈕——大盤只有
+            # 一檔、資料量固定，不像候選清單那樣「選了才知道要分析誰」，直接常駐顯示
+            # 下面的分析框即可，不用多一次點擊。
+            if not always_show_analysis:
+                if st.button("📊 個股分析", key=f"{widget_key}_analysis_btn"):
+                    st.session_state[analysis_state_key] = not st.session_state.get(analysis_state_key, False)
         selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
 
         # 短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比畫K線圖用的顯示窗口
@@ -127,7 +131,7 @@ def main() -> None:
         # 「個股分析」面板與「最新交易日分析」摘要都要用，這裡只查一次共用。
         trend_df = load_price_history(conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
 
-        if st.session_state.get(analysis_state_key, False):
+        if always_show_analysis or st.session_state.get(analysis_state_key, False):
             with st.expander("📊 個股分析", expanded=True):
                 signal_matches = analyze_stock_signals(price_df, trend_df=trend_df)
                 if not signal_matches:
@@ -351,12 +355,11 @@ def main() -> None:
             render_price_chart(stock_id, widget_key="manual")
 
     with tab2:
-        taiex_state_key = "show_taiex_analysis"
-        if st.button("📊 大盤分析"):
-            st.session_state[taiex_state_key] = not st.session_state.get(taiex_state_key, False)
-        if st.session_state.get(taiex_state_key, False):
-            st.subheader(f"📈 {TAIEX_DISPLAY_NAME}")
-            render_price_chart(TAIEX_STOCK_ID, widget_key="taiex")
+        # 大盤只有一檔、資料量固定，不像候選清單那樣「選了才知道要分析誰」，切到這個分頁
+        # 就直接顯示K線圖(含MACD/KD/SAR)+規則比對清單，不需要按鈕才展開(跟桌面版一致，
+        # 見desktop/main_window.py的_refresh_market_tab()說明)。
+        st.subheader(f"📈 {TAIEX_DISPLAY_NAME}")
+        render_price_chart(TAIEX_STOCK_ID, widget_key="taiex", always_show_analysis=True)
 
 
 if __name__ == "__main__":

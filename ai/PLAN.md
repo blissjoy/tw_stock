@@ -3296,3 +3296,27 @@ prices()本身)；`tests/test_daily_screener.py`新增1個(load_trailing_frames�
 market='INDEX')。728個測試全過(720+8)。用真實本機DB(含剛回補的大盤資料)+Playwright
 實際截圖驗證兩個前端的Tab切換、「大盤分析」按鈕、規則比對清單、總結分析全部正確顯示，
 且兩前端讀同一份DB算出完全一致的規則比對結果(R-TREND-03 94%、R-SR-14 93%)。
+
+## 大盤分析拿掉按鈕、改成常駐顯示K線圖+規則分析(2026-07-29)
+
+使用者反映：大盤分析裡的「個股分析」按鈕不需要，應該直接顯示下方的分析框；最上面也應該
+顯示K線圖、MACD/KD這些。
+
+**桌面版**：`_build_market_tab()`移除`market_analysis_btn`/`market_analysis_collapse_
+btn`兩顆按鈕，新增`market_chart_view`(QWebEngineView)放在最上面，顯示`build_
+candlestick_figure(ma_periods=FULL_PERIODS, show_macd=True, show_kd=True,
+show_sar=True)`(固定參數、不像個股圖表那樣有勾選框可調整，大盤只有一檔沒有互動切換
+的必要)。新增`_refresh_market_tab()`統一負責重新整理圖表+分析文字，在分頁建立時、
+「立即重新篩選」/「手動抓取今日資料」完成時都呼叫，確保顯示的一直是最新大盤資料
+(先前只在按鈕點擊時才計算，現在改成常駐顯示後需要主動在資料變動時重新整理)。
+
+**Streamlit版**：`render_price_chart()`新增`always_show_analysis`參數——為True時
+跳過「📊 個股分析」按鈕、直接展開下面的分析expander，不影響個股查詢(drilldown/manual)
+原本「按鈕才展開」的行為。分頁2也移除原本包住整個`render_price_chart()`呼叫的外層
+「📊 大盤分析」按鈕，改成切到這個分頁就直接看到完整內容(呼叫時傳
+`always_show_analysis=True`)。
+
+用真實DB+Playwright截圖驗證兩前端：桌面版確認`market_analysis_btn`屬性已移除、
+`market_chart_view`存在、分析文字預設可見；Streamlit版確認分頁裡找不到「大盤分析」
+外層按鈕與「個股分析」內層按鈕，切換到分頁即直接看到K線圖(含MA/MACD/KD/SAR)與規則
+比對清單+總結分析。728個測試全過(UI層改動，無新增可獨立測試的純函式)。
