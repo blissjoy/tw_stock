@@ -168,6 +168,13 @@ def main() -> None:
                     st.write(f"信心最高的訊號：{top['rule_id']}　{top['title']}（{top['confidence']}%）")
                     if top_note:
                         st.caption(f"目前狀態：{top_note}")
+                # 面板展開後可能撐得很長(訊號一多)，使用者反映展開後要收合得捲回最上面
+                # 重新點一次上面col6的按鈕很麻煩——在展開內容最下方(不管有沒有符合任何
+                # 規則都顯示)再放一個「收合」按鈕，點了直接把狀態設回False並rerun，
+                # 不用捲動頁面。
+                if st.button("🔼 收合個股分析", key=f"{widget_key}_analysis_collapse_btn"):
+                    st.session_state[analysis_state_key] = False
+                    st.rerun()
         # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到6條、
         # 會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。
         sr_levels = []

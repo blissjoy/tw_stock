@@ -304,6 +304,15 @@ class MainWindow(QMainWindow):
         self.analysis_view.setVisible(False)
         bottom_layout.addWidget(self.analysis_view)
 
+        # 面板展開後可能撐得很高(訊號一多，見_set_analysis_html())，使用者反映展開後
+        # 要收合得捲回最上面重新點一次上面的按鈕很麻煩——在面板正下方另外放一個「收合」
+        # 按鈕，點了直接取消勾選analysis_btn(觸發跟上面按鈕完全相同的_on_analysis_
+        # toggled(False)邏輯)，不用捲動視窗。
+        self.analysis_collapse_btn = QPushButton("🔼 收合個股分析")
+        self.analysis_collapse_btn.setVisible(False)
+        self.analysis_collapse_btn.clicked.connect(lambda: self.analysis_btn.setChecked(False))
+        bottom_layout.addWidget(self.analysis_collapse_btn)
+
         self.chart_view = QWebEngineView()
         self.chart_view.setMinimumHeight(450)  # 避免在QScrollArea裡被壓縮到看不出圖表內容
         bottom_layout.addWidget(self.chart_view, stretch=1)
@@ -508,6 +517,7 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_toggled(self, checked: bool) -> None:
         self.analysis_view.setVisible(checked)
+        self.analysis_collapse_btn.setVisible(checked)
         if checked:
             self._refresh_analysis_view()
         else:

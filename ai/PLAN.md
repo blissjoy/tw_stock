@@ -3217,3 +3217,24 @@ Qt行為限制，不是本次要解決的截斷問題)，只是外層捲軸底�
 標題同時含多空兩字歸入其他)。720個測試全過(717+3)。用真實本機DB實際展開2330台積電的
 個股分析面板、捲到最底部截圖確認不再截斷；桌面版與Streamlit版都截圖確認「總結分析」
 正確顯示且內容一致。
+
+## 個股分析展開時新增「收合」按鈕(2026-07-29)
+
+使用者反映：個股分析展開後內容可能很長，要收合得先捲回最上面重新點一次按鈕，很麻煩——
+應該在展開內容下方也放一個收合按鈕。
+
+**desktop/main_window.py**：在`analysis_view`正下方新增`self.analysis_collapse_btn`
+(QPushButton「🔼 收合個股分析」)，預設隱藏；點擊直接呼叫`self.analysis_btn.
+setChecked(False)`，觸發跟上面按鈕完全相同的`_on_analysis_toggled(False)`邏輯，不用
+自己重複收合/高度同步的程式碼。`_on_analysis_toggled()`同步這顆按鈕的顯示/隱藏狀態
+(跟`analysis_view`一致)。用真實DB實際展開2330台積電、捲到底部確認按鈕正確顯示在最後
+一條規則+總結分析下方，點擊後確認`analysis_view`/`analysis_collapse_btn`都正確隱藏、
+`analysis_btn`正確變回未勾選狀態。
+
+**dashboard/app.py**：在`st.expander`展開內容最下方(不管有沒有符合任何規則都顯示，
+不是只在有符合規則時才顯示)新增`st.button("🔼 收合個股分析")`，點擊後把
+`analysis_state_key`設回False並呼叫`st.rerun()`——跟最上面col6按鈕開啟面板用的是
+同一組session_state機制，只是反向操作。用Playwright實際截圖確認按鈕正確顯示在
+「總結分析」段落下方、K線圖上方。
+
+720個測試全過(邏輯改動集中在UI層，沒有新增可獨立測試的純函式)。
