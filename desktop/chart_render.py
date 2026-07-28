@@ -24,6 +24,18 @@ Plotly原生的hover/spike設定，兩個前端都適用，只是效果沒有這
 不再需要傳title給build_candlestick_figure，這裡也把它清空)，改成跟資訊框一樣的固定CSS
 像素定位，兩者用相同機制、高度用相同基準，才不會隨圖表高度改變而錯位——`stock_label`
 (股票代號+名稱)是新的第二列固定資訊框，畫在原本資訊框下方。
+
+⚠️ 2026-07-29新增：使用者要求仿TradingView，滑鼠十字線要在Y軸顯示對應的價格數值——原生
+的`yaxis.showspikes`(spikesnap="cursor")本來就會畫出跟著滑鼠實際高度走的水平線，但Plotly
+沒有內建在軸上顯示對應數值的機制。這裡改用原生`mousemove`事件(不是`plotly_hover`——後者
+在`hovermode="x"`下只回傳「離游標最近的資料點」，會被離散資料點snap住，不會是游標實際的
+連續高度)取得游標在整個圖表容器裡的像素座標(`evt.offsetY`)，換算成價格子圖(row1)的資料
+座標：用`gd._fullLayout._size`(繪圖區域相對整個容器的像素邊界)與`gd._fullLayout.yaxis.domain`
+(row1的y軸在繪圖區域裡佔的比例)算出row1的像素上下界，再依`yaxis.range`線性內插得到價格。
+這裡用到的`_fullLayout`/`_size`是plotly.js內部(非公開文件化)的屬性，但這個模組本來就只給
+桌面版透過`include_plotlyjs=True`整包內嵌的固定版本使用(不會被外部CDN偷偷升級版本)，風險
+可控；如果之後升級plotly套件版本導致這幾個內部屬性改名/消失，這個Y軸價格標籤會悄悄失效
+(不影響其他功能，因為包在try/catch裡)，屆時需要重新對照新版plotly.js原始碼調整。
 """
 
 from __future__ import annotations
@@ -122,6 +134,43 @@ def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id
     var labelBox = makeFixedBox('28px');
     labelBox.innerHTML = '<b>' + {stock_label_json} + '</b>';
 
+    // 仿TradingView的Y軸價格標籤：跟著滑鼠游標的實際高度顯示對應價格，不是snap到最近
+    // 的資料點(customdata裡的OHLC值)。定位在價格子圖(row1)的y軸左側，只在游標落在row1
+    // 的垂直範圍內才顯示，滑鼠移到成交量/MACD/KD子圖或離開圖表時隱藏。
+    var priceAxisBox = document.createElement('div');
+    priceAxisBox.style.position = 'absolute';
+    priceAxisBox.style.left = '2px';
+    priceAxisBox.style.zIndex = 1000;
+    priceAxisBox.style.fontSize = '12px';
+    priceAxisBox.style.fontFamily = 'sans-serif';
+    priceAxisBox.style.color = '#fff';
+    priceAxisBox.style.background = '#333333';
+    priceAxisBox.style.padding = '1px 5px';
+    priceAxisBox.style.borderRadius = '3px';
+    priceAxisBox.style.pointerEvents = 'none';
+    priceAxisBox.style.whiteSpace = 'nowrap';
+    priceAxisBox.style.display = 'none';
+    gd.parentElement.insertBefore(priceAxisBox, gd);
+
+    // 把游標在整個圖表容器裡的像素高度(offsetY)換算成價格子圖(row1)的資料值：先用
+    // gd._fullLayout._size(繪圖區域相對容器的像素邊界)+row1的yaxis.domain(佔繪圖區域
+    // 的比例)算出row1的像素上下界，游標超出這個範圍代表不在價格子圖裡，回傳null。
+    function getPriceAtCursorY(offsetY) {{
+        try {{
+            var size = gd._fullLayout._size;
+            var yaxis = gd._fullLayout.yaxis;
+            var domain = yaxis.domain;
+            var rowTopPx = size.t + size.h * (1 - domain[1]);
+            var rowBottomPx = size.t + size.h * (1 - domain[0]);
+            if (offsetY < rowTopPx || offsetY > rowBottomPx) return null;
+            var frac = (offsetY - rowTopPx) / (rowBottomPx - rowTopPx);
+            var range = yaxis.range;
+            return range[1] - frac * (range[1] - range[0]);
+        }} catch (e) {{
+            return null;
+        }}
+    }}
+
     function fmtRow(d) {{
         var color = d[4] >= d[1] ? '#c0392b' : '#1a1a1a';
         return '<b>' + d[0] + '</b>&nbsp;&nbsp;開<span style="color:' + color + '">' + d[1].toFixed(2)
@@ -208,6 +257,22 @@ def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id
         }}
         relayoutUpdate.shapes = [];
         Plotly.relayout(gd, relayoutUpdate);
+    }});
+
+    // 原生mousemove(不是plotly_hover)：拿到游標在容器裡的連續像素高度，才能算出跟游標
+    // 實際高度一致的價格(plotly_hover在hovermode="x"下只會回傳snap到最近資料點的值)。
+    gd.addEventListener('mousemove', function(evt) {{
+        var price = getPriceAtCursorY(evt.offsetY);
+        if (price === null) {{
+            priceAxisBox.style.display = 'none';
+            return;
+        }}
+        priceAxisBox.style.display = 'block';
+        priceAxisBox.style.top = (evt.offsetY - 9) + 'px';
+        priceAxisBox.innerHTML = price.toFixed(2);
+    }});
+    gd.addEventListener('mouseleave', function(evt) {{
+        priceAxisBox.style.display = 'none';
     }});
     """
 

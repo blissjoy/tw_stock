@@ -76,6 +76,20 @@ def test_render_chart_html_embeds_div_id_and_hover_js_hooks():
     assert "drawVerticalLine" in html
 
 
+def test_render_chart_html_embeds_y_axis_price_crosshair_js_hooks():
+    """仿TradingView：滑鼠十字線要在Y軸顯示游標對應的價格數值，見chart_render.py
+    2026-07-29新增的getPriceAtCursorY()+mousemove監聽。"""
+    df = _sample_df()
+    fig = chart_data.build_candlestick_figure(df)
+
+    html = render_chart_html(fig, df)
+
+    assert "getPriceAtCursorY" in html
+    assert "priceAxisBox" in html
+    assert "mousemove" in html
+    assert "mouseleave" in html
+
+
 def test_render_chart_html_customdata_json_is_valid_and_matches_row_count():
     df = _sample_df(n=4)
     fig = chart_data.build_candlestick_figure(df)

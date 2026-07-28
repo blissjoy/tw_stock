@@ -96,7 +96,7 @@ def main() -> None:
         trendlines = chart_overlays.compute_trendlines(price_df)
         trendline_options = [chart_data.TRENDLINE_LABELS[key] for key in chart_data.TRENDLINE_LABELS if key in trendlines]
         label_to_key = {v: k for k, v in chart_data.TRENDLINE_LABELS.items()}
-        col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
+        col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
         with col1:
             if trendline_options:
                 selected_trendline_labels = st.multiselect(
@@ -111,8 +111,10 @@ def main() -> None:
             show_macd = st.checkbox("顯示MACD", value=True, key=f"{widget_key}_macd_checkbox")
         with col4:
             show_kd = st.checkbox("顯示KD", value=True, key=f"{widget_key}_kd_checkbox")
-        analysis_state_key = f"{widget_key}_show_analysis"
         with col5:
+            show_sar = st.checkbox("顯示SAR", value=True, key=f"{widget_key}_sar_checkbox")
+        analysis_state_key = f"{widget_key}_show_analysis"
+        with col6:
             if st.button("📊 個股分析", key=f"{widget_key}_analysis_btn"):
                 st.session_state[analysis_state_key] = not st.session_state.get(analysis_state_key, False)
         selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
@@ -142,7 +144,12 @@ def main() -> None:
                             for extra_line in note_lines[1:]:
                                 st.caption(f"　　{extra_line}")
                         if m["description"]:
-                            st.write(m["description"])
+                            # 「分析：」明確標示這段是「為什麼」的解說(ai/zhu-rules/裡每條規則的
+                            # 「解讀」欄位)，不是「目前狀態」的延續文字——股市新手最常問的就是
+                            # 「為什麼這個狀態下不能／可以進場」，這裡的解讀內容本來就有回答
+                            # 這個問題(例如R-INDICATOR-09說明為什麼盤整時KD交叉訊號無效)，
+                            # 只是原本沒有標籤、容易被當成普通補充文字略過不看。
+                            st.write(f"分析：{m['description']}")
                         if m.get("reference"):
                             st.caption(f"原文與頁碼：{m['reference']}")
                         st.divider()
@@ -160,7 +167,7 @@ def main() -> None:
                 price_df, title=chart_title, holidays=holidays, ma_periods=selected_periods,
                 trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
                 sr_levels=sr_levels, show_support_resistance=show_sr,
-                show_macd=show_macd, show_kd=show_kd,
+                show_macd=show_macd, show_kd=show_kd, show_sar=show_sar,
             ),
             use_container_width=True,
         )

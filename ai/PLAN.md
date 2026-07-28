@@ -3132,3 +3132,50 @@ flip_days_ago的多種情境、方向不符時強制回傳False)；`tests/test_c
 `sar_flip_option`整合)。713個測試全過(697+11+5)。另外用真實本機DB跑`desktop/
 main_window.py`的smoke test，確認勾選SAR翻轉篩選前後候選數量正確變化
 (102→2，切換空頭/5天→23)，無crash。
+
+## K線圖疊加SAR點位、Y軸游標價格標籤、個股分析新增「分析」說明+自動撐高(2026-07-29)
+
+使用者一次提出4個需求：①K線圖上呈現每根K棒的SAR點位；②滑鼠十字線的Y軸要顯示對應價格
+(仿TradingView)；③個股分析「目前狀態」下方多一行「分析：」說明為什麼(方便新手學習)；
+④個股分析展開面板列數太小，不要在小框框裡另外捲動。
+
+**①SAR點位**：`src/presentation/chart_data.py`的`load_price_history()`用讀取進來的完整
+緩衝歷史(裁切顯示窗口前)算好`SAR`/`SAR_BULL`欄位(呼叫`src/indicators/parabolic_sar.
+compute_sar()`，跟MA/MACD/KD的warm-up buffer同一套邏輯，讓SAR的加速因子有暖身期)。
+`build_candlestick_figure()`新增`show_sar`參數，多頭(SAR在K棒下方)畫綠點、空頭畫紅點，
+兩個前端(`desktop/main_window.py`的「顯示SAR」checkbox、`dashboard/app.py`同名checkbox)
+都有加，預設打勾。用真實本機DB資料(2330)實際渲染確認SAR點位在多空翻轉處正確切換顏色。
+
+**②Y軸游標價格標籤**：只加在`desktop/chart_render.py`(桌面版專屬，跟既有的十字線貫穿
+機制同一個檔案)——原生`yaxis.showspikes`(spikesnap="cursor")本來就會畫出跟著滑鼠實際
+高度走的水平線，但沒有內建的數值標籤。新增`getPriceAtCursorY()`：用原生`mousemove`事件
+(不是`plotly_hover`，後者在`hovermode="x"`下只會snap到最近資料點)取得游標像素座標，配合
+`gd._fullLayout._size`/`yaxis.domain`/`yaxis.range`換算出價格子圖(row1)的資料值，畫一個
+跟著游標高度浮動的價格標籤，游標移到成交量/MACD/KD子圖或離開圖表時自動隱藏。這裡用到
+plotly.js內部(非公開文件化)的`_fullLayout`屬性，docstring已註明風險與理由(桌面版整包內嵌
+固定版本plotly.js，風險可控)。用Playwright實際載入渲染出的HTML、模擬滑鼠移到不同高度，
+確認標籤數值隨高度正確變化(例如y=200時顯示"2257.78"、y=350時顯示"1811.36"，且移到下方
+子圖時正確隱藏)。
+
+**③「分析：」標籤**：`dashboard/app.py`與`desktop/main_window.py`顯示規則比對結果時，
+「目前狀態：...」下方原本就有顯示`m['description']`(`ai/zhu-rules/`每條規則的「解讀」
+欄位)，但沒有標籤、容易被當成不重要的補充文字略過——「解讀」欄位其實已經包含「為什麼」
+的說明(例如R-INDICATOR-09的解讀本來就解釋了為什麼盤整時KD交叉訊號無效)，只是缺一個
+明確標籤讓新手知道這裡要看。改成固定加上「分析：」前綴，不用另外設計新的規則專屬動態
+說明系統(範圍過大，且既有「解讀」內容已經足夠回答「為什麼」)。
+
+**④個股分析自動撐高**：`desktop/main_window.py`的`analysis_view`(QTextEdit)原本
+`setMaximumHeight(200)`寫死上限，訊號一多內容塞不下，QTextEdit自己的垂直捲軸就會出現，
+變成使用者要在小框框裡另外捲動一次。改成新增`_set_analysis_html()`統一入口(取代所有
+直接呼叫`analysis_view.setHtml()`的地方)：設定內容後用`document().size().height()`
+動態算出剛好的高度、`setFixedHeight()`，並關閉QTextEdit自己的垂直捲軸——多出來的部分
+交給最外層的`outer_scroll`(整個視窗)捲動，只有一層捲軸。Streamlit版原本就是`st.expander`
+自然撐高，沒有這個問題，不用改。用真實本機DB實際建立`MainWindow`確認`analysis_view`
+高度從固定200px變成依內容動態撐高到1986px(2330台積電當天符合的規則清單)，且HTML內容
+正確包含「分析：」字樣。
+
+新增測試：`tests/test_chart_data.py`新增3個(SAR疊圖開關/欄位缺漏防護、`load_price_
+history()`含SAR欄位)；`tests/test_chart_render.py`新增1個(驗證Y軸價格標籤的JS hook
+都有被嵌入HTML)。717個測試全過(713+4)。另外用Playwright實際渲染桌面版與Streamlit版
+畫面拍照驗證(SAR點位顏色、游標高度對應價格數值、分析面板「分析：」標籤與自動撐高)，
+確認兩個前端行為一致。

@@ -346,6 +346,13 @@ def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
     df = df.join(compute_ma_set(df["close"], periods=FULL_PERIODS))
     df = df.join(compute_macd(df["close"]))  # 欄位DIF/MACD/OSC，朱老師書中固定參數12/26/9(EMA)
     df = df.join(compute_kd(df["high"], df["low"], df["close"]))  # 欄位K/D，常用KD(9,3,3)參數
+    # 欄位SAR/SAR_BULL，用join前(尚未.tail(days)裁切)的完整緩衝歷史計算，讓SAR的加速因子
+    # 有跟MA/MACD/KD warm-up同等級的暖身期(見src/indicators/parabolic_sar.py，引用來源
+    # 說明)，不是只用最後顯示窗口(days)那一小段重新起算，避免顯示窗口越窄、SAR初始種子
+    # 誤差佔比越高的問題。
+    sar_bull, sar_values = compute_sar(df["high"], df["low"], df["close"])
+    df["SAR"] = sar_values
+    df["SAR_BULL"] = sar_bull
     return df.tail(days)
 
 
@@ -403,12 +410,12 @@ def build_candlestick_figure(
     df: pd.DataFrame, title: str = "", holidays: list[str] | None = None, ma_periods: tuple[int, ...] = (),
     trendlines: dict | None = None, show_trendline_keys: tuple[str, ...] = (),
     sr_levels: list[dict] | None = None, show_support_resistance: bool = False,
-    show_macd: bool = False, show_kd: bool = False,
+    show_macd: bool = False, show_kd: bool = False, show_sar: bool = False,
 ):
-    """把OHLC資料畫成K線圖(非線圖)+下方成交量子圖，可疊加均線/切線軌道線/支撐壓力，並可選擇
-    在最下方再疊加MACD/KD子圖。漲用紅、跌用黑，比照書中與規則庫(candles.py)一貫的紅K/黑K
-    命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的綠漲紅跌相反)；成交量長條比照同一套
-    配色，當天收紅用紅色、收黑用黑色。
+    """把OHLC資料畫成K線圖(非線圖)+下方成交量子圖，可疊加均線/切線軌道線/支撐壓力/SAR點位，
+    並可選擇在最下方再疊加MACD/KD子圖。漲用紅、跌用黑，比照書中與規則庫(candles.py)一貫的
+    紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的綠漲紅跌相反)；成交量長條比照
+    同一套配色，當天收紅用紅色、收黑用黑色。
 
     holidays: 該資料範圍內的休市日期清單("YYYY-MM-DD")，連同週末一起設成x軸的
     rangebreaks，避免非交易日在圖上留白間斷(維持真正的日期型x軸，不是改用category型)。
@@ -422,6 +429,10 @@ def build_candlestick_figure(
     show_macd/show_kd: 是否在成交量子圖下方各自再加一列MACD(DIF/MACD訊號線/OSC柱狀體)、
     KD(K/D線，含80/20參考線)子圖，對應df裡由load_price_history算好的DIF/MACD/OSC/K/D欄位；
     欄位不存在時(例如舊呼叫端傳入的df沒有這些欄位)直接跳過不畫，不會crash。
+    show_sar: 是否在價格子圖疊加每根K棒的SAR點位(對應df裡由load_price_history()算好的
+    SAR/SAR_BULL欄位，見src.indicators.parabolic_sar引用來源說明)，多頭(SAR在K棒下方)用
+    綠點、空頭(SAR在K棒上方)用紅點——這是SAR圖表的通用畫法慣例，跟本專案K棒本身「紅漲黑跌」
+    的配色是兩套獨立慣例，不會互相衝突混淆。欄位不存在時直接跳過不畫，不會crash。
     """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -451,6 +462,16 @@ def build_candlestick_figure(
         fig.add_trace(go.Scatter(
             x=df.index, y=df[col], mode="lines", name=col,
             line=dict(color=MA_COLORS.get(n, "#999999"), width=1.3),
+        ), row=1, col=1)
+
+    if show_sar and {"SAR", "SAR_BULL"}.issubset(df.columns):
+        sar_colors = [
+            "#27ae60" if pd.notna(bull) and bull else "#c0392b"
+            for bull in df["SAR_BULL"]
+        ]
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["SAR"], mode="markers", name="SAR",
+            marker=dict(size=4, color=sar_colors, symbol="circle"),
         ), row=1, col=1)
 
     for key in show_trendline_keys:

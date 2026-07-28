@@ -274,6 +274,11 @@ class MainWindow(QMainWindow):
         self.kd_checkbox.setChecked(True)
         self.kd_checkbox.stateChanged.connect(self._rerender_chart)
         controls_row.addWidget(self.kd_checkbox)
+
+        self.sar_checkbox = QCheckBox("顯示SAR")
+        self.sar_checkbox.setChecked(True)
+        self.sar_checkbox.stateChanged.connect(self._rerender_chart)
+        controls_row.addWidget(self.sar_checkbox)
         controls_row.addStretch()
 
         self.analysis_btn = QPushButton("📊 個股分析")
@@ -286,9 +291,15 @@ class MainWindow(QMainWindow):
         # 「個股分析」內嵌展開面板：預設隱藏，按下上面的按鈕才顯示/計算內容，跟切換均線/切線
         # 那些checkbox不同(那些是「一定要顯示圖表」的常態設定)，這是選擇性才需要的額外資訊，
         # 不用一直佔畫面空間。
+        #
+        # ⚠️ 2026-07-29修正：原本用setMaximumHeight(200)固定高度，符合規則的訊號一多，內容
+        # 塞不進200px，QTextEdit自己的捲軸就會出現——使用者反映「要在小框框裡捲動」體驗很差。
+        # 改成不設上限高度，改由_resize_analysis_view_to_content()依實際內容量動態算出
+        # 剛好的高度(setFixedHeight)，關掉QTextEdit自己的垂直捲軸，讓內容多的時候由最外層
+        # 的outer_scroll(整個視窗)捲動，不是在這個小框框內部另外捲動一次。
         self.analysis_view = QTextEdit()
         self.analysis_view.setReadOnly(True)
-        self.analysis_view.setMaximumHeight(200)
+        self.analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.analysis_view.setVisible(False)
         bottom_layout.addWidget(self.analysis_view)
 
@@ -412,7 +423,7 @@ class MainWindow(QMainWindow):
             self.chart_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
             self.summary_view.setPlainText("")
             if self.analysis_btn.isChecked():
-                self.analysis_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
+                self._set_analysis_html(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
             return
 
         holidays, holidays_ok = chart_data.load_holidays_for_chart(price_df)
@@ -435,6 +446,7 @@ class MainWindow(QMainWindow):
             trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
             sr_levels=sr_levels, show_support_resistance=show_sr,
             show_macd=self.macd_checkbox.isChecked(), show_kd=self.kd_checkbox.isChecked(),
+            show_sar=self.sar_checkbox.isChecked(),
         )
         # render_chart_html()疊加滑鼠十字線(貫穿價格/成交量/MACD/KD子圖)+左上角動態資訊框，
         # 取代Plotly預設會跟著滑鼠跑的浮動tooltip，仿TradingView的畫法(desktop/chart_render.py
@@ -498,6 +510,18 @@ class MainWindow(QMainWindow):
         if checked:
             self._refresh_analysis_view()
 
+    def _set_analysis_html(self, html_content: str) -> None:
+        """設定「個股分析」面板內容，並依實際內容量重新算出剛好的高度(setFixedHeight)，
+        取代原本寫死的200px上限——訊號一多就會超過200px，QTextEdit自己的垂直捲軸(已在
+        _build_ui()關閉)原本就會被塞爆，變成使用者要在這個小框框裡另外捲動一次；改成
+        跟內容一樣高，多出來的部分交給最外層的outer_scroll(整個視窗)捲動，只有一層
+        捲軸，不是兩層。
+        """
+        self.analysis_view.setHtml(html_content)
+        doc_height = self.analysis_view.document().size().height()
+        frame_width = self.analysis_view.frameWidth() * 2
+        self.analysis_view.setFixedHeight(int(doc_height) + frame_width + 8)
+
     def _refresh_analysis_view(self) -> None:
         """填入「個股分析」面板內容：目前這檔股票符合規則庫中哪些訊號(依信心分數高到低)，
         每條附上從ai/zhu-rules/查出的規則說明。跟_rerender_chart各自重新查一次價格資料，
@@ -505,11 +529,11 @@ class MainWindow(QMainWindow):
         很低(SQL查詢+5條screen_*規則判斷)，不需要為了省這點重算而增加程式複雜度。
         """
         if self.conn is None or not self._current_stock_id:
-            self.analysis_view.setHtml("<p>請先從候選清單點選或查詢一檔股票。</p>")
+            self._set_analysis_html("<p>請先從候選清單點選或查詢一檔股票。</p>")
             return
         price_df = chart_data.load_price_history(self.conn, self._current_stock_id)
         if price_df.empty:
-            self.analysis_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
+            self._set_analysis_html(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
             return
         # trend_df：短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比price_df
         # (預設120天顯示窗口)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明。
@@ -522,7 +546,7 @@ class MainWindow(QMainWindow):
         stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
         header = f"<p><b>個股分析：{html.escape(stock_label)}</b></p>"
         if not matches:
-            self.analysis_view.setHtml(header + "<p>目前沒有符合任何已接上規則庫的訊號。</p>")
+            self._set_analysis_html(header + "<p>目前沒有符合任何已接上規則庫的訊號。</p>")
             return
         # ⚠️ QTextEdit.setHtml()一定會把內容當HTML剖析，rule_scan.py的note文字裡常有
         # "MA5<MA10<MA20"這種原始"<"/">"符號(見rule_scan.py)，不escape的話會被誤判成
@@ -543,12 +567,14 @@ class MainWindow(QMainWindow):
                 for extra_line in note_lines[1:]:
                     block += f"　　{html.escape(extra_line)}<br>"
             if m["description"]:
-                block += f"{html.escape(m['description'])}<br>"
+                # 「分析：」明確標示這段是「為什麼」的解說(見dashboard/app.py同一處的說明)，
+                # 跟上面的「目前狀態：」分開標籤，不是延續文字。
+                block += f"分析：{html.escape(m['description'])}<br>"
             if m.get("reference"):
                 block += f"<i>原文與頁碼：{html.escape(m['reference'])}</i>"
             block += "</p><hr>"
             blocks.append(block)
-        self.analysis_view.setHtml("".join(blocks))
+        self._set_analysis_html("".join(blocks))
 
     # ------------------------------------------------------------------
     # 按鈕

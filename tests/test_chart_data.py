@@ -686,6 +686,60 @@ def test_build_candlestick_figure_adds_kd_subplot_when_enabled():
     assert list(d_trace.y) == [45.0, 55.0, 65.0]
 
 
+def test_build_candlestick_figure_adds_sar_markers_when_enabled():
+    dates = pd.date_range("2026-07-01", periods=3)
+    df = pd.DataFrame(
+        {
+            "open": [100, 102, 101], "high": [103, 104, 105], "low": [99, 101, 100], "close": [102, 101, 104],
+            "volume": [1000, 1200, 900], "SAR": [98.0, 98.5, 99.0], "SAR_BULL": [True, True, False],
+        },
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df, show_sar=True)
+
+    sar_trace = next(t for t in fig.data if t.name == "SAR")
+    assert sar_trace.mode == "markers"
+    assert list(sar_trace.y) == [98.0, 98.5, 99.0]
+    assert list(sar_trace.marker.color) == ["#27ae60", "#27ae60", "#c0392b"]  # 多頭綠、空頭紅
+
+
+def test_build_candlestick_figure_omits_sar_trace_when_columns_missing_or_disabled():
+    """show_sar=True但df裡沒有SAR/SAR_BULL欄位時(例如舊呼叫端)不應該crash，只是不畫；
+    show_sar=False(預設)時即使欄位存在也不畫。"""
+    dates = pd.date_range("2026-07-01", periods=2)
+    df = pd.DataFrame(
+        {"open": [100, 102], "high": [103, 104], "low": [99, 101], "close": [102, 101], "volume": [1000, 1200],
+         "SAR": [98.0, 98.5], "SAR_BULL": [True, True]},
+        index=dates,
+    )
+
+    fig_disabled = build_candlestick_figure(df, show_sar=False)
+    assert not any(t.name == "SAR" for t in fig_disabled.data)
+
+    df_no_sar = df.drop(columns=["SAR", "SAR_BULL"])
+    fig_missing_cols = build_candlestick_figure(df_no_sar, show_sar=True)
+    assert not any(t.name == "SAR" for t in fig_missing_cols.data)
+
+
+def test_load_price_history_includes_sar_columns():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    rows = [
+        {"stock_id": "2330", "date": f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 100.0 + d * 0.1,
+         "high": 101.0 + d * 0.1, "low": 99.0 + d * 0.1, "close": 100.0 + d * 0.1,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(60)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    df = load_price_history(conn, "2330", days=30)
+
+    assert "SAR" in df.columns
+    assert "SAR_BULL" in df.columns
+    assert df["SAR_BULL"].dtype == bool
+
+
 def test_build_candlestick_figure_omits_macd_kd_traces_when_columns_missing():
     """show_macd/show_kd=True但df裡沒有對應欄位時(例如舊呼叫端)，不應該crash，只是不畫。"""
     dates = pd.date_range("2026-07-01", periods=2)
