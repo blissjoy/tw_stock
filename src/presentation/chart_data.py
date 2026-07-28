@@ -101,7 +101,7 @@ def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str]]
 CANDIDATE_FILTERS: dict[str, Callable[[object, list[str]], dict[str, bool]]] = {
     "均線多頭排列（MA5>MA10>MA20）": _ma_bullish_filter((5, 10, 20)),
     "均線多頭排列（...>MA120）": _ma_bullish_filter((5, 10, 20, 120)),
-    "均線多頭排列（...>MA240）": _ma_bullish_filter((5, 10, 20, 240)),
+    "均線多頭排列（...>MA240）": _ma_bullish_filter((5, 10, 20, 120, 240)),
 }
 
 # 各篩選器預設勾選狀態：MA5>MA10>MA20是書中做多的基本地基條件，預設打勾；延伸到

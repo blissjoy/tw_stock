@@ -3036,3 +3036,22 @@ RETRY_ATTEMPTS次後放棄、只重試失敗的股票不重複請求已成功的
 實測`fetch_tpex_prices_batch()`，3檔都在第一輪就成功、console沒有出現yfinance原始
 雜訊；另用不存在的假股票代號(`9999999`)確認重試2次後放棄，且只印出乾淨的「{代號}
 {名稱} 下載錯誤」訊息。
+
+## 修正bug：候選清單「...>MA240」篩選條件漏檢查MA120(2026-07-29)
+
+使用者詢問候選清單篩選條件的3個均線選項是否為AND關係(確認是，`apply_candidate_
+filters()`用`mask &= ...`逐一疊加)，接著指出「...>MA240」目前用的periods=(5,10,
+20,240)不對，應該是MA5>MA10>MA20>MA120>MA240，不能跳過MA120不檢查。
+
+**問題**：`src/presentation/chart_data.py`的`CANDIDATE_FILTERS`裡，「...>MA240」
+用`_ma_bullish_filter((5, 10, 20, 240))`，只檢查MA20>MA240，中間的MA120完全沒被
+納入比較——如果MA120實際上比MA240還低(代表最近120天走勢其實比240天長期均值還差，
+不是真正「短中長期一路遞減」的完整多排)，這個寫法仍會誤判為多排成立。
+
+**修正**：改成`_ma_bullish_filter((5, 10, 20, 120, 240))`，讓`is_bullish_aligned()`
+完整檢查MA5>MA10>MA20>MA120>MA240這條鏈，不再跳過MA120。
+
+新增測試：`tests/test_chart_data.py`新增1個回歸測試，建構一組「MA20>MA240但
+MA120<MA240」的價格數列，驗證舊寫法(periods=(5,10,20,240))確實會誤判為True、
+修正後的`CANDIDATE_FILTERS["均線多頭排列（...>MA240）"]`正確回傳False。693個
+測試全過(692+1)。

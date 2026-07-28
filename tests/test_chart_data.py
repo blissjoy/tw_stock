@@ -410,6 +410,41 @@ def test_compute_ma_bullish_flags_extended_periods_false_when_not_enough_history
     assert flags["2330"] is False
 
 
+def test_candidate_filter_ma240_requires_ma120_in_the_chain_too():
+    """2026-07-29修正：「...>MA240」篩選條件先前用periods=(5,10,20,240)，會漏檢查MA120，
+    導致MA20>MA240成立、但MA120實際上比MA240還低(不是真正的完整多排)時仍誤判為True。
+    修正後改用periods=(5,10,20,120,240)，這裡建構一組「MA20>MA240但MA120<MA240」的
+    價格數列，驗證修正後的篩選條件正確回傳False，而不是照舊只檢查MA20>MA240。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+
+    # 最舊120天收盤價100(拉高MA240但不影響MA120)，中間100天收盤價50(同時拉低MA120/MA240)，
+    # 最近20天緩步從100漲到119(讓MA5>MA10>MA20成立)。算出來MA20≈109.5、MA240≈79.96、
+    # MA120≈59.92：MA20>MA240成立，但MA120<MA240，代表中段的120天其實比MA240的長期
+    # 均值還差，並非真正「短中長期一路遞減」的多排。
+    rows = []
+    for d in range(240):
+        if d < 120:
+            close = 100.0
+        elif d < 220:
+            close = 50.0
+        else:
+            close = 100.0 + (d - 220)
+        rows.append({
+            "stock_id": "2330", "date": f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}",
+            "open": close, "high": close + 1, "low": close - 1, "close": close,
+            "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    upsert_stock_prices(conn, rows)
+
+    old_buggy_flags = compute_ma_bullish_flags(conn, ["2330"], periods=(5, 10, 20, 240))
+    assert old_buggy_flags["2330"] is True  # 舊寫法會漏掉MA120，誤判為多排成立
+
+    filter_fn = chart_data.CANDIDATE_FILTERS["均線多頭排列（...>MA240）"]
+    fixed_flags = filter_fn(conn, ["2330"])
+    assert fixed_flags["2330"] is False  # 修正後正確抓出MA120<MA240，不算完整多排
+
+
 def test_candidate_filters_includes_ma120_and_ma240_extensions():
     assert "均線多頭排列（...>MA120）" in chart_data.CANDIDATE_FILTERS
     assert "均線多頭排列（...>MA240）" in chart_data.CANDIDATE_FILTERS
