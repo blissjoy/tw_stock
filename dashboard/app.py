@@ -27,9 +27,11 @@ from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
 from src.presentation import chart_data  # noqa: E402
 from src.presentation.chart_data import (  # noqa: E402
+    CANDIDATE_FILTER_DEFAULTS,
     CANDIDATE_FILTERS,
     apply_candidate_filters,
     build_candlestick_figure,
+    get_latest_candidate_update_time,
     get_latest_update_time,
     list_candidate_dates,
     load_candidates_for_date,
@@ -202,21 +204,25 @@ def main() -> None:
             detail = f"　{stage} {progress}檔" if stage and progress else ""
             st.markdown(f"**:orange[🔄 更新中...{detail}]**")
         else:
-            latest_update = get_latest_update_time(conn)
-            if latest_update:
+            def _fmt(ts: str | None) -> str:
+                if not ts:
+                    return "尚無資料"
                 try:
-                    formatted = datetime.fromisoformat(latest_update).strftime("%Y-%m-%d %H:%M")
+                    return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
                 except ValueError:
-                    formatted = latest_update
-                st.caption(f"資料更新至\n{formatted}")
-            else:
-                st.caption("尚無資料")
+                    return ts
+
+            # 股價資料跟候選清單是兩件各自獨立更新的東西：股價可能已經更新到今天，但候選
+            # 清單是幾分鐘前手動按「立即重新篩選」才重算的，兩個時間點不會永遠一致，混在
+            # 一起顯示會讓使用者誤判「候選清單是不是也跟著更新了」，所以分開各顯示一行。
+            st.caption(f"股價更新至　{_fmt(get_latest_update_time(conn))}")
+            st.caption(f"候選清單算至　{_fmt(get_latest_candidate_update_time(conn))}")
 
     st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件）")
     filter_cols = st.columns(len(CANDIDATE_FILTERS))
     active_filters = [
         label for col, label in zip(filter_cols, CANDIDATE_FILTERS)
-        if col.checkbox(label, key=f"filter_{label}")
+        if col.checkbox(label, value=CANDIDATE_FILTER_DEFAULTS.get(label, False), key=f"filter_{label}")
     ]
 
     button_col1, button_col2 = st.columns([1, 1])

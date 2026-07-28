@@ -2791,3 +2791,63 @@ tier()`的全部黃金層訊號(目前118條已接入規則裡的大部分)，�
 
 對本機真實2317鴻海資料端對端驗證：`analyze_stock_signals()`回傳10筆結果、無任何重複
 rule_id，R-TREND-03的note正確合併成「短期...\n中期...」兩行。
+
+## 資料更新時間分離、候選清單篩選條件擴充、「立即重新篩選」效能調校(2026-07-26)
+
+使用者提出3點：(1)右上角「資料更新至」把股價DB更新時間跟候選清單重算時間混在一起顯示，
+應該分開；(2)「立即重新篩選」按下去執行很久，問能否tune；(3)既有的「均線多頭排列
+(MA5>MA10>MA20)」篩選條件預設應該打勾，並在下面多加兩個篩選條件「>120」「>240」、
+預設不打勾。
+
+**請求1：資料更新時間分離**。查`src/presentation/chart_data.py`發現`get_latest_
+update_time()`只查`stocks.updated_at`(股價DB時間)，沒有候選清單專屬的時間函式；查
+`daily_candidates`表schema發現已有`created_at`欄位可用。新增`get_latest_candidate_
+update_time()`查`MAX(created_at) FROM daily_candidates`。`dashboard/app.py`跟
+`desktop/main_window.py`的狀態列都改成分兩行顯示「股價更新至」/「候選清單算至」，
+桌面版另外在`_on_refresh_clicked()`按下「立即重新篩選」後立刻呼叫`_poll_pipeline_
+status()`刷新，不用等5秒輪詢才看到候選清單時間更新。
+
+**請求3：篩選條件擴充+預設值**。把`compute_ma_bullish_flags()`加上`periods`參數
+(可自訂要檢查到哪幾條均線，不再寫死5/10/20)，`CANDIDATE_FILTERS`新增「...>MA120」
+「...>MA240」兩個延伸條件(書中「多線多排」概念的短/長版本，`lookback_days`也跟著
+拉長到對應天期才夠算出最長那條均線)。新增`CANDIDATE_FILTER_DEFAULTS`字典記錄各篩選
+條件的預設勾選狀態(MA5>10>20預設True，MA120/MA240兩個延伸條件預設False，避免使用者
+一開啟候選清單就因為篩選過嚴而顯示空清單、誤以為系統壞掉)，兩個前端的checkbox渲染都
+接上這個預設值(`dashboard/app.py`用`value=`參數、`desktop/main_window.py`用
+`.setChecked()`)。
+
+**請求2：效能調校**。用`cProfile`對`run_screen_and_store()`的核心`screen_all_stocks()`
+(15個`_SCREEN_FUNCTIONS`×約2360檔股票)做剖析，實測優化前對本機真實DB全量資料執行
+「立即重新篩選」的`screen_all_stocks()`本身需要2分鐘以上(第一次完整profiling因為
+cProfile額外開銷太大直接執行超過15分鐘沒跑完，中途中止)。
+
+根因：`src/indicators/trend.py`的`_daily_trend_state()`(多空趨勢狀態機)、
+`src/strategies/candle_mechanical.py`的`_mechanical_state_machine()`(R-CANDLE-32/33
+機械化交易規則)、`src/indicators/pivots.py`的`compute_turning_points()`(轉折點取點，
+R-TREND-01核心)、`src/indicators/consolidation.py`的`detect_consolidation()`
+(R-CANDLE-04橫盤偵測)、`src/indicators/trendlines.py`的`passes_line_not_covering_
+check()`(R-LINE系列「線不蓋線」檢查)——這5個都是必須逐日迴圈、無法簡單向量化的
+狀態機/序列演算法，但迴圈內部都用pandas Series的`.iloc[]`逐格存取資料，而`.iloc[]`
+每次呼叫都有不小的Python層開銷(型別檢查/包裝)，乘上2000多檔股票、單檔700~850天
+歷史，開銷疊加起來就主導了整體執行時間(cProfile實測`pandas.core.indexing.
+__getitem__`這單一項目就佔了未優化前剖析總時間226秒裡的226秒累積時間，是最大瓶頸)。
+
+**修正**：這5處都改成先用`.to_numpy()`把要逐格存取的Series轉成numpy陣列，迴圈內部
+改用陣列索引取值，跑完迴圈才把最終結果包回pandas Series/DataFrame——演算法完全不變，
+只是換一種存取底層資料的方式(對單一dtype的Series，`.to_numpy()`通常是零拷貝，轉換
+本身幾乎不花時間)。沒有改變任何函式簽章或回傳格式，呼叫端完全不用跟著改。
+
+**效果**：對本機真實DB(2362檔股票、平均770天歷史)實測`screen_all_stocks()`從優化前
+121.69秒降到74.24秒(連同`load_trailing_frames()`的DB讀取，`run_screen_and_store()`
+整體從133.12秒降到87.57秒)。第二輪cProfile確認`.iloc[]`熱點已消除，剩餘開銷分散在
+`daily_bull_trend_state()`/`daily_bear_trend_state()`被3個不同screen函式各自重複
+呼叫(同一檔股票、同一組n=5參數，卻沒有跨函式共用結果)這類「架構性重算」，以及pandas
+Series/DataFrame建構本身的固定開銷——這類優化需要重新設計`screen_all_stocks()`跨
+規則共用中間結果的機制，改動範圍更大、風險更高，這次先不做，如果使用者覺得87秒仍然
+太慢，之後可以再評估。
+
+驗證：677個測試全過(含這次新增的6個，涵蓋`get_latest_candidate_update_time()`跟
+`compute_ma_bullish_flags()`的periods參數化)；`ast.parse()`確認3個前端/資料層檔案
+語法正確；用真實DB分別在優化前後各跑一次`load_trailing_frames`+`screen_all_stocks`
+量測總時間，數字如上。
+

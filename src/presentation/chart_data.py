@@ -60,13 +60,20 @@ TRENDLINE_DEFAULT_ROLE = {
 SR_ROLE_COLORS = {"支撐": "#16a085", "壓力": "#c0392b"}
 
 
-def compute_ma_bullish_flags(conn, stock_ids: list[str], lookback_days: int = 60) -> dict[str, bool]:
-    """對每檔股票算出「均線多頭排列」(MA5>MA10>MA20，書中做多的地基條件)是否成立，取最新
-    一筆已知資料為準。只在候選清單篩選器實際勾選這個條件時才呼叫(見CANDIDATE_FILTERS)，
-    不是每次載入候選清單都算，避免候選股數量變多時拖慢清單載入速度。
+def compute_ma_bullish_flags(
+    conn, stock_ids: list[str], periods: tuple[int, ...] = DEFAULT_BULLISH_PERIODS, lookback_days: int | None = None
+) -> dict[str, bool]:
+    """對每檔股票算出「均線多頭排列」(依`periods`由短到長排列，例如MA5>MA10>MA20，或延伸到
+    書中「多線多排」的MA120/MA240)是否成立，取最新一筆已知資料為準。只在候選清單篩選器實際
+    勾選這個條件時才呼叫(見CANDIDATE_FILTERS)，不是每次載入候選清單都算，避免候選股數量
+    變多時拖慢清單載入速度。
 
-    資料不足20天(算不出MA20)時該檔股票視為不成立(False)，不是拋例外或跳過。
+    lookback_days未指定時採`max(periods)`——延伸到MA120/MA240的篩選需要對應天數的收盤價
+    才能算出最長那條均線，不能沿用MA5/10/20版本的60天預設值。
+    資料不足以算出最長均線時該檔股票視為不成立(False)，不是拋例外或跳過。
     """
+    if lookback_days is None:
+        lookback_days = max(periods)
     flags: dict[str, bool] = {}
     for stock_id in stock_ids:
         cur = conn.execute(
@@ -74,21 +81,36 @@ def compute_ma_bullish_flags(conn, stock_ids: list[str], lookback_days: int = 60
             (stock_id, lookback_days),
         )
         closes = [row[0] for row in cur.fetchall()][::-1]
-        if len(closes) < max(DEFAULT_BULLISH_PERIODS):
+        if len(closes) < max(periods):
             flags[stock_id] = False
             continue
         close_series = pd.Series(closes)
-        ma_frame = compute_ma_set(close_series, periods=DEFAULT_BULLISH_PERIODS)
-        flags[stock_id] = bool(is_bullish_aligned(ma_frame, periods=DEFAULT_BULLISH_PERIODS).iloc[-1])
+        ma_frame = compute_ma_set(close_series, periods=periods)
+        flags[stock_id] = bool(is_bullish_aligned(ma_frame, periods=periods).iloc[-1])
     return flags
 
 
+def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str]], dict[str, bool]]:
+    return lambda conn, stock_ids: compute_ma_bullish_flags(conn, stock_ids, periods=periods)
+
+
 # 候選清單篩選器registry：{顯示標籤: 計算函式(conn, stock_ids) -> {stock_id: bool}}。
-# 目前只有「均線多頭排列」一個條件，之後要加其他篩選條件(例如量能/型態)時，在這裡多加一組
-# 標籤/函式即可，兩個前端(dashboard/app.py、desktop/main_window.py)都是迴圈讀取這個registry
-# 動態產生勾選框、不用另外改UI程式碼。
+# 之後要加其他篩選條件(例如量能/型態)時，在這裡多加一組標籤/函式即可，兩個前端
+# (dashboard/app.py、desktop/main_window.py)都是迴圈讀取這個registry動態產生勾選框、
+# 不用另外改UI程式碼。
 CANDIDATE_FILTERS: dict[str, Callable[[object, list[str]], dict[str, bool]]] = {
-    "均線多頭排列（MA5>MA10>MA20）": compute_ma_bullish_flags,
+    "均線多頭排列（MA5>MA10>MA20）": _ma_bullish_filter((5, 10, 20)),
+    "均線多頭排列（...>MA120）": _ma_bullish_filter((5, 10, 20, 120)),
+    "均線多頭排列（...>MA240）": _ma_bullish_filter((5, 10, 20, 240)),
+}
+
+# 各篩選器預設勾選狀態：MA5>MA10>MA20是書中做多的基本地基條件，預設打勾；延伸到
+# MA120/MA240的「多線多排」條件較嚴格(篩到的股票會少很多)，預設不勾，避免使用者
+# 一開啟候選清單就發現空空如也、誤以為系統壞掉。未列在這裡的篩選標籤視為預設不勾。
+CANDIDATE_FILTER_DEFAULTS: dict[str, bool] = {
+    "均線多頭排列（MA5>MA10>MA20）": True,
+    "均線多頭排列（...>MA120）": False,
+    "均線多頭排列（...>MA240）": False,
 }
 
 
@@ -119,6 +141,17 @@ def get_latest_update_time(conn) -> str | None:
     「資料更新至：...」用。
     """
     row = conn.execute("SELECT MAX(updated_at) FROM stocks").fetchone()
+    return row[0] if row is not None else None
+
+
+def get_latest_candidate_update_time(conn) -> str | None:
+    """回傳daily_candidates表裡最新一筆的created_at時間戳(ISO8601字串)，代表「立即重新篩選」
+    或每日排程最近一次成功寫入候選清單的時間——跟get_latest_update_time()的股價DB更新時間
+    是兩件事：股價可能已經更新到今天，但候選清單是幾分鐘前手動重篩才產生的，兩個時間點不會
+    永遠一致，因此兩個前端的「資料更新至」要分開顯示，不能只顯示其中一個。查無任何候選紀錄
+    時回傳None。
+    """
+    row = conn.execute("SELECT MAX(created_at) FROM daily_candidates").fetchone()
     return row[0] if row is not None else None
 
 

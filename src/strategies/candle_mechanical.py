@@ -20,34 +20,42 @@ def _mechanical_state_machine(high: pd.Series, low: pd.Series, close: pd.Series,
     stop_loss: list[float | None] = [None] * n
     action: list[str | None] = [None] * n
 
+    # ⚠️ 效能：改用numpy陣列而非pandas Series的.iloc[]逐格存取——screen_all_stocks()對
+    # 每檔股票都各呼叫一次多頭+一次空頭(見daily_screener.py的screen_mechanical_long/
+    # short)，2000多檔股票疊加起來，.iloc[]逐格存取的Python層開銷會主導掉「立即重新
+    # 篩選」的執行時間。演算法完全不變，只是換一種存取底層資料的方式。
+    close_arr = close.to_numpy()
+    high_arr = high.to_numpy()
+    low_arr = low.to_numpy()
+
     cur_state = "空手"
     cur_entry: float | None = None
     cur_stop: float | None = None
 
     for t in range(1, n):
         if cur_state == "空手":
-            if direction == "long" and close.iloc[t] > high.iloc[t - 1]:
+            if direction == "long" and close_arr[t] > high_arr[t - 1]:
                 cur_state = "持有多單"
-                cur_entry = close.iloc[t]
-                cur_stop = max(low.iloc[t], cur_entry * (1 - stop_loss_pct))
+                cur_entry = close_arr[t]
+                cur_stop = max(low_arr[t], cur_entry * (1 - stop_loss_pct))
                 action[t] = "進場"
-            elif direction == "short" and close.iloc[t] < low.iloc[t - 1]:
+            elif direction == "short" and close_arr[t] < low_arr[t - 1]:
                 cur_state = "持有空單"
-                cur_entry = close.iloc[t]
-                cur_stop = min(high.iloc[t], cur_entry * (1 + stop_loss_pct))
+                cur_entry = close_arr[t]
+                cur_stop = min(high_arr[t], cur_entry * (1 + stop_loss_pct))
                 action[t] = "進場"
         elif cur_state == "持有多單":
-            if close.iloc[t] < cur_stop:
+            if close_arr[t] < cur_stop:
                 cur_state, action[t] = "空手", "停損出場"
                 cur_entry = cur_stop = None
-            elif close.iloc[t] < low.iloc[t - 1]:
+            elif close_arr[t] < low_arr[t - 1]:
                 cur_state, action[t] = "空手", "跌破前一日低點出場"
                 cur_entry = cur_stop = None
         elif cur_state == "持有空單":
-            if close.iloc[t] > cur_stop:
+            if close_arr[t] > cur_stop:
                 cur_state, action[t] = "空手", "停損出場"
                 cur_entry = cur_stop = None
-            elif close.iloc[t] > high.iloc[t - 1]:
+            elif close_arr[t] > high_arr[t - 1]:
                 cur_state, action[t] = "空手", "突破前一日高點回補"
                 cur_entry = cur_stop = None
 

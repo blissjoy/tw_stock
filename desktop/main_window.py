@@ -135,6 +135,7 @@ class MainWindow(QMainWindow):
         self.filter_checkboxes: dict[str, QCheckBox] = {}
         for label in chart_data.CANDIDATE_FILTERS:
             cb = QCheckBox(label)
+            cb.setChecked(chart_data.CANDIDATE_FILTER_DEFAULTS.get(label, False))
             cb.stateChanged.connect(self._reload_candidates)
             filter_bar.addWidget(cb)
             self.filter_checkboxes[label] = cb
@@ -505,6 +506,7 @@ class MainWindow(QMainWindow):
         run_screen_and_store(self.conn)
         self._refresh_date_list()
         self._reload_candidates()
+        self._poll_pipeline_status()  # 立即刷新狀態列的「候選清單算至：...」，不等下一次5秒輪詢
         if self._current_stock_id:
             self._rerender_chart()
 
@@ -568,14 +570,20 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"⚠ 上次抓取失敗（{date_label}）")
             return
 
-        # 閒置狀態：顯示DB裡目前最新一次成功寫入股價的時間戳，比pipeline_status.json的
-        # 「date」欄位更精確(date只到日期、不含時分，看不出來是幾點抓的)。
-        latest_update = chart_data.get_latest_update_time(self.conn) if self.conn is not None else None
-        if latest_update:
+        # 閒置狀態：股價DB更新時間跟候選清單重算時間是兩件各自獨立的事(股價可能已更新到
+        # 今天，但候選清單是剛才手動重篩才產生的)，分開顯示成兩行，不能只顯示其中一個、
+        # 讓使用者誤判「候選清單是不是也跟著更新了」。
+        def _fmt(ts: str | None) -> str:
+            if not ts:
+                return "尚無資料"
             try:
-                formatted = datetime.fromisoformat(latest_update).strftime("%Y-%m-%d %H:%M")
+                return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
             except ValueError:
-                formatted = latest_update
-            self.status_label.setText(f"資料更新至：{formatted}")
-        else:
+                return ts
+
+        if self.conn is None:
             self.status_label.setText("狀態：尚無資料")
+            return
+        price_update = _fmt(chart_data.get_latest_update_time(self.conn))
+        candidate_update = _fmt(chart_data.get_latest_candidate_update_time(self.conn))
+        self.status_label.setText(f"股價更新至：{price_update}\n候選清單算至：{candidate_update}")

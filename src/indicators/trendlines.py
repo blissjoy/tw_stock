@@ -56,12 +56,18 @@ def fit_line_through(a: LinePoint, b: LinePoint, role: str = "support") -> Trend
 def passes_line_not_covering_check(a: LinePoint, b: LinePoint, high: pd.Series, low: pd.Series, is_up: bool) -> bool:
     """線不蓋線檢查：上升切線要求A、B之間所有K棒(含影線)不可跌破切線；下降切線方向相反(不可突破)。"""
     line = fit_line_through(a, b)
+    # ⚠️ 效能：改用numpy陣列而非pandas Series的.iloc[]逐格存取——這個檢查是切線/軌道線
+    # 演算法(R-LINE-01/02/05/06等)的核心內迴圈，每檔股票每組轉折點配對都會呼叫一次，
+    # 2000多檔股票疊加起來.iloc[]的Python層開銷很可觀(cProfile實測是「立即重新篩選」的
+    # 主要瓶頸之一)。.to_numpy()對單一dtype的Series通常是零拷貝，換法不影響邏輯或結果。
+    low_arr = low.to_numpy() if is_up else None
+    high_arr = None if is_up else high.to_numpy()
     for x in range(a.x + 1, b.x):
         if is_up:
-            if low.iloc[x] < line.at(x):
+            if low_arr[x] < line.at(x):
                 return False
         else:
-            if high.iloc[x] > line.at(x):
+            if high_arr[x] > line.at(x):
                 return False
     return True
 

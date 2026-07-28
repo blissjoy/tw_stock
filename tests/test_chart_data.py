@@ -6,6 +6,7 @@ from src.presentation.chart_data import (
     apply_candidate_filters,
     build_candlestick_figure,
     compute_ma_bullish_flags,
+    get_latest_candidate_update_time,
     get_latest_update_time,
     get_stock_name,
     list_candidate_dates,
@@ -58,6 +59,21 @@ def test_get_latest_update_time_returns_max_updated_at():
         {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-24T10:00:00"},
     ])
     assert get_latest_update_time(conn) == "2026-07-24T10:00:00"
+
+
+def test_get_latest_candidate_update_time_returns_none_when_no_candidates():
+    conn = _fresh_conn()
+    assert get_latest_candidate_update_time(conn) is None
+
+
+def test_get_latest_candidate_update_time_returns_max_created_at():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-21", "stock_id": "2330", "signal_name": "舊訊號", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-21T18:00:00"},
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "新訊號", "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:30:00"},
+    ])
+    assert get_latest_candidate_update_time(conn) == "2026-07-22T18:30:00"
 
 
 def test_load_candidates_for_date_returns_specific_historical_date_when_given():
@@ -363,6 +379,46 @@ def test_compute_ma_bullish_flags_false_when_not_enough_history():
 
     flags = compute_ma_bullish_flags(conn, ["2330"])
     assert flags["2330"] is False
+
+
+def test_compute_ma_bullish_flags_extends_to_ma120_when_periods_given():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    # 持續上漲130天，足以讓MA5>MA10>MA20>MA120成立
+    rows = [
+        {"stock_id": "2330", "date": f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0 + d * 0.5, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(130)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    flags = compute_ma_bullish_flags(conn, ["2330"], periods=(5, 10, 20, 120))
+    assert flags["2330"] is True
+
+
+def test_compute_ma_bullish_flags_extended_periods_false_when_not_enough_history():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    rows = [
+        {"stock_id": "2330", "date": f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0 + d * 0.5, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(40)  # 只有40天，不夠算MA120
+    ]
+    upsert_stock_prices(conn, rows)
+
+    flags = compute_ma_bullish_flags(conn, ["2330"], periods=(5, 10, 20, 120))
+    assert flags["2330"] is False
+
+
+def test_candidate_filters_includes_ma120_and_ma240_extensions():
+    assert "均線多頭排列（...>MA120）" in chart_data.CANDIDATE_FILTERS
+    assert "均線多頭排列（...>MA240）" in chart_data.CANDIDATE_FILTERS
+
+
+def test_candidate_filter_defaults_only_checks_ma5_10_20_by_default():
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（MA5>MA10>MA20）"] is True
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（...>MA120）"] is False
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（...>MA240）"] is False
 
 
 def test_apply_candidate_filters_returns_unfiltered_when_no_active_filters():

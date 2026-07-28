@@ -51,10 +51,21 @@ def compute_turning_points(high: pd.Series, low: pd.Series, close: pd.Series, n:
 
     positions = close.index.get_indexer([valid_start])[0]
 
-    for i in range(positions, len(close)):
-        if close.iloc[i] > ma.iloc[i]:
+    # ⚠️ 效能：改用numpy陣列而非pandas Series的.iloc[]逐格存取——這是screen_all_stocks()
+    # 選股(見daily_screener.py)跟scan_golden_tier()規則掃描共用的核心轉折點演算法，2000多
+    # 檔股票疊加起來，.iloc[]逐格存取的Python層開銷會主導掉整體執行時間(cProfile實測
+    # pandas.core.indexing.__getitem__單項就佔了「立即重新篩選」226秒裡的226秒累積時間，
+    # 是最大瓶頸)。演算法完全不變，只是換一種存取底層資料的方式。
+    close_arr = close.to_numpy()
+    ma_arr = ma.to_numpy()
+    high_arr = high.to_numpy()
+    low_arr = low.to_numpy()
+    index = close.index
+
+    for i in range(positions, len(close_arr)):
+        if close_arr[i] > ma_arr[i]:
             cur = "positive"
-        elif close.iloc[i] < ma.iloc[i]:
+        elif close_arr[i] < ma_arr[i]:
             cur = "negative"
         else:
             cur = state  # 收盤剛好等於均線：書中未定義，預設沿用前一狀態
@@ -71,11 +82,11 @@ def compute_turning_points(high: pd.Series, low: pd.Series, close: pd.Series, n:
         # 狀態切換：把當天K線併入取值區間（跌破/突破當天也算在內）
         group_idx.append(i)
         if state == "positive" and cur == "negative":
-            head_pos = max(group_idx, key=lambda j: high.iloc[j])
-            turning_points.append(TurningPoint("head", float(high.iloc[head_pos]), high.index[head_pos]))
+            head_pos = max(group_idx, key=lambda j: high_arr[j])
+            turning_points.append(TurningPoint("head", float(high_arr[head_pos]), index[head_pos]))
         elif state == "negative" and cur == "positive":
-            bottom_pos = min(group_idx, key=lambda j: low.iloc[j])
-            turning_points.append(TurningPoint("bottom", float(low.iloc[bottom_pos]), low.index[bottom_pos]))
+            bottom_pos = min(group_idx, key=lambda j: low_arr[j])
+            turning_points.append(TurningPoint("bottom", float(low_arr[bottom_pos]), index[bottom_pos]))
         state = cur
         group_idx = [i]
 

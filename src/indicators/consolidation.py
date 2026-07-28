@@ -26,12 +26,16 @@ def detect_consolidation(high: pd.Series, low: pd.Series, min_bars: int = 3) -> 
     - group_len：目前橫盤區間累積的K棒根數
     """
     n = len(high)
+    # ⚠️ 效能：改用numpy陣列而非pandas Series的.iloc[]逐格存取，理由同src/indicators/
+    # pivots.py的compute_turning_points——演算法不變，只是換一種存取底層資料的方式。
+    high_arr = high.to_numpy()
+    low_arr = low.to_numpy()
     group_len = [1] * n
-    upper = [float(high.iloc[0])] * n
-    lower = [float(low.iloc[0])] * n
+    upper = [float(high_arr[0])] * n
+    lower = [float(low_arr[0])] * n
 
     for i in range(1, n):
-        h, l = float(high.iloc[i]), float(low.iloc[i])
+        h, l = float(high_arr[i]), float(low_arr[i])
         if h <= upper[i - 1] and l >= lower[i - 1]:
             # 這根K棒沒有讓區間擴大，延續目前的橫盤區間
             group_len[i] = group_len[i - 1] + 1
@@ -40,8 +44,8 @@ def detect_consolidation(high: pd.Series, low: pd.Series, min_bars: int = 3) -> 
         else:
             # 區間被擴大，從前一根K棒重新起算新的橫盤區間
             group_len[i] = 2
-            upper[i] = max(h, float(high.iloc[i - 1]))
-            lower[i] = min(l, float(low.iloc[i - 1]))
+            upper[i] = max(h, float(high_arr[i - 1]))
+            lower[i] = min(l, float(low_arr[i - 1]))
 
     result = pd.DataFrame(
         {
