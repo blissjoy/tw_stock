@@ -2991,3 +2991,48 @@ scan_golden_tier()**，因為這本書目前還沒有像`ai/zhu-rules/`那樣的
 下次要推進這3項，第一步應該是想辦法看到MOPS實際頁面內容(改用能執行JavaScript的
 工具，例如Playwright，或請使用者直接提供MOPS特定頁面的網址/截圖)，而不是繼續用
 WebFetch硬猜。
+
+## 修正bug：yfinance下載失敗訊息不友善、沒有重試機制(2026-07-29)
+
+使用者回報桌面版「手動抓取今日資料」出現116檔TPEx股票下載失敗，錯誤訊息是yfinance
+原始格式(`possibly delisted; no price data found (1d 2026-07-27 -> 2026-07-28)`)，
+看不懂，並提出兩個問題：(1) 這個日期範圍(1d ...->...)是否該改成同一天？(2) 失敗是
+否因為日期範圍寫錯造成？
+
+**查證後確認兩者都不是bug**：
+- yfinance的`end`參數是exclusive慣例(跟Python切片/pandas date_range同一種「前閉
+  後開」語意)，要抓單一天資料本來就要傳`start=當天, end=隔天`，這是`src/data/
+  yfinance_client.py`docstring早就記錄的慣例，不能改成同一天(改了會變成空區間，
+  用真實ticker`6877.TWO`實測驗證：`start=end=同一天`回傳0筆，`start=當天,end=
+  隔天`回傳1筆)。
+- 查資料庫證實失敗是暫時性的：116檔失敗清單裡，107檔(92%)後來的資料庫紀錄已經
+  追上最新交易日，只有9檔仍卡在較早日期(這9檔本身也不是ETF/債券，是正常的中小型
+  上櫃股，比較像Yahoo Finance對冷門股的資料落後，不是我們請求參數的問題)；同一批
+  呼叫裡1,388檔TPEx股票有1,182檔(85%)當下就成功，如果日期範圍真的有問題，應該是
+  全部或大部分失敗，不會只有116檔(8%)挑著失敗。
+
+**但使用者提出合理的改善需求**：下載失敗時應該在全部批次跑完後，對失敗清單重試2次，
+如果還是失敗，才用「{代號}{名稱} 下載錯誤」這種好懂的格式印出來，不要把yfinance
+的原始參數格式直接丟給使用者看。
+
+**修正內容**：
+- `src/data/yfinance_client.py`：抽出`_download_ids_once()`封裝單輪批次下載邏輯，
+  `fetch_prices_batch()`改成：第一輪跑完所有股票後，把沒抓到資料的股票代號收集起來，
+  對這份(通常小很多的)清單再跑`RETRY_ATTEMPTS=2`次重試(每次間隔`RETRY_DELAY_
+  SECONDS=3`秒)，成功的併入結果、仍失敗的留到最後讓呼叫端自己決定怎麼呈現。同時
+  把`logging.getLogger("yfinance")`的等級調到CRITICAL，擋掉yfinance內部
+  `logger.error()`印出的原始"possibly delisted..."除錯訊息，不再洩漏到console。
+- `scripts/daily_pipeline.py`的`fetch_today_tpex()`/`fetch_today_twse()`：兩個
+  呼叫`fetch_prices_batch()`的地方，都改成用`stock_ids - prices_by_stock.keys()`
+  算出「重試2次後依然沒有資料」的股票代號，用已有的股票名稱資料印出`f"{stock_id}
+  {name} 下載錯誤"`，取代原本yfinance直接印到console的原始格式。
+
+新增測試：`tests/test_yfinance_client.py`新增4個測試(重試後成功、重試次數剛好等於
+RETRY_ATTEMPTS次後放棄、只重試失敗的股票不重複請求已成功的、logger等級確認被壓低)，
+既有3個會受影響的測試補上`RETRY_DELAY_SECONDS=0`monkeypatch避免變慢。692個測試
+全過(688+4)。
+
+驗證：用真實ticker(`6877`/`4192`/`2760`，其中2檔是使用者回報清單裡先前失敗過的)
+實測`fetch_tpex_prices_batch()`，3檔都在第一輪就成功、console沒有出現yfinance原始
+雜訊；另用不存在的假股票代號(`9999999`)確認重試2次後放棄，且只印出乾淨的「{代號}
+{名稱} 下載錯誤」訊息。

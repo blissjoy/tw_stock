@@ -30,7 +30,9 @@ ThreadPoolExecutor`預設會在直譯器結束時等待所有worker thread完成
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from typing import Callable
 
 import pandas as pd
@@ -43,6 +45,20 @@ BATCH_SIZE = 500
 # 2026-07-24事故記錄)，這裡是我們自己控制的硬性上限；批次通常在數十秒內完成(見
 # ref-project長期實測)，60秒已經是相當寬鬆的容忍值。
 HARD_TIMEOUT_SECONDS = 60
+
+# ⚠️ 2026-07-29發現：個股偶發下載失敗(yfinance印出的"possibly delisted; no price
+# data found")多半是Yahoo Finance後端當下暫時性的資料落後，不是那檔股票真的有問題
+# ——實測回報失敗的116檔裡，92%後來重新請求就成功了。因此在「全部批次跑完」之後，
+# 對當次失敗的股票代號清單再重試RETRY_ATTEMPTS次，而不是第一次失敗就放棄。
+RETRY_ATTEMPTS = 2
+RETRY_DELAY_SECONDS = 3  # 重試間稍微停頓，避免緊接著打同一批可能還沒恢復的請求
+
+# yfinance內部用logging模組(logger名稱固定是"yfinance")印出"Failed download"/
+# "possibly delisted"這類原始除錯訊息，格式對一般使用者不友善(會把yf.download()
+# 收到的start/end參數整包印出來)。這裡把該logger等級調到CRITICAL以上，讓這些
+# 內部訊息不再洩漏到console，改由`fetch_prices_batch()`自己在真正確定失敗(重試
+# RETRY_ATTEMPTS次後仍無資料)時，印出簡潔的「{代號}{名稱} 下載錯誤」訊息。
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
 class BatchDownloadTimeout(Exception):
@@ -128,26 +144,13 @@ def _frame_to_price_rows(stock_id: str, frame: pd.DataFrame) -> list[dict]:
     return rows
 
 
-def fetch_prices_batch(
+def _download_ids_once(
     stock_ids: list[str], start_date: str, end_date: str, market_suffix: str,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, list[dict]]:
-    """批次下載股票的日K OHLCV資料，回傳{stock_id: [row, ...]}(查無資料的股票不會出現在
-    回傳的dict裡)。
-
-    start_date/end_date格式為'YYYY-MM-DD'；end_date是exclusive(yfinance/pandas慣例)，
-    要抓「當天」時呼叫端要自己算好end_date=隔天，例如只抓2026-07-22這一天需傳入
-    start_date="2026-07-22", end_date="2026-07-23"。
-    market_suffix：Yahoo Finance的台股市場代碼後綴，上市是".TW"、上櫃(TPEx)是".TWO"。
-    on_progress：每處理完一個BATCH_SIZE批次就呼叫一次on_progress(已處理檔數, 總檔數)，
-    供呼叫端顯示下載進度(例如「500/1980檔」)。yfinance的yf.download()本身不提供批次內
-    逐檔進度(progress=False關掉的是它自己的tqdm進度條，沒有能掛上去的callback)，這裡只
-    能做到「每批次(預設500檔)回報一次」的粗粒度進度，不是逐檔即時更新。
-
-    單一批次逾時(見`_download_with_hard_timeout()`與模組docstring的2026-07-24事故記錄)
-    只會讓「這一批」視為失敗、跳過並繼續下一批，不會讓整個函式中斷、丟失其他批次已經
-    抓到的資料——同一次呼叫裡有多批(例如1980檔分4批)，一批卡住不該連累其餘3批的結果。
-    """
+    """對給定的股票代號清單跑一輪批次下載(內部依BATCH_SIZE分批)，回傳這一輪成功抓到
+    資料的{stock_id: [row, ...]}。這是`fetch_prices_batch()`「第一輪」與「重試輪」
+    共用的核心邏輯，抽出來避免重試時複製貼上同一段批次迴圈。"""
     tickers = [f"{sid}{market_suffix}" for sid in stock_ids]
     total = len(tickers)
     results: dict[str, list[dict]] = {}
@@ -170,6 +173,48 @@ def fetch_prices_batch(
                     results[stock_id] = rows
         if on_progress is not None:
             on_progress(min(start + BATCH_SIZE, total), total)
+
+    return results
+
+
+def fetch_prices_batch(
+    stock_ids: list[str], start_date: str, end_date: str, market_suffix: str,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict[str, list[dict]]:
+    """批次下載股票的日K OHLCV資料，回傳{stock_id: [row, ...]}(查無資料的股票不會出現在
+    回傳的dict裡)。
+
+    start_date/end_date格式為'YYYY-MM-DD'；end_date是exclusive(yfinance/pandas慣例)，
+    要抓「當天」時呼叫端要自己算好end_date=隔天，例如只抓2026-07-22這一天需傳入
+    start_date="2026-07-22", end_date="2026-07-23"。
+    market_suffix：Yahoo Finance的台股市場代碼後綴，上市是".TW"、上櫃(TPEx)是".TWO"。
+    on_progress：每處理完一個BATCH_SIZE批次就呼叫一次on_progress(已處理檔數, 總檔數)，
+    供呼叫端顯示下載進度(例如「500/1980檔」)。yfinance的yf.download()本身不提供批次內
+    逐檔進度(progress=False關掉的是它自己的tqdm進度條，沒有能掛上去的callback)，這裡只
+    能做到「每批次(預設500檔)回報一次」的粗粒度進度，不是逐檔即時更新。只在第一輪
+    (全部股票)呼叫，重試輪(只剩少數失敗股票)不會再觸發，避免進度條在重試時往回跳。
+
+    單一批次逾時(見`_download_with_hard_timeout()`與模組docstring的2026-07-24事故記錄)
+    只會讓「這一批」視為失敗、跳過並繼續下一批，不會讓整個函式中斷、丟失其他批次已經
+    抓到的資料——同一次呼叫裡有多批(例如1980檔分4批)，一批卡住不該連累其餘3批的結果。
+
+    ⚠️ 2026-07-29新增重試機制：第一輪跑完所有股票後，把「沒有抓到資料」的股票代號
+    另外收集起來，再對這份(通常小很多的)清單重試RETRY_ATTEMPTS次——實測個股偶發
+    失敗多半是Yahoo Finance當下的暫時性問題，重試就會成功(見模組上方的發現記錄)。
+    重試輪不會再呼叫on_progress。呼叫端可以用`set(stock_ids) - set(回傳值.keys())`
+    算出「重試RETRY_ATTEMPTS次後依然沒有資料」的股票代號清單，自行印出好懂的錯誤
+    訊息(例如帶上股票名稱)，不要直接把yfinance的原始錯誤訊息丟給使用者看。
+    """
+    results = _download_ids_once(stock_ids, start_date, end_date, market_suffix, on_progress=on_progress)
+
+    remaining_ids = [sid for sid in stock_ids if sid not in results]
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        if not remaining_ids:
+            break
+        time.sleep(RETRY_DELAY_SECONDS)
+        retry_results = _download_ids_once(remaining_ids, start_date, end_date, market_suffix)
+        results.update(retry_results)
+        remaining_ids = [sid for sid in remaining_ids if sid not in retry_results]
 
     return results
 

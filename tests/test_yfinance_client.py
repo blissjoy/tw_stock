@@ -69,6 +69,7 @@ def test_fetch_tpex_prices_batch_uses_two_suffix(monkeypatch):
 
 
 def test_fetch_prices_batch_skips_ticker_with_no_data(monkeypatch):
+    monkeypatch.setattr(yfinance_client, "RETRY_DELAY_SECONDS", 0)  # 加速測試，不用真的等待
     df_batch = _multi_ticker_df(["5871.TWO"], ["2026-07-22"])
 
     def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
@@ -76,7 +77,8 @@ def test_fetch_prices_batch_skips_ticker_with_no_data(monkeypatch):
 
     monkeypatch.setattr("yfinance.download", _fake_download)
 
-    # 要求2檔，但yf.download只回傳其中1檔有資料(模擬另一檔下市/查無資料的情況)
+    # 要求2檔，但yf.download只回傳其中1檔有資料(模擬另一檔下市/查無資料的情況)，且
+    # 重試RETRY_ATTEMPTS次後依然查不到("9999"從頭到尾都不在_fake_download的回應裡)
     result = yfinance_client.fetch_prices_batch(["5871", "9999"], "2026-07-22", "2026-07-23", market_suffix=".TWO")
 
     assert set(result.keys()) == {"5871"}
@@ -115,6 +117,7 @@ def test_fetch_prices_batch_handles_single_ticker_non_multiindex(monkeypatch):
 
 
 def test_fetch_prices_batch_returns_empty_dict_when_download_returns_empty(monkeypatch):
+    monkeypatch.setattr(yfinance_client, "RETRY_DELAY_SECONDS", 0)
     monkeypatch.setattr("yfinance.download", lambda *a, **k: pd.DataFrame())
 
     result = yfinance_client.fetch_prices_batch(["5871"], "2026-07-22", "2026-07-23", market_suffix=".TWO")
@@ -196,6 +199,7 @@ def test_fetch_prices_batch_skips_hung_batch_and_keeps_other_batches(monkeypatch
     對應yfinance批次下載其中一批卡住時，不該讓整次抓取全部失敗。"""
     monkeypatch.setattr(yfinance_client, "BATCH_SIZE", 1)
     monkeypatch.setattr(yfinance_client, "HARD_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(yfinance_client, "RETRY_DELAY_SECONDS", 0)
 
     def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
         if tickers[0] == "1101.TW":
@@ -208,3 +212,73 @@ def test_fetch_prices_batch_skips_hung_batch_and_keeps_other_batches(monkeypatch
 
     assert "1101" not in result  # 這一批逾時被跳過
     assert "1102" in result  # 另一批正常成功，不受影響
+
+
+def test_fetch_prices_batch_retries_failed_tickers_and_succeeds_on_second_attempt(monkeypatch):
+    """對應2026-07-29的使用者回報：個股偶發下載失敗多半是暫時性問題，重試就會成功。
+    模擬"5871"第一次查無資料、重試時才查到，最終應該出現在結果裡。"""
+    monkeypatch.setattr(yfinance_client, "RETRY_DELAY_SECONDS", 0)
+    call_count = {"n": 0}
+
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return pd.DataFrame()  # 第一次(第一輪)查無資料
+        return _multi_ticker_df(tickers, ["2026-07-22"])  # 重試時成功
+
+    monkeypatch.setattr("yfinance.download", _fake_download)
+
+    result = yfinance_client.fetch_prices_batch(["5871"], "2026-07-22", "2026-07-23", market_suffix=".TWO")
+
+    assert set(result.keys()) == {"5871"}
+    assert call_count["n"] == 2  # 第一輪失敗+第1次重試就成功，不需要用到第2次重試
+
+
+def test_fetch_prices_batch_retries_exactly_retry_attempts_times_then_gives_up(monkeypatch):
+    """驗證重試次數剛好是RETRY_ATTEMPTS次，不多不少：第一輪(1次)+RETRY_ATTEMPTS次重試
+    都失敗後，該股票確定不在結果裡，且總呼叫次數等於1+RETRY_ATTEMPTS。"""
+    monkeypatch.setattr(yfinance_client, "RETRY_DELAY_SECONDS", 0)
+    call_count = {"n": 0}
+
+    def _always_empty(tickers, start, end, interval, progress, auto_adjust, timeout=10):
+        call_count["n"] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr("yfinance.download", _always_empty)
+
+    result = yfinance_client.fetch_prices_batch(["9999"], "2026-07-22", "2026-07-23", market_suffix=".TWO")
+
+    assert result == {}
+    assert call_count["n"] == 1 + yfinance_client.RETRY_ATTEMPTS
+
+
+def test_fetch_prices_batch_only_retries_the_stocks_that_failed(monkeypatch):
+    """第一輪部分成功、部分失敗時，重試只應該針對失敗的那些股票，已成功的不該被重新請求。"""
+    monkeypatch.setattr(yfinance_client, "RETRY_DELAY_SECONDS", 0)
+    requested_tickers_per_call = []
+
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
+        requested_tickers_per_call.append(list(tickers))
+        # 只有"5871.TWO"查得到資料，"9999.TWO"永遠查不到
+        found = [t for t in tickers if t == "5871.TWO"]
+        if not found:
+            return pd.DataFrame()
+        return _multi_ticker_df(found, ["2026-07-22"])
+
+    monkeypatch.setattr("yfinance.download", _fake_download)
+
+    result = yfinance_client.fetch_prices_batch(["5871", "9999"], "2026-07-22", "2026-07-23", market_suffix=".TWO")
+
+    assert set(result.keys()) == {"5871"}
+    # 第一輪請求兩檔，之後每一輪重試都只請求還沒成功的"9999.TWO"
+    assert requested_tickers_per_call[0] == ["5871.TWO", "9999.TWO"]
+    for later_call in requested_tickers_per_call[1:]:
+        assert later_call == ["9999.TWO"]
+
+
+def test_yfinance_logger_is_suppressed_to_avoid_raw_error_dump():
+    """避免yfinance內部"possibly delisted...(1d 2026-07-27 -> 2026-07-28)"這類原始
+    除錯訊息直接洩漏到console，logger等級應該被調到CRITICAL以上(見2026-07-29討論)。"""
+    import logging
+
+    assert logging.getLogger("yfinance").level >= logging.CRITICAL

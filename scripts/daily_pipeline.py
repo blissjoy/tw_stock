@@ -88,6 +88,11 @@ def fetch_today_twse(
             return False, False
         if not prices_by_stock:
             return False, False
+        # fetch_twse_prices_batch()內部已經對失敗股票重試過，這裡剩下的是重試後依然
+        # 沒有資料的，印出好懂的訊息(理由同fetch_today_tpex()的相同處理)
+        for stock_id in twse_ids:
+            if stock_id not in prices_by_stock:
+                print(f"{stock_id}{stock_info_by_id.get(stock_id, {}).get('name', '')} 下載錯誤")
         prices = [row for rows in prices_by_stock.values() for row in rows]
         is_intraday = True
 
@@ -145,6 +150,14 @@ def fetch_today_tpex(
     except Exception as exc:  # noqa: BLE001 - 整批下載失敗不應該讓整條pipeline中斷
         print(f"[TPEx/yfinance] 批次下載失敗，本次TPEx更新整批略過：{exc}")
         return 0
+
+    # fetch_tpex_prices_batch()內部已經對失敗的股票重試過(見yfinance_client.py)，
+    # 這裡剩下的才是重試後依然沒有資料的，印出好懂的訊息取代yfinance原始的除錯輸出
+    # (見2026-07-29的討論：不要把"possibly delisted...(1d 2026-07-27 -> 2026-07-28)"
+    # 這種原始參數格式直接丟給使用者看)。
+    for stock_id in info_by_id:
+        if stock_id not in prices_by_stock:
+            print(f"{stock_id}{info_by_id[stock_id].get('name', '')} 下載錯誤")
 
     for stock_id, prices in prices_by_stock.items():
         row = info_by_id[stock_id]
