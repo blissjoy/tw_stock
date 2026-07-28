@@ -6,6 +6,7 @@ from src.presentation.chart_data import (
     apply_candidate_filters,
     build_candlestick_figure,
     compute_ma_bullish_flags,
+    compute_sar_flip_flags,
     get_latest_candidate_update_time,
     get_latest_update_time,
     get_stock_name,
@@ -832,3 +833,57 @@ def test_load_holidays_for_chart_fails_gracefully_when_fetch_raises(monkeypatch)
     # 即使假日抓取失敗，圖表本身仍應該正常產生，不crash
     fig = build_candlestick_figure(df, holidays=holidays)
     assert len(fig.layout.xaxis.rangebreaks) == 1
+
+
+def test_compute_sar_flip_flags_false_when_not_enough_history():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-21", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+
+    flags = compute_sar_flip_flags(conn, ["2330"], direction="多頭", within_days=1)
+    assert flags["2330"] is False
+
+
+def test_compute_sar_flip_flags_detects_bearish_flip_on_sharp_drop():
+    """持續走高多天後最後一天暴跌，SAR應在最後一天翻轉為空頭(見src/indicators/parabolic_sar.py
+    的手動追算案例)。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    highs = [10.0, 11.0, 12.0, 13.0, 9.0]
+    lows = [9.0, 10.0, 10.5, 11.5, 8.0]
+    rows = [
+        {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
+         "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(5)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    flags_bear = compute_sar_flip_flags(conn, ["2330"], direction="空頭", within_days=1)
+    assert flags_bear["2330"] is True
+
+    flags_bull = compute_sar_flip_flags(conn, ["2330"], direction="多頭", within_days=1)
+    assert flags_bull["2330"] is False
+
+
+def test_apply_candidate_filters_sar_flip_option_filters_by_direction(monkeypatch):
+    df = pd.DataFrame({"stock_id": ["2330", "1101", "2603"]})
+    monkeypatch.setattr(
+        chart_data, "compute_sar_flip_flags",
+        lambda conn, stock_ids, direction, within_days: {"2330": True, "1101": False, "2603": True},
+    )
+
+    result = apply_candidate_filters(
+        conn=None, candidates_df=df, active_filter_labels=[],
+        sar_flip_option={"direction": "多頭", "within_days": 1},
+    )
+
+    assert list(result["stock_id"]) == ["2330", "2603"]
+
+
+def test_apply_candidate_filters_returns_unfiltered_when_sar_flip_option_is_none():
+    df = pd.DataFrame({"stock_id": ["2330", "1101"]})
+    result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=[], sar_flip_option=None)
+    assert list(result["stock_id"]) == ["2330", "1101"]

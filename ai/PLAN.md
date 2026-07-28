@@ -3090,3 +3090,45 @@ main_window.py`的`_poll_pipeline_status()`在閒置/失敗兩種狀態都加上
 (`dashboard/app.py`)——候選清單內搜尋的「選取+捲動」互動方式是Qt原生元件特有的
 概念，Streamlit的表格互動模型不同，是否要在Streamlit版也做類似功能，待使用者
 之後提出再評估。
+
+## 新增SAR翻轉規則+候選清單「SAR翻轉」篩選器(2026-07-29)
+
+使用者要求：①到`ref_project`搜尋裡面計算SAR的方式，納入我們的規則、標註清楚引用
+來源；②候選清單篩選條件新增「[勾選框][多頭|空頭下拉]SAR翻轉___天數(預設1天=當天
+翻轉)」。
+
+**來源調查**：`ref-project/tw_stock_analyzer/src/core/stock_scanner.py`的
+`calculate_sar()`(內部標註「SAR - 通過驗證」)，跟教科書Wilder原始SAR有3個明確
+差異：①加速因子預設0.03/0.03/0.6(教科書常見0.02/0.02/0.2)，反轉更靈敏；②移除
+教科書版「SAR不得超過前兩日高/低點」的箝制(原始碼用❌註解標記為刻意移除)；③每日
+最終多空判斷不是迴圈內部的bull變數，而是事後用`sar當日數值 <= 當日最低價`
+(含等於)重新逐日判斷。「翻轉天數」邏輯對照`calculate_history_metrics()`的
+`flip_day`迴圈、篩選邏輯對照`ui/widgets/dashboard.py`的
+`flip_days <= params.SAR_FLIP_DAYS`。
+
+**新模組**：`src/indicators/parabolic_sar.py`——`compute_sar()`(逐字對照來源演算法，
+含上述3點差異的docstring說明)、`sar_flip_days_ago()`(算目前多空狀態是幾天前翻轉的，
+1=當天翻轉)、`sar_flipped_within()`(方向+天數綜合判斷)。這個來源跟`ai/zhu-rules/`
+(朱家泓)、`ai/ebook-summary-chen/`(陳家豐)都無關，是第三個獨立來源，比照
+`margin_trading.py`/`volume_washout.py`的precedent：不掛`@implements_rule`
+(那個裝飾器綁定朱老師書的246條規則庫manifest)，只在docstring寫清楚引用來源。
+
+**候選清單篩選器整合**：`src/presentation/chart_data.py`新增`compute_sar_flip_
+flags()`(對候選股逐檔查250個交易日(`SAR_FLIP_LOOKBACK_DAYS`)歷史算SAR，250天是
+讓SAR的加速因子有暖身期收斂穩定)。這個篩選條件是「勾選框+方向下拉+天數輸入」三個
+元件綁一起，跟既有`CANDIDATE_FILTERS`(單純label→checkbox的registry)形狀不同，
+因此`apply_candidate_filters()`新增獨立的`sar_flip_option`參數(格式
+`{"direction": "多頭"|"空頭", "within_days": int}`)，不塞進`active_filter_labels`
+清單，兩者可以同時套用(AND)。
+
+**兩個前端都有加**(這次跟"候選清單內搜尋"不同，UI元件本身是Qt/Streamlit都有的
+標準元件，沒有互動模型落差，兩邊都做)：`desktop/main_window.py`在`filter_bar`
+新增`QCheckBox`+`QComboBox`(多頭/空頭)+`QSpinBox`(1~60天，預設1)；
+`dashboard/app.py`新增對應的`checkbox`+`selectbox`+`number_input`。
+
+新增測試：`tests/test_parabolic_sar.py`(11個，含手動逐日追算的SAR翻轉案例、
+flip_days_ago的多種情境、方向不符時強制回傳False)；`tests/test_chart_data.py`
+新增5個(`compute_sar_flip_flags`真實DB案例、`apply_candidate_filters`的
+`sar_flip_option`整合)。713個測試全過(697+11+5)。另外用真實本機DB跑`desktop/
+main_window.py`的smoke test，確認勾選SAR翻轉篩選前後候選數量正確變化
+(102→2，切換空頭/5天→23)，無crash。

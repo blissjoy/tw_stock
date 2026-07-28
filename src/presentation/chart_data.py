@@ -19,6 +19,7 @@ from src.data import trading_calendar
 from src.indicators.kd import compute_kd
 from src.indicators.macd import compute_macd
 from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned
+from src.indicators.parabolic_sar import compute_sar, sar_flipped_within
 from src.patterns import chart_overlays
 
 _CONFIDENCE_PATTERN = re.compile(r"（(\d+)%）")
@@ -114,15 +115,67 @@ CANDIDATE_FILTER_DEFAULTS: dict[str, bool] = {
 }
 
 
-def apply_candidate_filters(conn, candidates_df: pd.DataFrame, active_filter_labels: list[str]) -> pd.DataFrame:
+# SAR翻轉篩選(勾選框+多頭/空頭下拉+翻轉天數輸入)的歷史回看天數：SAR是逐日累積、跟路徑
+# 相關的指標(加速因子隨趨勢延續而增加)，需要足夠長的暖身期讓狀態收斂穩定，抓太短會讓早期
+# 任意的初始多空種子影響到「目前」的判斷。抓250個交易日(約1年)，跟`compute_ma_bullish_flags`
+# 用「勾選才查」的精神一致，不是每次載入候選清單都算。
+SAR_FLIP_LOOKBACK_DAYS = 250
+
+
+def compute_sar_flip_flags(
+    conn, stock_ids: list[str], direction: str = "多頭", within_days: int = 1,
+    lookback_days: int = SAR_FLIP_LOOKBACK_DAYS,
+) -> dict[str, bool]:
+    """對每檔股票算出「SAR是否翻轉為`direction`(多頭/空頭)、且發生在最近`within_days`天以內」
+    (見`src.indicators.parabolic_sar.sar_flipped_within`，含引用來源說明)。只在候選清單篩選器
+    實際勾選SAR翻轉條件時才呼叫(見`apply_candidate_filters`的`sar_flip_option`參數)。歷史資料
+    不足3天(compute_sar至少需要2天以上才有意義)的股票視為不成立(False)，不拋例外。
+    """
+    flags: dict[str, bool] = {}
+    for stock_id in stock_ids:
+        cur = conn.execute(
+            "SELECT high, low, close FROM stock_prices WHERE stock_id = ? ORDER BY date DESC LIMIT ?",
+            (stock_id, lookback_days),
+        )
+        rows = cur.fetchall()[::-1]
+        if len(rows) < 3:
+            flags[stock_id] = False
+            continue
+        high = pd.Series([row[0] for row in rows])
+        low = pd.Series([row[1] for row in rows])
+        close = pd.Series([row[2] for row in rows])
+        sar_bull, _ = compute_sar(high, low, close)
+        flags[stock_id] = sar_flipped_within(sar_bull, direction=direction, within_days=within_days)
+    return flags
+
+
+def apply_candidate_filters(
+    conn, candidates_df: pd.DataFrame, active_filter_labels: list[str],
+    sar_flip_option: dict | None = None,
+) -> pd.DataFrame:
     """依勾選的篩選標籤(CANDIDATE_FILTERS的key)逐一AND套用，回傳過濾後的候選清單。
-    未勾選任何篩選(active_filter_labels為空)時原樣回傳，不做任何運算。"""
-    if not active_filter_labels or candidates_df.empty:
+    未勾選任何篩選(active_filter_labels為空且sar_flip_option為None)時原樣回傳，不做任何運算。
+
+    sar_flip_option：SAR翻轉篩選的參數，格式{"direction": "多頭"|"空頭", "within_days": int}，
+    傳None代表沒有勾選這個條件。這個篩選條件的UI是「勾選框+方向下拉+天數輸入」三個元件綁在
+    一起，不是單純的勾選框，不適合塞進`CANDIDATE_FILTERS`那種「label -> 純checkbox」的
+    registry，因此用獨立參數傳入，不是加進`active_filter_labels`清單裡。
+    """
+    if candidates_df.empty:
+        return candidates_df
+    if not active_filter_labels and sar_flip_option is None:
         return candidates_df
     stock_ids = candidates_df["stock_id"].tolist()
     mask = pd.Series(True, index=candidates_df.index)
-    for label in active_filter_labels:
+    for label in active_filter_labels or []:
         flags = CANDIDATE_FILTERS[label](conn, stock_ids)
+        mask &= candidates_df["stock_id"].map(flags).fillna(False)
+    if sar_flip_option is not None:
+        flags = compute_sar_flip_flags(
+            conn, stock_ids,
+            direction=sar_flip_option.get("direction", "多頭"),
+            within_days=sar_flip_option.get("within_days", 1),
+        )
         mask &= candidates_df["stock_id"].map(flags).fillna(False)
     return candidates_df[mask].reset_index(drop=True)
 

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -139,6 +140,25 @@ class MainWindow(QMainWindow):
             cb.stateChanged.connect(self._reload_candidates)
             filter_bar.addWidget(cb)
             self.filter_checkboxes[label] = cb
+
+        # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
+        # 塞進上面CANDIDATE_FILTERS的registry迴圈，另外獨立組裝、獨立傳給apply_candidate_filters
+        # 的sar_flip_option參數(見src/presentation/chart_data.py)。
+        filter_bar.addSpacing(20)
+        self.sar_flip_checkbox = QCheckBox("SAR 翻轉")
+        self.sar_flip_checkbox.stateChanged.connect(self._reload_candidates)
+        filter_bar.addWidget(self.sar_flip_checkbox)
+        self.sar_flip_direction_combo = QComboBox()
+        self.sar_flip_direction_combo.addItems(["多頭", "空頭"])
+        self.sar_flip_direction_combo.currentIndexChanged.connect(self._reload_candidates)
+        filter_bar.addWidget(self.sar_flip_direction_combo)
+        self.sar_flip_days_spin = QSpinBox()
+        self.sar_flip_days_spin.setRange(1, 60)
+        self.sar_flip_days_spin.setValue(1)
+        self.sar_flip_days_spin.setSuffix(" 天內翻轉")
+        self.sar_flip_days_spin.valueChanged.connect(self._reload_candidates)
+        filter_bar.addWidget(self.sar_flip_days_spin)
+
         filter_bar.addStretch()
         root_layout.addLayout(filter_bar)
 
@@ -315,7 +335,13 @@ class MainWindow(QMainWindow):
         target_date = self.date_combo.currentText() or None
         df, latest_date, is_intraday = chart_data.load_candidates_for_date(self.conn, target_date=target_date)
         active_filters = [label for label, cb in self.filter_checkboxes.items() if cb.isChecked()]
-        df = chart_data.apply_candidate_filters(self.conn, df, active_filters)
+        sar_flip_option = None
+        if self.sar_flip_checkbox.isChecked():
+            sar_flip_option = {
+                "direction": self.sar_flip_direction_combo.currentText(),
+                "within_days": self.sar_flip_days_spin.value(),
+            }
+        df = chart_data.apply_candidate_filters(self.conn, df, active_filters, sar_flip_option=sar_flip_option)
         self.candidates_table.setRowCount(0)
         self.intraday_label.setVisible(is_intraday)
         if latest_date is None:

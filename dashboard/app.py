@@ -225,6 +225,20 @@ def main() -> None:
         if col.checkbox(label, value=CANDIDATE_FILTER_DEFAULTS.get(label, False), key=f"filter_{label}")
     ]
 
+    # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
+    # 放進上面CANDIDATE_FILTERS那組迴圈，改用獨立的sar_flip_option參數傳給
+    # apply_candidate_filters(見src/presentation/chart_data.py)。
+    sar_col1, sar_col2, sar_col3 = st.columns([1, 1, 2])
+    sar_flip_enabled = sar_col1.checkbox("SAR 翻轉", value=False, key="filter_sar_flip_enabled")
+    sar_flip_direction = sar_col2.selectbox("方向", ["多頭", "空頭"], index=0, key="filter_sar_flip_direction")
+    sar_flip_within_days = sar_col3.number_input(
+        "天數內翻轉", min_value=1, max_value=60, value=1, step=1, key="filter_sar_flip_within_days"
+    )
+    sar_flip_option = (
+        {"direction": sar_flip_direction, "within_days": int(sar_flip_within_days)}
+        if sar_flip_enabled else None
+    )
+
     button_col1, button_col2 = st.columns([1, 1])
     with button_col1:
         if st.button("🔄 立即重新篩選"):
@@ -257,7 +271,7 @@ def main() -> None:
         if candidate_dates else None
     )
     candidates_df, latest_date, is_intraday = load_candidates_for_date(conn, target_date=selected_date)
-    candidates_df = apply_candidate_filters(conn, candidates_df, active_filters)
+    candidates_df = apply_candidate_filters(conn, candidates_df, active_filters, sar_flip_option=sar_flip_option)
 
     selected_stock_id = None
     if latest_date is None:
