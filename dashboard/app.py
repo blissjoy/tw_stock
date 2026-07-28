@@ -49,7 +49,7 @@ def main() -> None:
     from scripts.daily_pipeline import run_daily_pipeline
     from src.data import storage
     from src.data.connection import get_default_connection
-    from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store
+    from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
     try:
         for key, value in st.secrets.items():
@@ -153,6 +153,21 @@ def main() -> None:
                         if m.get("reference"):
                             st.caption(f"原文與頁碼：{m['reference']}")
                         st.divider()
+                    # 「總結分析」放在列完所有規則之後——使用者反映一長串規則清單太雜亂，
+                    # 這裡用summarize_signal_matches()統計出的多頭/空頭傾向數量+信心最高的
+                    # 規則，讓使用者不用自己從落落長的清單裡歸納重點。
+                    summary = summarize_signal_matches(signal_matches)
+                    top = summary["top_match"]
+                    top_note = (top.get("note") or "").split("\n")[0] if top else ""
+                    st.markdown("**📌 總結分析**")
+                    st.write(
+                        f"本次共觸發 {summary['total']} 條規則"
+                        f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
+                        f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。"
+                    )
+                    st.write(f"信心最高的訊號：{top['rule_id']}　{top['title']}（{top['confidence']}%）")
+                    if top_note:
+                        st.caption(f"目前狀態：{top_note}")
         # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到6條、
         # 會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。
         sr_levels = []

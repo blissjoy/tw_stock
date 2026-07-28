@@ -3179,3 +3179,41 @@ history()`含SAR欄位)；`tests/test_chart_render.py`新增1個(驗證Y軸價�
 都有被嵌入HTML)。717個測試全過(713+4)。另外用Playwright實際渲染桌面版與Streamlit版
 畫面拍照驗證(SAR點位顏色、游標高度對應價格數值、分析面板「分析：」標籤與自動撐高)，
 確認兩個前端行為一致。
+
+## 修正桌面版個股分析截斷+無捲軸bug、新增「總結分析」(2026-07-29)
+
+使用者實測上一版的「個股分析自動撐高」修正後回報兩個問題：①面板雖然變大了，但內容還是
+被截斷、也沒有scrollbar可以拉；②列出所有符合規則後太雜亂，應該要有一個總結。
+
+**①截斷+無捲軸根因**：用真實DB實際展開面板+診斷腳本追查，確認`analysis_view.
+setFixedHeight()`本身有正確設對高度(例如1986px)，`central`(最外層QScrollArea包住的
+widget)的`sizeHint()`也正確反映出應有的高度(例如3052px)，但`central`實際的`.height()`
+卻卡在建構時寫死的1150沒有跟著變──因為`analysis_view`所在的`QSplitter`不會像一般
+`QVBoxLayout`那樣把子元件sizeHint的變化即時轉發成`LayoutRequest`事件往上傳給
+`central`，導致`outer_scroll`(QScrollArea)的捲軸範圍從頭到尾沒被撐大，內容因此在
+`central`的可視範圍外被截斷、卻沒有任何捲軸可以捲過去看。
+
+修正：`desktop/main_window.py`新增`self._central_widget`參照與
+`_sync_central_height_to_content()`，在`_set_analysis_html()`/`_on_analysis_toggled()`
+(收合時)都用`QTimer.singleShot(0, ...)`延後一輪事件迴圈呼叫(setFixedHeight()對祖先
+sizeHint的影響要等Qt處理完當輪待處理的LayoutRequest才會反映，馬上同步呼叫會讀到舊值)，
+直接把`central.setFixedHeight()`同步成`max(1150, central.sizeHint().height())`，繞過
+QSplitter不會主動轉發的問題。用真實DB+診斷腳本驗證：捲軸總可捲動高度現在正確等於
+`central.sizeHint().height()`(例如3052)，捲到底部截圖確認清單最後一條規則完整可見、
+「總結分析」段落也完整不截斷。⚠️ 已知殘留限制：面板收合後`central`不會自動縮小回去
+(只長高不會自動縮短，深入研究後確認是QScrollArea+QSplitter巢狀結構下widget收縮的
+Qt行為限制，不是本次要解決的截斷問題)，只是外層捲軸底部會多一段空白可以捲，不影響
+內容可讀性。
+
+**②總結分析**：`src/screener/daily_screener.py`新增`summarize_signal_matches()`，
+對`analyze_stock_signals()`回傳的清單統計出：總數、依規則「標題」文字含「多」/「空」
+關鍵字概略分類的多頭/空頭/其他傾向規則數(標題兩者都沒有或都有的規則歸入「其他」，
+不勉強分類——書中不少規則如K棒型態/缺口規則標題本來就不含這兩個字)、以及信心最高的
+規則(matches已依信心排序，直接取第一筆)。兩個前端都在列完所有規則之後、附加一段
+「📌 總結分析」：觸發規則總數+多空傾向分布(附註「依規則標題文字粗略分類，僅供參考」，
+不假裝是精確判定)+信心最高規則的標題與目前狀態。
+
+新增測試：`tests/test_daily_screener.py`新增3個(空清單、標題關鍵字分類與取top_match、
+標題同時含多空兩字歸入其他)。720個測試全過(717+3)。用真實本機DB實際展開2330台積電的
+個股分析面板、捲到最底部截圖確認不再截斷；桌面版與Streamlit版都截圖確認「總結分析」
+正確顯示且內容一致。

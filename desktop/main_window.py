@@ -45,7 +45,7 @@ from src.data.connection import get_default_connection
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src.presentation import chart_data, pipeline_status
-from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store
+from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
 
 class PipelineWorker(QThread):
@@ -123,6 +123,7 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         central.setMinimumHeight(1150)  # 足夠容納候選清單(320)+圖表(450)+摘要(220)等實務高度，視窗變小時才會出現捲軸
+        self._central_widget = central
         outer_scroll.setWidget(central)
         root_layout = QVBoxLayout(central)
 
@@ -509,6 +510,8 @@ class MainWindow(QMainWindow):
         self.analysis_view.setVisible(checked)
         if checked:
             self._refresh_analysis_view()
+        else:
+            QTimer.singleShot(0, self._sync_central_height_to_content)
 
     def _set_analysis_html(self, html_content: str) -> None:
         """設定「個股分析」面板內容，並依實際內容量重新算出剛好的高度(setFixedHeight)，
@@ -521,6 +524,36 @@ class MainWindow(QMainWindow):
         doc_height = self.analysis_view.document().size().height()
         frame_width = self.analysis_view.frameWidth() * 2
         self.analysis_view.setFixedHeight(int(doc_height) + frame_width + 8)
+        # ⚠️ setFixedHeight()對祖先元件(經過QSplitter)sizeHint的影響要等Qt處理完
+        # 目前這輪事件迴圈裡待處理的LayoutRequest事件才會反映出來——這裡如果馬上
+        # 同步呼叫_sync_central_height_to_content()，central.sizeHint()讀到的還是
+        # 舊值(還沒重新計算)，算出來的目標高度會不夠高。用QTimer.singleShot(0, ...)
+        # 排到下一輪事件迴圈執行，讓Qt先把待處理的layout事件處理完。
+        QTimer.singleShot(0, self._sync_central_height_to_content)
+
+    def _sync_central_height_to_content(self) -> None:
+        """⚠️ 2026-07-29修正：analysis_view改成setFixedHeight()動態撐高後，實測發現
+        outer_scroll(最外層QScrollArea)的捲軸範圍完全沒有跟著變大——用QApplication.
+        processEvents()等過layout事件處理後再檢查central.height()仍卡在建構時設定
+        的1150(舊值)，即使central.sizeHint()已經正確反映analysis_view變高後應有的
+        真實高度(例如3052)。原因是analysis_view所在的QSplitter(候選清單/圖表區domain)
+        不會像一般QVBoxLayout那樣把子元件sizeHint的變化即時轉發成LayoutRequest事件
+        往上傳給central——導致central的實際尺寸沒有跟著sizeHint調整，
+        outer_scroll(setWidgetResizable(True)雖然會依widget的尺寸決定要不要出現
+        捲軸，但這裡widget的尺寸從頭到尾沒真的變過)的捲軸範圍自然也不會變大，內容因此
+        被截斷、卻沒有任何捲軸可以捲過去看——這裡改成每次analysis_view顯示/隱藏或
+        內容變動時，直接手動把central.setMinimumHeight()同步成sizeHint()的高度
+        (但不低於原本1150的基準值，避免面板收合後又縮得太小)，繞過QSplitter不會
+        主動轉發的問題，強制outer_scroll重新計算出正確的捲軸範圍。
+        """
+        target_height = max(1150, self._central_widget.sizeHint().height())
+        self._central_widget.setFixedHeight(target_height)
+        # ⚠️ 已知限制：這個寫法能正確「長高」(展開內容變多時)，但實測發現QScrollArea
+        # 對於「縮小」(例如收合分析面板後，target_height應該變回1150)不會主動生效——
+        # central.height()會停在展開時的最大高度，直到下次視窗resize或有新的內容
+        # 撐得更高才會重新計算。影響：面板收合後，外層捲軸底部會多出一段空白可以捲，
+        # 不是內容被截斷(不影響本次修正的目標)，只是視覺上不夠精簡；之後如果要處理這個
+        # 才需要再深入研究QScrollArea+QSplitter巢狀結構下widget收縮的正確做法。
 
     def _refresh_analysis_view(self) -> None:
         """填入「個股分析」面板內容：目前這檔股票符合規則庫中哪些訊號(依信心分數高到低)，
@@ -574,6 +607,23 @@ class MainWindow(QMainWindow):
                 block += f"<i>原文與頁碼：{html.escape(m['reference'])}</i>"
             block += "</p><hr>"
             blocks.append(block)
+        # 「總結分析」放在列完所有規則之後——使用者反映一長串規則清單太雜亂，這裡用
+        # daily_screener.summarize_signal_matches()統計出的多頭/空頭傾向數量+信心最高的
+        # 規則，讓使用者不用自己從落落長的清單裡歸納重點。
+        summary = summarize_signal_matches(matches)
+        top = summary["top_match"]
+        top_note = (top.get("note") or "").split("\n")[0] if top else ""
+        summary_block = (
+            "<p><b>📌 總結分析</b><br>"
+            f"本次共觸發 {summary['total']} 條規則"
+            f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
+            f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。<br>"
+            f"信心最高的訊號：{html.escape(top['rule_id'])}　{html.escape(top['title'])}"
+            f"（{top['confidence']}%）"
+            + (f"<br>目前狀態：{html.escape(top_note)}" if top_note else "")
+            + "</p><hr>"
+        )
+        blocks.append(summary_block)
         self._set_analysis_html("".join(blocks))
 
     # ------------------------------------------------------------------

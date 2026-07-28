@@ -636,6 +636,43 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
     return result
 
 
+def summarize_signal_matches(matches: list[dict]) -> dict:
+    """對`analyze_stock_signals()`回傳的清單算出一段簡短總結，供UI在列完所有符合規則後
+    再附加一段「總結分析」，不用讓使用者自己從一長串規則清單裡歸納重點。
+
+    多頭/空頭傾向是依規則「標題」文字裡有沒有出現「多」或「空」字概略分類的，不是精確的
+    多空判定——書中不少規則(例如K棒型態、缺口規則)的標題本來就不含這兩個字(如「低檔晨星」
+    「向上跳空缺口支撐規則」)，這類規則會被歸進"other"，不會被迫湊進多頭或空頭；標題同時
+    含「多」「空」兩字或兩者都沒有，也歸進"other"。這只是「大致上偏多的訊號比較多還是偏空
+    的訊號比較多」的粗略統計，用來讓總結一眼看出整體風向，不是取代逐條規則判讀。
+
+    matches已經依confidence由高到低排序(見analyze_stock_signals())，回傳的"top_match"
+    直接取第一筆即可，不用重新排序。matches為空時回傳total=0、top_match=None。
+    """
+    if not matches:
+        return {"total": 0, "bullish": 0, "bearish": 0, "other": 0, "top_match": None}
+
+    bullish = bearish = other = 0
+    for m in matches:
+        title = m["title"]
+        has_bull = "多" in title
+        has_bear = "空" in title
+        if has_bull and not has_bear:
+            bullish += 1
+        elif has_bear and not has_bull:
+            bearish += 1
+        else:
+            other += 1
+
+    return {
+        "total": len(matches),
+        "bullish": bullish,
+        "bearish": bearish,
+        "other": other,
+        "top_match": matches[0],
+    }
+
+
 def screen_all_stocks(stock_frames: dict[str, pd.DataFrame], min_days: int = 60) -> list[dict]:
     """對多檔股票批次跑目前已接上的所有screen_*規則，回傳今天所有觸發訊號的候選清單。
     同一檔股票若同時觸發多條規則，會分別各出現一筆(不同signal_name)，不互相排擠。

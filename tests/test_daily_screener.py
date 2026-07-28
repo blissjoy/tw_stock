@@ -243,6 +243,42 @@ def test_analyze_stock_signals_merges_duplicate_rule_id_notes(monkeypatch):
     )
 
 
+def test_summarize_signal_matches_returns_zeros_when_empty():
+    summary = daily_screener.summarize_signal_matches([])
+    assert summary == {"total": 0, "bullish": 0, "bearish": 0, "other": 0, "top_match": None}
+
+
+def test_summarize_signal_matches_classifies_by_title_keyword_and_picks_top_match():
+    # 依信心分數由高到低排列，符合analyze_stock_signals()的輸出慣例(summarize_signal_
+    # matches()假設輸入已排序，直接取第一筆當top_match，不會自己重新排序)。
+    matches = [
+        {"rule_id": "R-GAP-01", "title": "缺口基本定義與偵測規則", "confidence": 94, "note": "今天出現向下跳空缺口", "description": "d", "reference": "r"},
+        {"rule_id": "R-TREND-14", "title": "多頭短線進場", "confidence": 92, "note": "多頭排列成立", "description": "d", "reference": "r"},
+        {"rule_id": "R-CANDLE-33", "title": "機械化空頭K線交易規則", "confidence": 89, "note": None, "description": "d", "reference": "r"},
+    ]
+
+    summary = daily_screener.summarize_signal_matches(matches)
+
+    assert summary["total"] == 3
+    assert summary["bullish"] == 1  # R-TREND-14標題含"多"不含"空"
+    assert summary["bearish"] == 1  # R-CANDLE-33標題含"空"不含"多"
+    assert summary["other"] == 1  # R-GAP-01標題兩者皆無
+    # matches已依信心排序，top_match直接取第一筆(信心94%的R-GAP-01排第一，不是重新排序找最高)
+    assert summary["top_match"]["rule_id"] == "R-GAP-01"
+
+
+def test_summarize_signal_matches_title_with_both_keywords_counts_as_other():
+    matches = [
+        {"rule_id": "R-X-01", "title": "多空操作心法", "confidence": 80, "note": None, "description": None, "reference": None},
+    ]
+
+    summary = daily_screener.summarize_signal_matches(matches)
+
+    assert summary["bullish"] == 0
+    assert summary["bearish"] == 0
+    assert summary["other"] == 1
+
+
 def _build_narrow_range_breakout_df(n_days: int = 60) -> pd.DataFrame:
     """前n_days-1天維持完全相同的高低價(狹幅盤整不擴張)，最後一天中長紅K放量突破。"""
     dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
