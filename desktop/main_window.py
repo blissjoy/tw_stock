@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -42,10 +43,13 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from desktop.chart_render import render_chart_html
 from src.data import storage
 from src.data.connection import get_default_connection
+from src.data.yfinance_client import TAIEX_STOCK_ID
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src.presentation import chart_data, pipeline_status
 from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
+
+TAIEX_DISPLAY_NAME = "台股加權指數"
 
 
 class PipelineWorker(QThread):
@@ -113,13 +117,23 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        # 兩個分頁：分頁1是原本全部功能(候選清單/個股查詢/圖表/個股分析)，分頁2是新增的
+        # 「大盤分析」——同一套規則比對邏輯(_build_analysis_html())套用在大盤(^TWII)
+        # 這個特殊stock_id上，跟個股分析共用同一套渲染格式，只是分析對象不同。
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+
+        self._build_stock_tab()
+        self._build_market_tab()
+
+    def _build_stock_tab(self) -> None:
         # 候選清單+搜尋列+均線/切線勾選+圖表+分析面板+摘要文字全部疊在一起，自然高度常常
         # 超過視窗實際可見範圍(尤其視窗沒有最大化時)，之前各元件只能被硬擠壓、圖表下方的
         # 摘要文字被截斷看不到。改成用QScrollArea包住整個central widget：視窗比內容小時
         # 最外層會出現垂直捲軸，使用者可以捲動看到全部內容，而不是元件互相擠壓。
         outer_scroll = QScrollArea()
         outer_scroll.setWidgetResizable(True)
-        self.setCentralWidget(outer_scroll)
+        self.tabs.addTab(outer_scroll, "選股")
 
         central = QWidget()
         central.setMinimumHeight(1150)  # 足夠容納候選清單(320)+圖表(450)+摘要(220)等實務高度，視窗變小時才會出現捲軸
@@ -327,6 +341,43 @@ class MainWindow(QMainWindow):
         splitter.addWidget(bottom)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
+
+    def _build_market_tab(self) -> None:
+        """「大盤分析」分頁：跟個股分析共用同一套規則比對渲染邏輯(_build_analysis_html())，
+        只是分析對象固定是大盤(TAIEX_STOCK_ID)，不是使用者目前選取的個股。
+
+        這裡直接用QVBoxLayout(不是候選清單分頁那種QSplitter)包在QScrollArea裡——
+        2026-07-29修正個股分析截斷bug時發現QSplitter不會把子元件sizeHint的變化轉發給
+        外層QScrollArea，這裡沒有QSplitter，一般QVBoxLayout+QScrollArea(setWidgetResizable
+        (True))組合本來就能正確隨內容量調整捲軸範圍，不需要_sync_central_height_to_
+        content()那樣的手動同步workaround。
+        """
+        market_scroll = QScrollArea()
+        market_scroll.setWidgetResizable(True)
+        self.tabs.addTab(market_scroll, "大盤分析")
+
+        market_content = QWidget()
+        market_scroll.setWidget(market_content)
+        market_layout = QVBoxLayout(market_content)
+
+        self.market_analysis_btn = QPushButton("📊 大盤分析")
+        self.market_analysis_btn.setCheckable(True)
+        self.market_analysis_btn.setToolTip(f"顯示{TAIEX_DISPLAY_NAME}目前符合規則庫中哪些訊號，依信心分數排序")
+        self.market_analysis_btn.toggled.connect(self._on_market_analysis_toggled)
+        market_layout.addWidget(self.market_analysis_btn)
+
+        self.market_analysis_view = QTextEdit()
+        self.market_analysis_view.setReadOnly(True)
+        self.market_analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.market_analysis_view.setVisible(False)
+        market_layout.addWidget(self.market_analysis_view)
+
+        self.market_analysis_collapse_btn = QPushButton("🔼 收合大盤分析")
+        self.market_analysis_collapse_btn.setVisible(False)
+        self.market_analysis_collapse_btn.clicked.connect(lambda: self.market_analysis_btn.setChecked(False))
+        market_layout.addWidget(self.market_analysis_collapse_btn)
+
+        market_layout.addStretch()
 
     # ------------------------------------------------------------------
     # 候選清單／圖表
@@ -565,32 +616,23 @@ class MainWindow(QMainWindow):
         # 不是內容被截斷(不影響本次修正的目標)，只是視覺上不夠精簡；之後如果要處理這個
         # 才需要再深入研究QScrollArea+QSplitter巢狀結構下widget收縮的正確做法。
 
-    def _refresh_analysis_view(self) -> None:
-        """填入「個股分析」面板內容：目前這檔股票符合規則庫中哪些訊號(依信心分數高到低)，
-        每條附上從ai/zhu-rules/查出的規則說明。跟_rerender_chart各自重新查一次價格資料，
-        不共用同一份df——避免兩邊狀態耦合(例如面板開著時切換股票，忘記同步更新)，運算成本
-        很低(SQL查詢+5條screen_*規則判斷)，不需要為了省這點重算而增加程式複雜度。
+    def _build_analysis_html(self, stock_id: str, header_label: str) -> str:
+        """組出「規則比對清單+總結分析」的HTML內容，供個股分析(_refresh_analysis_view())
+        與大盤分析(_refresh_market_analysis_view())共用同一套渲染邏輯——差別只在於分析
+        對象是哪一個stock_id、標題文字，判斷/顯示格式完全一致(大盤本身就是`stock_prices`
+        表裡的一筆特殊資料，`load_price_history()`/`analyze_stock_signals()`不需要知道
+        它是大盤還是個股，見src/data/yfinance_client.py的fetch_taiex_prices())。
         """
-        if self.conn is None or not self._current_stock_id:
-            self._set_analysis_html("<p>請先從候選清單點選或查詢一檔股票。</p>")
-            return
-        price_df = chart_data.load_price_history(self.conn, self._current_stock_id)
+        price_df = chart_data.load_price_history(self.conn, stock_id)
         if price_df.empty:
-            self._set_analysis_html(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
-            return
+            return f"<p>查無股票代號 {html.escape(stock_id)} 的價格資料。</p>"
         # trend_df：短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比price_df
         # (預設120天顯示窗口)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明。
-        trend_df = chart_data.load_price_history(self.conn, self._current_stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        trend_df = chart_data.load_price_history(self.conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
         matches = analyze_stock_signals(price_df, trend_df=trend_df)
-        # 使用者反映「不知道現在顯示的是誰的分析」——第一行固定加註股票代碼+名稱，不管
-        # 有沒有符合訊號的規則都要顯示，讓使用者能一眼確認面板已經跟著候選清單點選更新，
-        # 不是還停留在上一檔股票的內容。
-        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
-        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
-        header = f"<p><b>個股分析：{html.escape(stock_label)}</b></p>"
+        header = f"<p><b>{html.escape(header_label)}</b></p>"
         if not matches:
-            self._set_analysis_html(header + "<p>目前沒有符合任何已接上規則庫的訊號。</p>")
-            return
+            return header + "<p>目前沒有符合任何已接上規則庫的訊號。</p>"
         # ⚠️ QTextEdit.setHtml()一定會把內容當HTML剖析，rule_scan.py的note文字裡常有
         # "MA5<MA10<MA20"這種原始"<"/">"符號(見rule_scan.py)，不escape的話會被誤判成
         # HTML標籤、內容被吃掉一截(實測"目前狀態：MA5<MA10<MA20..."只會顯示到"MA5"就斷掉)。
@@ -634,7 +676,46 @@ class MainWindow(QMainWindow):
             + "</p><hr>"
         )
         blocks.append(summary_block)
-        self._set_analysis_html("".join(blocks))
+        return "".join(blocks)
+
+    def _refresh_analysis_view(self) -> None:
+        """填入「個股分析」面板內容：目前這檔股票符合規則庫中哪些訊號(依信心分數高到低)，
+        每條附上從ai/zhu-rules/查出的規則說明。跟_rerender_chart各自重新查一次價格資料，
+        不共用同一份df——避免兩邊狀態耦合(例如面板開著時切換股票，忘記同步更新)，運算成本
+        很低(SQL查詢+5條screen_*規則判斷)，不需要為了省這點重算而增加程式複雜度。
+        """
+        if self.conn is None or not self._current_stock_id:
+            self._set_analysis_html("<p>請先從候選清單點選或查詢一檔股票。</p>")
+            return
+        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
+        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        self._set_analysis_html(self._build_analysis_html(self._current_stock_id, f"個股分析：{stock_label}"))
+
+    def _on_market_analysis_toggled(self, checked: bool) -> None:
+        self.market_analysis_view.setVisible(checked)
+        self.market_analysis_collapse_btn.setVisible(checked)
+        if checked:
+            self._refresh_market_analysis_view()
+
+    def _refresh_market_analysis_view(self) -> None:
+        """填入「大盤分析」面板內容，跟個股分析(_refresh_analysis_view())共用
+        _build_analysis_html()，分析對象固定是大盤(TAIEX_STOCK_ID)。"""
+        if self.conn is None:
+            self._set_market_analysis_html("<p>尚未連線資料庫。</p>")
+            return
+        self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
+
+    def _set_market_analysis_html(self, html_content: str) -> None:
+        """設定「大盤分析」面板內容並依實際內容量重新算出剛好的高度，跟_set_analysis_html()
+        邏輯一致，但不需要呼叫_sync_central_height_to_content()——大盤分析分頁用的是
+        plain QVBoxLayout+QScrollArea(見_build_market_tab())，不像候選清單分頁那樣包了
+        一層QSplitter，一般QVBoxLayout+QScrollArea(setWidgetResizable(True))組合本來
+        就能正確隨內容量調整捲軸範圍。
+        """
+        self.market_analysis_view.setHtml(html_content)
+        doc_height = self.market_analysis_view.document().size().height()
+        frame_width = self.market_analysis_view.frameWidth() * 2
+        self.market_analysis_view.setFixedHeight(int(doc_height) + frame_width + 8)
 
     # ------------------------------------------------------------------
     # 按鈕

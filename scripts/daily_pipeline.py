@@ -170,6 +170,28 @@ def fetch_today_tpex(
     return len(prices_by_stock)
 
 
+def fetch_today_taiex(conn, date_str: str) -> bool:
+    """更新大盤(台股加權指數，`yfinance_client.TAIEX_STOCK_ID`)當天的OHLCV資料。
+
+    獨立於TWSE/TPEx兩條個股抓取路徑之外，只有一筆OHLCV資料要處理(不像個股還要合併
+    三大法人/融資融券報表)。先upsert_stocks()寫一筆market="INDEX"的紀錄滿足
+    stock_prices.stock_id的外鍵參照(見yfinance_client.fetch_taiex_prices()
+    docstring)，再寫入價格。呼叫端(`run_daily_pipeline()`)應該把這個函式包在自己的
+    try/except裡——任何一方失敗都不應該互相影響，這裡本身不吞例外。
+    """
+    iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    next_day = (date.fromisoformat(iso_date) + timedelta(days=1)).isoformat()
+    rows = yfinance_client.fetch_taiex_prices(iso_date, next_day)
+    if not rows:
+        return False
+    storage.upsert_stocks(conn, [{
+        "stock_id": yfinance_client.TAIEX_STOCK_ID, "name": "台股加權指數", "market": "INDEX",
+        "industry": None, "updated_at": datetime.now().isoformat(),
+    }])
+    storage.upsert_stock_prices(conn, rows)
+    return True
+
+
 def run_daily_pipeline(
     conn, date_str: str | None = None, min_days: int = 60, dry_run: bool = False, skip_tpex: bool = False,
     on_progress: Callable[[str, int, int], None] | None = None,
@@ -221,6 +243,14 @@ def run_daily_pipeline(
             # 注意：這裡刻意不用⚠這類emoji/特殊符號——Windows主控台預設編碼(cp950)無法
             # 編碼這個字元，會直接讓print()丟UnicodeEncodeError整個中斷排程(已實測踩過)。
             print(f"注意：{iso_date} TWSE尚未收盤，本次使用yfinance盤中即時價，收盤後建議重新抓取一次取得最終數字。")
+
+        # 大盤(台股加權指數)更新獨立包一層try/except——失敗不應該讓整條pipeline中斷，
+        # 個股資料已經抓完、候選清單照樣要算，大盤只是額外的補充分析素材。
+        try:
+            taiex_ok = fetch_today_taiex(conn, date_str)
+            print(f"大盤({yfinance_client.TAIEX_STOCK_ID})：{'更新成功' if taiex_ok else '查無資料，略過'}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"大盤({yfinance_client.TAIEX_STOCK_ID})更新失敗（略過，不影響個股資料）：{exc}")
 
         if not skip_tpex:
             tpex_count = fetch_today_tpex(

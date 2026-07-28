@@ -1,3 +1,5 @@
+import pytest
+
 import scripts.daily_pipeline as daily_pipeline
 import src.screener.daily_screener as daily_screener
 from src.data import storage
@@ -17,6 +19,19 @@ def _price_row(stock_id="2330", d="2026-07-22"):
 def _stub_stock_info(monkeypatch, rows):
     """預設的FinMind股票基本資料回應；每個測試若不特別關心名稱，用一份最小的假資料即可。"""
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_info", lambda: rows)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_taiex_network_calls(monkeypatch):
+    """run_daily_pipeline()新增了大盤(TAIEX)更新(見fetch_today_taiex())，會無條件呼叫
+    yfinance_client.fetch_taiex_prices()——這是一個真實對外的網路呼叫，這個檔案裡沒有
+    明確要測試這個行為的既有測試(例如test_run_daily_pipeline_writes_candidates_and_
+    skips_notify_on_dry_run)不應該不小心真的打到Yahoo Finance。只在這個測試檔案生效
+    (不是全域tests/conftest.py)，因為只有run_daily_pipeline()這條路徑會無條件觸發，
+    test_yfinance_client.py測的是這個函式本身，不應該被這個安全網擋住。個別測試需要驗證
+    真正行為時，在測試函式主體內用monkeypatch覆蓋即可(晚於這個fixture執行，會蓋過去)。
+    """
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda *args, **kwargs: [])
 
 
 def test_run_daily_pipeline_skips_when_twse_has_no_data(monkeypatch):
@@ -483,3 +498,79 @@ def test_run_daily_pipeline_writes_failed_status_and_reraises_on_error(monkeypat
 
     status = daily_pipeline.pipeline_status.read_status()
     assert status["status"] == "failed"
+
+
+def test_fetch_today_taiex_upserts_rows_and_returns_true(monkeypatch):
+    conn = _fresh_conn()
+    fake_rows = [{
+        "stock_id": daily_pipeline.yfinance_client.TAIEX_STOCK_ID, "date": "2026-07-22",
+        "open": 17000.0, "high": 17100.0, "low": 16950.0, "close": 17050.0,
+        "volume": 5000000, "trading_money": None, "trading_turnover": None, "spread": None,
+    }]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: fake_rows)
+
+    result = daily_pipeline.fetch_today_taiex(conn, "20260722")
+
+    assert result is True
+    row = conn.execute(
+        "SELECT close FROM stock_prices WHERE stock_id = ? AND date = ?",
+        (daily_pipeline.yfinance_client.TAIEX_STOCK_ID, "2026-07-22"),
+    ).fetchone()
+    assert row == (17050.0,)
+
+
+def test_fetch_today_taiex_returns_false_when_no_data(monkeypatch):
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: [])
+
+    assert daily_pipeline.fetch_today_taiex(conn, "20260722") is False
+
+
+def test_run_daily_pipeline_updates_taiex_alongside_stocks(monkeypatch):
+    """大盤更新是run_daily_pipeline()流程的一部分，個股資料抓取成功時應該一併呼叫。"""
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+
+    fake_rows = [{
+        "stock_id": daily_pipeline.yfinance_client.TAIEX_STOCK_ID, "date": "2026-07-22",
+        "open": 17000.0, "high": 17100.0, "low": 16950.0, "close": 17050.0,
+        "volume": 5000000, "trading_money": None, "trading_turnover": None, "spread": None,
+    }]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: fake_rows)
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
+
+    row = conn.execute(
+        "SELECT close FROM stock_prices WHERE stock_id = ? AND date = ?",
+        (daily_pipeline.yfinance_client.TAIEX_STOCK_ID, "2026-07-22"),
+    ).fetchone()
+    assert row == (17050.0,)
+    # 大盤要有一筆market="INDEX"的stocks資料才能滿足stock_prices的外鍵參照，但market
+    # 要跟"TWSE"/"TPEx"區分開，讓load_trailing_frames()能篩掉它、不被個股批次選股邏輯誤判
+    stock_row = conn.execute(
+        "SELECT market FROM stocks WHERE stock_id = ?", (daily_pipeline.yfinance_client.TAIEX_STOCK_ID,)
+    ).fetchone()
+    assert stock_row == ("INDEX",)
+
+
+def test_run_daily_pipeline_continues_when_taiex_update_raises(monkeypatch):
+    """大盤更新失敗不應該讓整條pipeline中斷——個股資料已經抓完，候選清單照樣要算。"""
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+
+    def _raise(start, end):
+        raise RuntimeError("模擬Yahoo Finance暫時打不通")
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", _raise)
+
+    candidates = daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
+
+    assert candidates == []  # screen_all_stocks本身回傳空list，跟大盤更新失敗與否無關，只驗證沒有中斷拋出

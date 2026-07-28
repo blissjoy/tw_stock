@@ -23,6 +23,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.data.yfinance_client import TAIEX_STOCK_ID  # noqa: E402
 from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
 from src.presentation import chart_data  # noqa: E402
@@ -40,6 +41,8 @@ from src.presentation.chart_data import (  # noqa: E402
     resolve_stock_id,
 )
 from src.presentation import pipeline_status  # noqa: E402
+
+TAIEX_DISPLAY_NAME = "台股加權指數"
 
 
 def main() -> None:
@@ -247,98 +250,113 @@ def main() -> None:
             st.caption(f"股價更新至　{_fmt(get_latest_update_time(conn))}")
             st.caption(f"候選清單算至　{_fmt(get_latest_candidate_update_time(conn))}")
 
-    st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件）")
-    filter_cols = st.columns(len(CANDIDATE_FILTERS))
-    active_filters = [
-        label for col, label in zip(filter_cols, CANDIDATE_FILTERS)
-        if col.checkbox(label, value=CANDIDATE_FILTER_DEFAULTS.get(label, False), key=f"filter_{label}")
-    ]
+    # 兩個分頁：分頁1是原本全部功能(候選清單篩選/立即重新篩選/手動抓取/候選清單/個股查詢)，
+    # 分頁2是新增的「大盤分析」——按鈕按下去才顯示，內容跟個股分析用的是同一個
+    # render_price_chart()(含K線圖+均線/切線/支撐壓力/MACD/KD/SAR切換+個股分析按鈕)，
+    # 只是套用在大盤(TAIEX_STOCK_ID)這個特殊stock_id上，不需要另外寫一套渲染邏輯。
+    tab1, tab2 = st.tabs(["選股", "大盤分析"])
 
-    # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
-    # 放進上面CANDIDATE_FILTERS那組迴圈，改用獨立的sar_flip_option參數傳給
-    # apply_candidate_filters(見src/presentation/chart_data.py)。
-    sar_col1, sar_col2, sar_col3 = st.columns([1, 1, 2])
-    sar_flip_enabled = sar_col1.checkbox("SAR 翻轉", value=False, key="filter_sar_flip_enabled")
-    sar_flip_direction = sar_col2.selectbox("方向", ["多頭", "空頭"], index=0, key="filter_sar_flip_direction")
-    sar_flip_within_days = sar_col3.number_input(
-        "天數內翻轉", min_value=1, max_value=60, value=1, step=1, key="filter_sar_flip_within_days"
-    )
-    sar_flip_option = (
-        {"direction": sar_flip_direction, "within_days": int(sar_flip_within_days)}
-        if sar_flip_enabled else None
-    )
+    with tab1:
+        st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件）")
+        filter_cols = st.columns(len(CANDIDATE_FILTERS))
+        active_filters = [
+            label for col, label in zip(filter_cols, CANDIDATE_FILTERS)
+            if col.checkbox(label, value=CANDIDATE_FILTER_DEFAULTS.get(label, False), key=f"filter_{label}")
+        ]
 
-    button_col1, button_col2 = st.columns([1, 1])
-    with button_col1:
-        if st.button("🔄 立即重新篩選"):
-            # 只用資料庫裡目前已有的資料重算訊號，不重新對外抓取TWSE/TPEx資料(那個很慢，
-            # 交給下面的手動抓取按鈕或排程做)，所以這個按鈕通常幾秒內就能算完，可以隨時按
-            # 而不用擔心額度或等待。
-            with st.spinner("正在用目前資料庫裡的最新資料重新計算選股訊號..."):
-                run_screen_and_store(conn)
-            st.success("已重新計算完成，候選清單已更新。")
-    with button_col2:
-        if st.button("▶ 手動抓取今日資料"):
-            # 跟桌面版「▶ 手動抓取今日資料」按鈕呼叫同一份run_daily_pipeline()，行為一致
-            # (含TWSE官方端點優先、收盤前查無資料時退回yfinance盤中即時價備援)。Streamlit
-            # 沒有背景執行緒機制，這裡是同步阻塞呼叫，按下去要等整個抓取跑完(TWSE+TPEx合計
-            # 實測約1分鐘內)才會回應，用進度條讓使用者知道還在跑、跑到哪裡，不是卡住。
-            progress_bar = st.progress(0.0, text="準備開始...")
+        # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
+        # 放進上面CANDIDATE_FILTERS那組迴圈，改用獨立的sar_flip_option參數傳給
+        # apply_candidate_filters(見src/presentation/chart_data.py)。
+        sar_col1, sar_col2, sar_col3 = st.columns([1, 1, 2])
+        sar_flip_enabled = sar_col1.checkbox("SAR 翻轉", value=False, key="filter_sar_flip_enabled")
+        sar_flip_direction = sar_col2.selectbox("方向", ["多頭", "空頭"], index=0, key="filter_sar_flip_direction")
+        sar_flip_within_days = sar_col3.number_input(
+            "天數內翻轉", min_value=1, max_value=60, value=1, step=1, key="filter_sar_flip_within_days"
+        )
+        sar_flip_option = (
+            {"direction": sar_flip_direction, "within_days": int(sar_flip_within_days)}
+            if sar_flip_enabled else None
+        )
 
-            def _on_progress(stage: str, done: int, total: int) -> None:
-                progress_bar.progress(done / total if total else 0.0, text=f"{stage} 下載進度：{done}/{total}檔")
+        button_col1, button_col2 = st.columns([1, 1])
+        with button_col1:
+            if st.button("🔄 立即重新篩選"):
+                # 只用資料庫裡目前已有的資料重算訊號，不重新對外抓取TWSE/TPEx資料(那個很慢，
+                # 交給下面的手動抓取按鈕或排程做)，所以這個按鈕通常幾秒內就能算完，可以隨時按
+                # 而不用擔心額度或等待。
+                with st.spinner("正在用目前資料庫裡的最新資料重新計算選股訊號..."):
+                    run_screen_and_store(conn)
+                st.success("已重新計算完成，候選清單已更新。")
+        with button_col2:
+            if st.button("▶ 手動抓取今日資料"):
+                # 跟桌面版「▶ 手動抓取今日資料」按鈕呼叫同一份run_daily_pipeline()，行為一致
+                # (含TWSE官方端點優先、收盤前查無資料時退回yfinance盤中即時價備援)。Streamlit
+                # 沒有背景執行緒機制，這裡是同步阻塞呼叫，按下去要等整個抓取跑完(TWSE+TPEx合計
+                # 實測約1分鐘內)才會回應，用進度條讓使用者知道還在跑、跑到哪裡，不是卡住。
+                progress_bar = st.progress(0.0, text="準備開始...")
 
-            with st.spinner("正在抓取TWSE/TPEx今日資料並重新選股..."):
-                candidates = run_daily_pipeline(conn, dry_run=False, on_progress=_on_progress)
-            progress_bar.empty()
-            st.success(f"抓取完成，候選清單共{len(candidates)}檔。")
-            st.rerun()
+                def _on_progress(stage: str, done: int, total: int) -> None:
+                    progress_bar.progress(done / total if total else 0.0, text=f"{stage} 下載進度：{done}/{total}檔")
 
-    candidate_dates = list_candidate_dates(conn)
-    selected_date = (
-        st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
-        if candidate_dates else None
-    )
-    candidates_df, latest_date, is_intraday = load_candidates_for_date(conn, target_date=selected_date)
-    candidates_df = apply_candidate_filters(conn, candidates_df, active_filters, sar_flip_option=sar_flip_option)
+                with st.spinner("正在抓取TWSE/TPEx今日資料並重新選股..."):
+                    candidates = run_daily_pipeline(conn, dry_run=False, on_progress=_on_progress)
+                progress_bar.empty()
+                st.success(f"抓取完成，候選清單共{len(candidates)}檔。")
+                st.rerun()
 
-    selected_stock_id = None
-    if latest_date is None:
-        st.info("目前 Turso 資料庫裡還沒有任何每日選股紀錄，點上方「立即重新篩選」或等 GitHub Actions 排程跑完後就會顯示。")
-    else:
-        st.subheader(f"候選清單（{latest_date}，共 {len(candidates_df)} 檔）")
-        if is_intraday:
-            st.markdown("**:red[⚠ 尚未收盤，本頁為盤中即時資料，收盤後數字可能改變]**")
-        if candidates_df.empty:
-            st.write("這一天沒有符合條件的候選股。")
+        candidate_dates = list_candidate_dates(conn)
+        selected_date = (
+            st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
+            if candidate_dates else None
+        )
+        candidates_df, latest_date, is_intraday = load_candidates_for_date(conn, target_date=selected_date)
+        candidates_df = apply_candidate_filters(conn, candidates_df, active_filters, sar_flip_option=sar_flip_option)
+
+        selected_stock_id = None
+        if latest_date is None:
+            st.info("目前 Turso 資料庫裡還沒有任何每日選股紀錄，點上方「立即重新篩選」或等 GitHub Actions 排程跑完後就會顯示。")
         else:
-            st.caption("點選任一列可在下方查看該檔股票的價格走勢")
-            event = st.dataframe(
-                candidates_df, use_container_width=True, hide_index=True,
-                on_select="rerun", selection_mode="single-row", key="candidates_table",
-                column_config={
-                    "stock_id": "股票代號", "name": "名稱", "industry": "產業別",
-                    "signal_name": "訊號(信心%)",  # 信心分數已經內含在signal_name字串裡(見daily_screener.py)，這裡只是把「(信心%)」這個提示放進欄位標題，不用每一列都重複寫「信心」兩個字
-                    "entry_price": "進場價", "stop_loss": "停損價",
-                    "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%.2f%%"),
-                    "volume": st.column_config.NumberColumn("成交量", format="%d"),
-                },
-            )
-            if event.selection.rows:
-                selected_stock_id = str(candidates_df.iloc[event.selection.rows[0]]["stock_id"])
+            st.subheader(f"候選清單（{latest_date}，共 {len(candidates_df)} 檔）")
+            if is_intraday:
+                st.markdown("**:red[⚠ 尚未收盤，本頁為盤中即時資料，收盤後數字可能改變]**")
+            if candidates_df.empty:
+                st.write("這一天沒有符合條件的候選股。")
+            else:
+                st.caption("點選任一列可在下方查看該檔股票的價格走勢")
+                event = st.dataframe(
+                    candidates_df, use_container_width=True, hide_index=True,
+                    on_select="rerun", selection_mode="single-row", key="candidates_table",
+                    column_config={
+                        "stock_id": "股票代號", "name": "名稱", "industry": "產業別",
+                        "signal_name": "訊號(信心%)",  # 信心分數已經內含在signal_name字串裡(見daily_screener.py)，這裡只是把「(信心%)」這個提示放進欄位標題，不用每一列都重複寫「信心」兩個字
+                        "entry_price": "進場價", "stop_loss": "停損價",
+                        "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%.2f%%"),
+                        "volume": st.column_config.NumberColumn("成交量", format="%d"),
+                    },
+                )
+                if event.selection.rows:
+                    selected_stock_id = str(candidates_df.iloc[event.selection.rows[0]]["stock_id"])
 
-    st.divider()
-
-    if selected_stock_id:
-        st.subheader(f"📊 {selected_stock_id} 價格走勢（點選自候選清單）")
-        render_price_chart(selected_stock_id, widget_key="drilldown")
         st.divider()
 
-    st.subheader("個股價格走勢查詢（輸入股票代號或名稱）")
-    query = st.text_input("輸入股票代號或名稱（例如 2330 或 台積電）", value="")
-    if query:
-        stock_id = resolve_stock_id(conn, query) or query.strip()
-        render_price_chart(stock_id, widget_key="manual")
+        if selected_stock_id:
+            st.subheader(f"📊 {selected_stock_id} 價格走勢（點選自候選清單）")
+            render_price_chart(selected_stock_id, widget_key="drilldown")
+            st.divider()
+
+        st.subheader("個股價格走勢查詢（輸入股票代號或名稱）")
+        query = st.text_input("輸入股票代號或名稱（例如 2330 或 台積電）", value="")
+        if query:
+            stock_id = resolve_stock_id(conn, query) or query.strip()
+            render_price_chart(stock_id, widget_key="manual")
+
+    with tab2:
+        taiex_state_key = "show_taiex_analysis"
+        if st.button("📊 大盤分析"):
+            st.session_state[taiex_state_key] = not st.session_state.get(taiex_state_key, False)
+        if st.session_state.get(taiex_state_key, False):
+            st.subheader(f"📈 {TAIEX_DISPLAY_NAME}")
+            render_price_chart(TAIEX_STOCK_ID, widget_key="taiex")
 
 
 if __name__ == "__main__":

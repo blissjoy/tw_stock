@@ -691,8 +691,14 @@ def screen_all_stocks(stock_frames: dict[str, pd.DataFrame], min_days: int = 60)
 def load_trailing_frames(conn, min_days: int = 60) -> dict[str, pd.DataFrame]:
     """讀出每檔股票至今的全部OHLCV歷史(不設上限，由screen_all_stocks自己判斷天數夠不夠算指標)。
     純讀取，跟資料是Turso還是本機sqlite無關，供 scripts/daily_pipeline.py 與 dashboard/app.py 共用。
+
+    排除market='INDEX'的列(目前只有大盤`^TWII`，見src/data/yfinance_client.py的
+    fetch_taiex_prices())——大盤不是一檔可以交易的股票，不該被個股適用的screen_*規則
+    (進場價/停損建議等)誤判成候選標的、混進daily_candidates候選清單。
     """
-    stock_ids = [r[0] for r in conn.execute("SELECT stock_id FROM stocks ORDER BY stock_id").fetchall()]
+    stock_ids = [
+        r[0] for r in conn.execute("SELECT stock_id FROM stocks WHERE market != 'INDEX' ORDER BY stock_id").fetchall()
+    ]
 
     frames: dict[str, pd.DataFrame] = {}
     for stock_id in stock_ids:

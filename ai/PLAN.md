@@ -3238,3 +3238,61 @@ setChecked(False)`，觸發跟上面按鈕完全相同的`_on_analysis_toggled(F
 「總結分析」段落下方、K線圖上方。
 
 720個測試全過(邏輯改動集中在UI層，沒有新增可獨立測試的純函式)。
+
+## 新增「大盤分析」分頁：兩前端都改成2個Tab(2026-07-29)
+
+使用者問：能不能做成2個分頁，分頁1放原本功能，分頁2放「大盤分析」按鈕、按了顯示格式
+跟個股分析一樣？並問這個資料能不能取得。
+
+**資料可行性查證**：實測發現兩個來源都能拿到大盤(台股加權指數/TAIEX)資料——①yfinance
+的`^TWII`代號，直接`yf.download`就有完整歷史OHLCV(跟抓TPEx股票同一套機制)；②更妙的是
+現有`fetch_today_twse()`每天已經在呼叫的TWSE官方`MI_INDEX`端點，回應裡「價格指數(臺灣
+證券交易所)」那張表本來就含「發行量加權股價指數」當天收盤值/漲跌，只是`parse_stock_
+prices()`只抽個股那張表，這筆資料目前被直接丟棄沒用到。最終選擇①(yfinance `^TWII`)
+當唯一資料來源，理由：②只有收盤值沒有開高低，混用兩種資料源會讓歷史(完整OHLC)跟當日
+(只有收盤)的資料形狀不一致；①用同一套機制就能同時滿足歷史回補與每日增量更新，比較單純。
+
+**資料層**：`src/data/yfinance_client.py`新增`TAIEX_STOCK_ID = "^TWII"`與
+`fetch_taiex_prices(start,end)`——不透過`fetch_prices_batch()`(那個函式用
+`ticker[:-len(market_suffix)]`反解析stock_id，market_suffix=""會踩到Python切片
+`s[:-0]`等於`s[:0]`的陷阱)，直接呼叫底層的`_download_with_hard_timeout`/
+`_extract_ticker_frame`/`_frame_to_price_rows`三個純函式組合。
+
+⚠️ 一開始以為可以不寫入`stocks`表(避免被`load_trailing_frames()`批次選股邏輯誤判成
+候選股票)，但實測發現`stock_prices.stock_id`有外鍵參照`stocks(stock_id)`，沒有對應
+的stocks列會直接insert失敗(FOREIGN KEY constraint failed)。改成一定要寫入stocks，
+但用`market="INDEX"`這個新的特殊值(跟"TWSE"/"TPEx"區分開)，`load_trailing_frames()`
+的查詢加上`WHERE market != 'INDEX'`排除掉它，兩全其美。
+
+`scripts/backfill_taiex.py`(新增)：一次性回補大盤歷史(用法跟`backfill_history.py`
+對稱)。`scripts/daily_pipeline.py`新增`fetch_today_taiex()`，接入`run_daily_
+pipeline()`(TWSE更新成功後、TPEx更新前)，獨立包一層try/except，大盤更新失敗不影響
+個股資料與候選清單。已實際執行回補腳本，本機DB現有2023-01-03~2026-07-28共859筆
+大盤資料(跟個股資料範圍一致)。
+
+**UI**：兩個前端都改成2個Tab。桌面版`desktop/main_window.py`的`_build_ui()`拆成
+`_build_stock_tab()`(原本全部功能，包在`QTabWidget`第一個分頁)+`_build_market_tab()`
+(新的第二分頁，用plain QVBoxLayout+QScrollArea包button+QTextEdit+收合按鈕，不是
+候選清單分頁那種QSplitter結構——2026-07-29稍早修個股分析截斷bug時發現QSplitter不會
+把子元件sizeHint變化轉發給外層QScrollArea，這裡不用QSplitter，plain QVBoxLayout
+組合本來就能正確隨內容量調整捲軸範圍，不需要`_sync_central_height_to_content()`
+那樣的手動同步)。把原本`_refresh_analysis_view()`裡的規則比對渲染邏輯抽成
+`_build_analysis_html(stock_id, header_label)`共用方法，個股分析與大盤分析(固定
+分析`TAIEX_STOCK_ID`)呼叫同一份、只是傳入的stock_id/標題不同。
+
+Streamlit`dashboard/app.py`用`st.tabs(["選股","大盤分析"])`，分頁2用一個按鈕
+gate(`session_state`)，按下去才呼叫`render_price_chart(TAIEX_STOCK_ID, widget_
+key="taiex")`——這個既有函式本來就包含K線圖+均線/切線/支撐壓力/MACD/KD/SAR切換+
+「個股分析」按鈕(在此語境下就是「大盤指數分析」)，套用在`^TWII`上不需要另外寫渲染
+邏輯，比桌面版多附送了完整K線圖(桌面版分頁2只做了文字分析面板，沒有另外接圖表，
+避免重複造輪+ QWebEngineView，兩前端這裡刻意不完全對稱，範圍依各自現有架構就低不
+就高)。
+
+新增測試：`tests/test_yfinance_client.py`新增3個(fetch_taiex_prices基本情境/空結果/
+逾時)；`tests/test_daily_pipeline.py`新增4個(fetch_today_taiex/與run_daily_pipeline
+整合/更新失敗不中斷)，並新增該檔案專用的autouse fixture擋掉真實網路呼叫(只在這個
+測試檔案生效，不是全域conftest.py，避免擋到test_yfinance_client.py測試fetch_taiex_
+prices()本身)；`tests/test_daily_screener.py`新增1個(load_trailing_frames排除
+market='INDEX')。728個測試全過(720+8)。用真實本機DB(含剛回補的大盤資料)+Playwright
+實際截圖驗證兩個前端的Tab切換、「大盤分析」按鈕、規則比對清單、總結分析全部正確顯示，
+且兩前端讀同一份DB算出完全一致的規則比對結果(R-TREND-03 94%、R-SR-14 93%)。

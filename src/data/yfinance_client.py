@@ -238,3 +238,38 @@ def fetch_twse_prices_batch(
     還在變動的當下價格，不是官方最終收盤價(見該函式與schema.sql的daily_data_status說明)。
     """
     return fetch_prices_batch(stock_ids, start_date, end_date, market_suffix=".TW", on_progress=on_progress)
+
+
+# 大盤(台股加權股價指數)在Yahoo Finance的代號，直接就是完整ticker，不需要像個股那樣
+# 拼接".TW"/".TWO"市場後綴——這也是刻意不透過fetch_prices_batch()/_download_ids_once()
+# 的原因之一：那兩個函式用`ticker[:-len(market_suffix)]`反解析stock_id，market_suffix=""
+# 時會踩到Python切片的已知陷阱(`s[:-0]`等於`s[:0]`=空字串，不是整個字串保留)，直接呼叫
+# 下面幾個底層純函式繞開這個問題，比修改共用的個股批次下載邏輯更安全。
+TAIEX_STOCK_ID = "^TWII"
+
+
+def fetch_taiex_prices(start_date: str, end_date: str) -> list[dict]:
+    """抓取大盤(台股加權股價指數)的OHLCV歷史/當日資料，stock_id固定為`TAIEX_STOCK_ID`
+    ("^TWII")，格式跟`fetch_prices_batch()`回傳的單檔股票資料一致，可以直接餵給
+    `storage.upsert_stock_prices()`。
+
+    ⚠️ 呼叫端記得也要`storage.upsert_stocks()`寫一筆對應的`stocks`資料(market建議用
+    "INDEX"這個特殊值，不是"TWSE"/"TPEx")：`stock_prices.stock_id`有外鍵參照
+    `stocks(stock_id)`，沒有對應的stocks列會直接insert失敗(FOREIGN KEY constraint
+    failed)。用market="INDEX"是為了讓`src.screener.daily_screener.load_trailing_
+    frames()`(批次選股邏輯讀取全部stock_id逐一跑個股適用的screen_*規則)能夠篩掉它，
+    避免大盤被誤判成一檔可以交易的股票、混進候選清單。
+
+    start_date/end_date格式為'YYYY-MM-DD'，end_date是exclusive(yfinance/pandas慣例，
+    跟`fetch_prices_batch()`一致)。查無資料(例如日期範圍內沒有交易日、或Yahoo Finance
+    暫時打不通)回傳空list，不拋例外。
+    """
+    try:
+        df_batch = _download_with_hard_timeout([TAIEX_STOCK_ID], start_date, end_date)
+    except BatchDownloadTimeout as exc:
+        print(f"[yfinance] {exc}，大盤(^TWII)這次略過")
+        return []
+    frame = _extract_ticker_frame(df_batch, TAIEX_STOCK_ID, num_tickers_requested=1)
+    if frame is None or frame.empty:
+        return []
+    return _frame_to_price_rows(TAIEX_STOCK_ID, frame)

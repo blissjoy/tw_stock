@@ -282,3 +282,44 @@ def test_yfinance_logger_is_suppressed_to_avoid_raw_error_dump():
     import logging
 
     assert logging.getLogger("yfinance").level >= logging.CRITICAL
+
+
+def test_fetch_taiex_prices_returns_rows_keyed_by_taiex_stock_id(monkeypatch):
+    """實測yf.download(['^TWII'], ...)回傳的是MultiIndex格式(即使只有1檔ticker)，
+    不是fetch_prices_batch()裡"單檔非MultiIndex"分支假設的格式——用_multi_ticker_df()
+    模擬跟實際觀察一致的回應格式。"""
+    df_batch = _multi_ticker_df(["^TWII"], ["2026-07-27", "2026-07-28"])
+
+    def _fake_download(tickers, start, end, interval, progress, auto_adjust, timeout=10):
+        assert tickers == ["^TWII"]
+        return df_batch
+
+    monkeypatch.setattr("yfinance.download", _fake_download)
+
+    rows = yfinance_client.fetch_taiex_prices("2026-07-27", "2026-07-29")
+
+    assert len(rows) == 2
+    assert all(r["stock_id"] == yfinance_client.TAIEX_STOCK_ID for r in rows)
+    assert rows[0]["date"] == "2026-07-27"
+    assert rows[0]["open"] == 100.0
+
+
+def test_fetch_taiex_prices_returns_empty_list_when_download_returns_empty(monkeypatch):
+    monkeypatch.setattr("yfinance.download", lambda *a, **k: pd.DataFrame())
+
+    rows = yfinance_client.fetch_taiex_prices("2026-07-27", "2026-07-29")
+
+    assert rows == []
+
+
+def test_fetch_taiex_prices_returns_empty_list_on_hard_timeout(monkeypatch):
+    monkeypatch.setattr(yfinance_client, "HARD_TIMEOUT_SECONDS", 0.2)
+
+    def _hanging_download(*args, **kwargs):
+        time.sleep(1.0)
+
+    monkeypatch.setattr("yfinance.download", _hanging_download)
+
+    rows = yfinance_client.fetch_taiex_prices("2026-07-27", "2026-07-29")
+
+    assert rows == []

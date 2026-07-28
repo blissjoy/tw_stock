@@ -658,6 +658,28 @@ def test_load_trailing_frames_only_includes_stocks_with_enough_days():
     assert list(frames["2330"].columns) == ["open", "high", "low", "close", "volume"]
 
 
+def test_load_trailing_frames_excludes_index_market_rows():
+    """大盤(market="INDEX"，見src/data/yfinance_client.py的fetch_taiex_prices())不是
+    一檔可以交易的股票，不該被個股批次選股邏輯(screen_all_stocks的進場價/停損建議等
+    規則)誤判成候選標的、混進daily_candidates候選清單。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+    upsert_stocks(conn, [{"stock_id": "^TWII", "name": "台股加權指數", "market": "INDEX", "industry": None, "updated_at": "2026-07-22"}])
+    rows = [
+        {
+            "stock_id": "^TWII", "date": f"2026-{(1 + d // 28):02d}-{(1 + d % 28):02d}",
+            "open": 17000.0, "high": 17100.0, "low": 16950.0, "close": 17050.0, "volume": 5000000,
+            "trading_money": None, "trading_turnover": None, "spread": None,
+        }
+        for d in range(70)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    frames = daily_screener.load_trailing_frames(conn, min_days=60)
+
+    assert set(frames.keys()) == {"2330"}
+
+
 def test_run_screen_and_store_defaults_to_latest_price_date_when_iso_date_omitted(monkeypatch):
     """iso_date未指定時應該用stock_prices裡實際的最新交易日，不是date.today()這個日曆
     日期——真實案例：本機DB最後交易日其實是2026-07-24(週五)，但週六按「立即重新篩選」
