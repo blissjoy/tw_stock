@@ -18,11 +18,39 @@ scripts/daily_pipeline.py)，讓`updated_at`在正常執行期間持續往前推
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 STATUS_PATH = Path(__file__).resolve().parents[2] / "data" / "pipeline_status.json"
+
+# Windows工作排程器實際建立的每日排程時間(週一~五，見README.md「Windows工作排程器」章節
+# 與ai/PLAN.md 2026-07-24的建立紀錄：`tw_stock_pipeline_1000`~`_1430`共6個排程工作)，
+# 用來推算「下次更新時間」顯示給使用者看。這裡刻意寫死這份清單，不在執行期間呼叫
+# `schtasks /query`——排程本身是使用者作業系統設定，不歸這支程式管理，寫死清單只是為了
+# 在UI顯示「下次預期會嘗試更新的時間」，不是要去讀取/驗證排程器實際狀態(那需要另外的
+# 排程監控機制，不是這裡的職責)。**若之後手動調整過Windows工作排程器的時間，這裡也要
+# 跟著手動同步更新，兩邊不會自動同步。**
+SCHEDULED_TIMES = [
+    dt_time(10, 0), dt_time(11, 0), dt_time(12, 0),
+    dt_time(13, 0), dt_time(13, 30), dt_time(14, 30),
+]
+
+
+def next_scheduled_run_time(now: datetime | None = None) -> datetime:
+    """算出下一次排程「預期會嘗試觸發」的時間點——只考慮週一到週五(工作排程器本身設定
+    的觸發日)，不考慮國定假日；是否為真正的交易日、要不要實際抓資料，是`run_daily_
+    pipeline()`執行當下自己判斷並跳過的事，這裡只回答「排程本身下一次何時啟動」。
+    """
+    now = now or datetime.now()
+    candidate_date = now.date()
+    while True:
+        if candidate_date.weekday() < 5:  # 0=Monday ... 4=Friday
+            for scheduled_time in SCHEDULED_TIMES:
+                candidate_dt = datetime.combine(candidate_date, scheduled_time)
+                if candidate_dt > now:
+                    return candidate_dt
+        candidate_date += timedelta(days=1)
 
 # 正常執行期間，run_daily_pipeline()每處理完一批(TWSE/TPEx各自的yfinance批次，或至少在
 # fetch_today_twse()這種單一請求完成時)都會重寫一次running狀態；即使剛好卡在批次之間

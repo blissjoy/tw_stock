@@ -149,9 +149,17 @@ class MainWindow(QMainWindow):
         self.fetch_btn = QPushButton("▶ 手動抓取今日資料")
         self.fetch_btn.setToolTip("抓取當天TWSE/TPEx資料並重新選股，較耗時(TPEx約需1小時內)，在背景執行不會卡住畫面")
         self.fetch_btn.clicked.connect(self._on_fetch_clicked)
+        # 在候選清單「內」搜尋(跟下面bottom_layout的self.search_input不同——那個是不限
+        # 候選清單、對任意股票代號/名稱做全域查詢；這個只在目前候選清單的列裡找，找到就
+        # 選取+捲動過去，順便觸發_on_candidate_selected()連帶更新下方個股分析)。
+        self.candidate_search_input = QLineEdit()
+        self.candidate_search_input.setPlaceholderText("在候選清單中搜尋代號或名稱")
+        self.candidate_search_input.setMaximumWidth(220)
+        self.candidate_search_input.returnPressed.connect(self._on_candidate_search)
         self.status_label = QLabel("狀態：閒置")
         top_bar.addWidget(self.refresh_btn)
         top_bar.addWidget(self.fetch_btn)
+        top_bar.addWidget(self.candidate_search_input)
         top_bar.addStretch()
         top_bar.addWidget(self.status_label)
         root_layout.addLayout(top_bar)
@@ -341,6 +349,26 @@ class MainWindow(QMainWindow):
         stock_id = self.candidates_table.item(rows[0].row(), 0).text()
         self._current_stock_id = stock_id
         self._rerender_chart()
+
+    def _on_candidate_search(self) -> None:
+        """在目前候選清單的列裡搜尋代號或名稱是否存在，找到就選取該列並捲動過去——
+        `selectRow()`會觸發`itemSelectionChanged`訊號，`_on_candidate_selected()`
+        因此會自動連帶更新下方的個股圖表/分析面板，這裡不用另外呼叫。找不到時明確
+        告知使用者，不要讓輸入框看起來像沒反應。"""
+        query = self.candidate_search_input.text().strip()
+        if not query:
+            return
+        query_lower = query.lower()
+        for row in range(self.candidates_table.rowCount()):
+            stock_id_item = self.candidates_table.item(row, 0)
+            name_item = self.candidates_table.item(row, 1)
+            stock_id = stock_id_item.text() if stock_id_item else ""
+            name = name_item.text() if name_item else ""
+            if query_lower == stock_id.lower() or query in name:
+                self.candidates_table.selectRow(row)
+                self.candidates_table.scrollToItem(stock_id_item)
+                return
+        QMessageBox.information(self, "候選清單搜尋", f"目前候選清單中找不到「{query}」。")
 
     def _on_search(self) -> None:
         query = self.search_input.text().strip()
@@ -565,14 +593,18 @@ class MainWindow(QMainWindow):
             detail = f" {stage} {progress}檔" if stage and progress else ""
             self.status_label.setText(f"🔄 更新中...（{date_label}）{detail}")
             return
+        next_run_label = pipeline_status.next_scheduled_run_time().strftime("%Y-%m-%d %H:%M")
+
         if state == "failed":
             date_label = status.get("date", "")
-            self.status_label.setText(f"⚠ 上次抓取失敗（{date_label}）")
+            self.status_label.setText(f"⚠ 上次抓取失敗（{date_label}）\n下次更新時間：{next_run_label}")
             return
 
         # 閒置狀態：股價DB更新時間跟候選清單重算時間是兩件各自獨立的事(股價可能已更新到
         # 今天，但候選清單是剛才手動重篩才產生的)，分開顯示成兩行，不能只顯示其中一個、
-        # 讓使用者誤判「候選清單是不是也跟著更新了」。
+        # 讓使用者誤判「候選清單是不是也跟著更新了」。「下次更新時間」是Windows工作排程器
+        # 下一個固定時段(見pipeline_status.SCHEDULED_TIMES)，只代表排程「預期何時會嘗試」，
+        # 不保證那天一定是交易日(是否為交易日由run_daily_pipeline()執行當下自己判斷)。
         def _fmt(ts: str | None) -> str:
             if not ts:
                 return "尚無資料"
@@ -582,8 +614,10 @@ class MainWindow(QMainWindow):
                 return ts
 
         if self.conn is None:
-            self.status_label.setText("狀態：尚無資料")
+            self.status_label.setText(f"狀態：尚無資料\n下次更新時間：{next_run_label}")
             return
         price_update = _fmt(chart_data.get_latest_update_time(self.conn))
         candidate_update = _fmt(chart_data.get_latest_candidate_update_time(self.conn))
-        self.status_label.setText(f"股價更新至：{price_update}\n候選清單算至：{candidate_update}")
+        self.status_label.setText(
+            f"股價更新至：{price_update}\n候選清單算至：{candidate_update}\n下次更新時間：{next_run_label}"
+        )

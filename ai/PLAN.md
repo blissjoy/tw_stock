@@ -3055,3 +3055,38 @@ filters()`用`mask &= ...`逐一疊加)，接著指出「...>MA240」目前用�
 MA120<MA240」的價格數列，驗證舊寫法(periods=(5,10,20,240))確實會誤判為True、
 修正後的`CANDIDATE_FILTERS["均線多頭排列（...>MA240）"]`正確回傳False。693個
 測試全過(692+1)。
+
+## 桌面版新增「候選清單內搜尋」+ 狀態列新增「下次更新時間」(2026-07-29)
+
+使用者提出2個桌面版功能需求：①在「手動抓取今日資料」按鈕後方加一個可輸入代號/名稱
+的欄位，搜尋候選清單裡有沒有符合的，有的話捲動過去並選取(連帶更新下方個股分析)；
+②右上角狀態列多一行「下次更新時間」。
+
+**①候選清單內搜尋**：`desktop/main_window.py`的`top_bar`新增`self.candidate_
+search_input`(跟`bottom_layout`裡原本就有的`self.search_input`不同——那個是不限
+候選清單的全域股票查詢，這個只在目前候選清單的列裡找)。新增`_on_candidate_search()`：
+逐列比對代號(完全相符，不分大小寫)或名稱(部分相符)，找到就呼叫`selectRow()`——這會
+觸發既有的`itemSelectionChanged`訊號、自動連鎖呼叫`_on_candidate_selected()`→
+`_rerender_chart()`(內部含`_refresh_analysis_view()`)，不需要另外手動呼叫更新；
+找不到則跳出`QMessageBox.information()`明確告知，不要讓輸入框看起來像沒反應。
+
+**②下次更新時間**：`src/presentation/pipeline_status.py`新增`SCHEDULED_TIMES`
+(對照README/ai/PLAN.md 2026-07-24建立的6個Windows工作排程器排程：10:00/11:00/
+12:00/13:00/13:30/14:30，週一至週五)與`next_scheduled_run_time()`，算出「下一個
+排程預期會嘗試觸發」的時間點(只考慮平日，不考慮國定假日——是否為交易日是`run_daily_
+pipeline()`執行當下自己判斷並跳過的事)。**這裡刻意寫死排程時間清單，不在執行期間呼叫
+`schtasks /query`**——排程本身是使用者作業系統設定，不歸這支程式管理；若之後手動調整
+過Windows工作排程器的時間，這裡也要跟著手動同步更新，兩邊不會自動同步。`desktop/
+main_window.py`的`_poll_pipeline_status()`在閒置/失敗兩種狀態都加上這一行。
+
+新增測試：`tests/test_pipeline_status.py`新增4個測試(同天下一時段、跨天捲到隔天、
+跳過週末、預設用現在時間)。`desktop/main_window.py`本身沒有對應pytest測試(桌面GUI
+互動需要人工或專用driver驗證，這個限制先前已經記錄過)，改用真實本機DB實際建立
+`MainWindow`做smoke test：狀態列正確顯示三行(含新增的下次更新時間)；搜尋候選清單裡
+存在的代號成功選取對應列(`current_stock_id`正確更新)；搜尋不存在的代號正確跳出1次
+提示且不crash。697個測試全過(693+4)。
+
+**範圍限制**：這次只改桌面版(`desktop/main_window.py`)，沒有動Streamlit版
+(`dashboard/app.py`)——候選清單內搜尋的「選取+捲動」互動方式是Qt原生元件特有的
+概念，Streamlit的表格互動模型不同，是否要在Streamlit版也做類似功能，待使用者
+之後提出再評估。

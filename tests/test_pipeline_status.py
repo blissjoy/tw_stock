@@ -64,3 +64,35 @@ def test_is_stale_true_when_running_but_updated_at_is_old():
 def test_is_stale_false_when_updated_at_missing_or_malformed():
     assert pipeline_status.is_stale({"status": "running"}) is False
     assert pipeline_status.is_stale({"status": "running", "updated_at": "not-a-timestamp"}) is False
+
+
+def test_next_scheduled_run_time_returns_next_time_slot_same_day():
+    now = datetime(2026, 7, 29, 10, 30)  # 週三，剛過10:00那個時段
+    next_run = pipeline_status.next_scheduled_run_time(now)
+    assert next_run == datetime(2026, 7, 29, 11, 0)
+
+
+def test_next_scheduled_run_time_rolls_to_next_weekday_after_last_slot():
+    now = datetime(2026, 7, 29, 15, 0)  # 週三，已過當天最後一個時段(14:30)
+    next_run = pipeline_status.next_scheduled_run_time(now)
+    assert next_run == datetime(2026, 7, 30, 10, 0)  # 隔天(週四)第一個時段
+
+
+def test_next_scheduled_run_time_skips_weekend():
+    now = datetime(2026, 7, 31, 15, 0)  # 2026-07-31是週五，已過當天最後時段
+    next_run = pipeline_status.next_scheduled_run_time(now)
+    assert next_run == datetime(2026, 8, 3, 10, 0)  # 跳過六日，落在下週一
+
+
+def test_next_scheduled_run_time_defaults_to_now_when_not_given(monkeypatch):
+    """不傳now參數時應該用目前時間，而不是crash或用固定值。"""
+    fixed_now = datetime(2026, 7, 29, 9, 0)
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(pipeline_status, "datetime", _FixedDatetime)
+    next_run = pipeline_status.next_scheduled_run_time()
+    assert next_run == datetime(2026, 7, 29, 10, 0)
