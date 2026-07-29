@@ -20,6 +20,7 @@ from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -125,6 +126,13 @@ class MainWindow(QMainWindow):
 
         self._build_stock_tab()
         self._build_market_tab()
+        # ⚠️ 分頁還沒被切換過去顯示之前(例如視窗剛啟動時預設停在分頁1)，分頁2裡的
+        # QTextEdit/QWebEngineView實際上沒有真正的layout(viewport寬度等於0或預設值)，
+        # 這時候算「大盤分析」文字框需要的高度一定不準(實測算出來只有個位數px，見
+        # _build_market_tab()的說明)。改成切到分頁2時才(重新)整理內容，順便也讓
+        # 每次切回來都看得到最新資料，不用額外處理「視窗剛啟動、分頁2還沒被看過」
+        # 這種特例。
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def _build_stock_tab(self) -> None:
         # 候選清單+搜尋列+均線/切線勾選+圖表+分析面板+摘要文字全部疊在一起，自然高度常常
@@ -367,25 +375,38 @@ class MainWindow(QMainWindow):
         market_layout = QVBoxLayout(market_content)
 
         self.market_chart_view = QWebEngineView()
-        self.market_chart_view.setMinimumHeight(450)  # 避免在QScrollArea裡被壓縮到看不出圖表內容
-        market_layout.addWidget(self.market_chart_view)
+        # ⚠️ 2026-07-29修正：這裡固定show_macd=True/show_kd=True，build_candlestick_
+        # figure()算出來的圖表本身高度是560+140*2=840px(見該函式的height計算)，原本
+        # 這裡minimumHeight只給450且沒有stretch因子，QVBoxLayout會把多出來的空間都給
+        # 後面的addStretch()而不是圖表，導致圖表被壓縮得比實際內容還小，看起來像「沒有
+        # 展開」。改成minimumHeight貼近840的實際圖表高度、並給stretch=1(比照個股圖表
+        # chart_view的做法)，讓圖表優先取得可用空間。
+        self.market_chart_view.setMinimumHeight(820)
+        market_layout.addWidget(self.market_chart_view, stretch=1)
         # 跟self._chart_html_path(個股圖表用)分開的暫存檔案，避免兩個分頁互相覆寫對方的
         # 圖表內容(見__init__裡_chart_html_path的說明：QWebEngineView.setHtml()對內容
         # 大小有隱性限制，兩邊都是寫進暫存檔案再load()開啟)。
         self._market_chart_html_path = Path(tempfile.gettempdir()) / f"tw_stock_market_chart_{id(self)}.html"
 
+        # ⚠️ 2026-07-29修正：使用者反映分析文字不要看起來像獨立的一個「框」——QTextEdit
+        # 預設會畫外框(QFrame的StyledPanel樣式)，改成NoFrame讓它視覺上融入頁面，跟上面
+        # 的K線圖直接銜接，不是分頁裡另外圈出來的一塊。高度計算(_set_market_analysis_
+        # html()裡的setFixedHeight)維持不變——那是為了讓QTextEdit本身能顯示完整內容
+        # 不被截斷，不是「限縮」，是精準算出剛好的高度，跟這裡拿掉外框是两件事。
         self.market_analysis_view = QTextEdit()
         self.market_analysis_view.setReadOnly(True)
+        self.market_analysis_view.setFrameShape(QFrame.Shape.NoFrame)
         self.market_analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         market_layout.addWidget(self.market_analysis_view)
-
-        market_layout.addStretch()
-
-        self._refresh_market_tab()
+        # ⚠️ 這裡不在建構時就呼叫_refresh_market_tab()：分頁2要等使用者實際切換過去才
+        # 會有真正的layout(viewport寬度等於0或預設值)，document().size().height()算出來
+        # 的高度會嚴重失真(實測只有個位數px)。改成在_on_tab_changed()裡、切到這個分頁時
+        # 才整理，見__init__()裡tabs.currentChanged的連接。
 
     def _refresh_market_tab(self) -> None:
-        """重新整理「大盤分析」分頁的K線圖(含MACD/KD/SAR)與規則比對清單，在分頁初次建立、
-        手動抓取今日資料/立即重新篩選完成時都要呼叫，確保顯示的是資料庫裡最新的大盤資料。
+        """重新整理「大盤分析」分頁的K線圖(含MACD/KD/SAR)與規則比對清單，在切換到這個
+        分頁、手動抓取今日資料/立即重新篩選完成時都要呼叫，確保顯示的是資料庫裡最新的
+        大盤資料。
         """
         if self.conn is None:
             return
@@ -400,6 +421,10 @@ class MainWindow(QMainWindow):
             self._market_chart_html_path.write_text(html_content, encoding="utf-8")
             self.market_chart_view.load(QUrl.fromLocalFile(str(self._market_chart_html_path)))
         self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index == 1:  # 大盤分析
+            self._refresh_market_tab()
 
     # ------------------------------------------------------------------
     # 候選清單／圖表
@@ -738,7 +763,12 @@ class MainWindow(QMainWindow):
         self._poll_pipeline_status()  # 立即刷新狀態列的「候選清單算至：...」，不等下一次5秒輪詢
         if self._current_stock_id:
             self._rerender_chart()
-        self._refresh_market_tab()
+        # 只在使用者目前真的停留在「大盤分析」分頁時才立即整理——分頁還沒被切換過去
+        # 顯示的話，QTextEdit/QWebEngineView還沒有真正的layout，這時候整理只會算出
+        # 錯誤的高度(見_build_market_tab()的說明)。之後切過去時_on_tab_changed()
+        # 會自動重新整理，資料本來就是即時查DB，不會顯示到舊資料。
+        if self.tabs.currentIndex() == 1:
+            self._refresh_market_tab()
 
     def _on_fetch_clicked(self) -> None:
         if self._pipeline_worker is not None and self._pipeline_worker.isRunning():
@@ -758,7 +788,10 @@ class MainWindow(QMainWindow):
         self._refresh_date_list()
         self._reload_candidates()
         self._poll_pipeline_status()  # 立即刷新狀態列成「資料更新至：...」，不等下一次5秒輪詢
-        self._refresh_market_tab()  # 手動抓取也會更新大盤資料(見fetch_today_taiex())，一併刷新
+        # 手動抓取也會更新大盤資料(見fetch_today_taiex())，只在使用者目前就停留在「大盤
+        # 分析」分頁時才立即整理，理由同_on_refresh_clicked()。
+        if self.tabs.currentIndex() == 1:
+            self._refresh_market_tab()
         QMessageBox.information(self, "完成", f"今日資料抓取完成，候選清單共{candidate_count}檔。")
 
     def _on_fetch_failed(self, message: str) -> None:

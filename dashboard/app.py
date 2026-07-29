@@ -131,50 +131,59 @@ def main() -> None:
         # 「個股分析」面板與「最新交易日分析」摘要都要用，這裡只查一次共用。
         trend_df = load_price_history(conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
 
-        if always_show_analysis or st.session_state.get(analysis_state_key, False):
+        def _render_analysis_body() -> None:
+            signal_matches = analyze_stock_signals(price_df, trend_df=trend_df)
+            if not signal_matches:
+                st.write("目前沒有符合任何已接上規則庫的訊號。")
+                return
+            for m in signal_matches:
+                st.markdown(f"**{m['rule_id']}　{m['title']}（信心{m['confidence']}%）**")
+                # 「目前狀態」(這條規則今天為什麼觸發)排在規則名稱後第一個位置，
+                # 使用者最想先看到的是「現在是什麼情況」，解讀/原文頁碼是補充說明，
+                # 排序上應該讓位。analyze_stock_signals()裡同一個rule_id若對應多筆
+                # 觸發(例如R-TREND-03短期/中期各自獨立判斷都是多頭)，note會是用
+                # 換行接起來的多行文字，這裡逐行各自加註「目前狀態：」/縮排顯示，
+                # 不能假設note永遠是單行字串。
+                if m.get("note"):
+                    note_lines = m["note"].split("\n")
+                    st.caption(f"目前狀態：{note_lines[0]}")
+                    for extra_line in note_lines[1:]:
+                        st.caption(f"　　{extra_line}")
+                if m["description"]:
+                    # 「分析：」明確標示這段是「為什麼」的解說(ai/zhu-rules/裡每條規則的
+                    # 「解讀」欄位)，不是「目前狀態」的延續文字——股市新手最常問的就是
+                    # 「為什麼這個狀態下不能／可以進場」，這裡的解讀內容本來就有回答
+                    # 這個問題(例如R-INDICATOR-09說明為什麼盤整時KD交叉訊號無效)，
+                    # 只是原本沒有標籤、容易被當成普通補充文字略過不看。
+                    st.write(f"分析：{m['description']}")
+                if m.get("reference"):
+                    st.caption(f"原文與頁碼：{m['reference']}")
+                st.divider()
+            # 「總結分析」放在列完所有規則之後——使用者反映一長串規則清單太雜亂，
+            # 這裡用summarize_signal_matches()統計出的多頭/空頭傾向數量+信心最高的
+            # 規則，讓使用者不用自己從落落長的清單裡歸納重點。
+            summary = summarize_signal_matches(signal_matches)
+            top = summary["top_match"]
+            top_note = (top.get("note") or "").split("\n")[0] if top else ""
+            st.markdown("**📌 總結分析**")
+            st.write(
+                f"本次共觸發 {summary['total']} 條規則"
+                f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
+                f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。"
+            )
+            st.write(f"信心最高的訊號：{top['rule_id']}　{top['title']}（{top['confidence']}%）")
+            if top_note:
+                st.caption(f"目前狀態：{top_note}")
+
+        if always_show_analysis:
+            # 大盤分析：直接顯示在K線圖下方，不用st.expander的邊框「盒子」外觀，
+            # 也不限制高度，全部展開——大盤只有一檔、位置夠大，不需要像候選清單那樣
+            # 收合節省空間。
+            st.markdown("### 📊 大盤分析")
+            _render_analysis_body()
+        elif st.session_state.get(analysis_state_key, False):
             with st.expander("📊 個股分析", expanded=True):
-                signal_matches = analyze_stock_signals(price_df, trend_df=trend_df)
-                if not signal_matches:
-                    st.write("目前沒有符合任何已接上規則庫的訊號。")
-                else:
-                    for m in signal_matches:
-                        st.markdown(f"**{m['rule_id']}　{m['title']}（信心{m['confidence']}%）**")
-                        # 「目前狀態」(這條規則今天為什麼觸發)排在規則名稱後第一個位置，
-                        # 使用者最想先看到的是「現在是什麼情況」，解讀/原文頁碼是補充說明，
-                        # 排序上應該讓位。analyze_stock_signals()裡同一個rule_id若對應多筆
-                        # 觸發(例如R-TREND-03短期/中期各自獨立判斷都是多頭)，note會是用
-                        # 換行接起來的多行文字，這裡逐行各自加註「目前狀態：」/縮排顯示，
-                        # 不能假設note永遠是單行字串。
-                        if m.get("note"):
-                            note_lines = m["note"].split("\n")
-                            st.caption(f"目前狀態：{note_lines[0]}")
-                            for extra_line in note_lines[1:]:
-                                st.caption(f"　　{extra_line}")
-                        if m["description"]:
-                            # 「分析：」明確標示這段是「為什麼」的解說(ai/zhu-rules/裡每條規則的
-                            # 「解讀」欄位)，不是「目前狀態」的延續文字——股市新手最常問的就是
-                            # 「為什麼這個狀態下不能／可以進場」，這裡的解讀內容本來就有回答
-                            # 這個問題(例如R-INDICATOR-09說明為什麼盤整時KD交叉訊號無效)，
-                            # 只是原本沒有標籤、容易被當成普通補充文字略過不看。
-                            st.write(f"分析：{m['description']}")
-                        if m.get("reference"):
-                            st.caption(f"原文與頁碼：{m['reference']}")
-                        st.divider()
-                    # 「總結分析」放在列完所有規則之後——使用者反映一長串規則清單太雜亂，
-                    # 這裡用summarize_signal_matches()統計出的多頭/空頭傾向數量+信心最高的
-                    # 規則，讓使用者不用自己從落落長的清單裡歸納重點。
-                    summary = summarize_signal_matches(signal_matches)
-                    top = summary["top_match"]
-                    top_note = (top.get("note") or "").split("\n")[0] if top else ""
-                    st.markdown("**📌 總結分析**")
-                    st.write(
-                        f"本次共觸發 {summary['total']} 條規則"
-                        f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
-                        f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。"
-                    )
-                    st.write(f"信心最高的訊號：{top['rule_id']}　{top['title']}（{top['confidence']}%）")
-                    if top_note:
-                        st.caption(f"目前狀態：{top_note}")
+                _render_analysis_body()
                 # 面板展開後可能撐得很長(訊號一多)，使用者反映展開後要收合得捲回最上面
                 # 重新點一次上面col6的按鈕很麻煩——在展開內容最下方(不管有沒有符合任何
                 # 規則都顯示)再放一個「收合」按鈕，點了直接把狀態設回False並rerun，

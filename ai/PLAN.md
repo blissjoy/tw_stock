@@ -3320,3 +3320,51 @@ show_sar=True)`(固定參數、不像個股圖表那樣有勾選框可調整，�
 `market_chart_view`存在、分析文字預設可見；Streamlit版確認分頁裡找不到「大盤分析」
 外層按鈕與「個股分析」內層按鈕，切換到分頁即直接看到K線圖(含MA/MACD/KD/SAR)與規則
 比對清單+總結分析。728個測試全過(UI層改動，無新增可獨立測試的純函式)。
+
+## 修正大盤K線圖被壓縮、分析框加外框、初次進分頁高度算錯的bug(2026-07-29)
+
+使用者反映3個問題：①大盤的量怎麼會是0？②K線圖應該直接展開(不要被壓縮)；③大盤分析
+應該直接接在K線圖下方，不要限縮高度、不要有框。
+
+**①量為0的原因(查證，非bug)**：實際重新呼叫`fetch_taiex_prices()`查證，2026-07-28
+這天在yfinance的`^TWII`資料裡量確實是0——用寬日期範圍查詢時這天甚至整筆消失(不像
+07-27以前的資料穩定存在)，判斷是Yahoo Finance對指數類ticker的成交量欄位有結算延遲，
+當天資料還在整理中，開高低收已經有值但量還沒填上。這不是我們抓取程式的bug，是上游
+資料本身的特性；`fetch_today_taiex()`每天都會用當天日期重新覆寫(upsert)，之後排程
+重跑會自動修正，不需要現在特別處理。
+
+**②K線圖被壓縮**：桌面版`_build_market_tab()`原本`market_chart_view`只給
+`setMinimumHeight(450)`且沒有stretch因子，`market_layout`最後的`addStretch()`
+把多出來的空間都吃掉、沒有分給圖表，導致圖表被壓縮到看起來沒有展開(尤其這裡固定
+`show_macd=True`/`show_kd=True`，`build_candlestick_figure()`算出來的圖表本身
+需要560+140*2=840px高，跟450px的下限差很多)。修正：`setMinimumHeight(820)` +
+`addWidget(..., stretch=1)`(比照個股圖表`chart_view`的做法)，並移除多餘的
+`addStretch()`。
+
+**③分析框限縮高度+有外框**：
+- 外框：`QTextEdit`預設有`StyledPanel`外框，改成`setFrameShape(QFrame.Shape.NoFrame)`
+  讓分析文字視覺上直接接在K線圖下方，不是另外圈出來的一塊。
+- 高度算錯(意外發現的更嚴重問題)：實測發現`market_analysis_view`初次顯示時高度只有
+  個位數px(8px)，整段分析文字被壓成一條看不見的線——追查發現分頁2預設不是使用者
+  一開始看到的分頁(預設停留在分頁1「選股」)，`QTabWidget`不會給未顯示的分頁真正的
+  layout，`viewport().width()`這時候是預設值，`_set_market_analysis_html()`靠
+  `document().size().height()`算出來的高度嚴重失真。原本嘗試用`QTimer.singleShot
+  (0, ...)`延後執行沒有用(問題不是「視窗還沒show()」的時序，是「分頁還沒被切換過去
+  顯示」)。修正：移除建構時就呼叫`_refresh_market_tab()`的邏輯，改成監聽`tabs.
+  currentChanged`訊號，切到分頁2(index==1)時才整理——這樣切過去時一定是真正顯示
+  中、有正確layout的狀態，同時也讓每次切回來都自動看到最新資料。`_on_refresh_
+  clicked()`/`_on_fetch_finished()`裡呼叫`_refresh_market_tab()`的地方也一併
+  加上「只在目前就停留在分頁2時才立即整理」的判斷，避免同一個時序問題在資料更新
+  時重演——不在分頁2時不整理也沒關係，之後切過去`currentChanged`會自動整理，
+  資料是即時查DB不會顯示到舊的。
+
+Streamlit版`render_price_chart()`的`always_show_analysis=True`分支，把原本
+`st.expander("📊 個股分析", expanded=True)`(視覺上是有邊框的盒子)改成直接
+`st.markdown("### 📊 大盤分析")` + 內容平鋪顯示，不用`st.expander`的邊框外觀——
+抽出`_render_analysis_body()`共用函式，個股分析(仍用expander)與大盤分析(不用)
+呼叫同一份渲染邏輯，只是外層容器不同。
+
+用真實DB+Playwright/PySide6截圖驗證：桌面版確認`market_chart_view.height()`正確
+為820px、`market_analysis_view`切換到分頁後高度正確變成完整內容高度(1872px，不再是
+8px)、無外框；Streamlit版確認「大盤分析」不再是expander邊框盒子，直接接在圖表下方。
+728個測試全過。
