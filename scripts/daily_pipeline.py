@@ -170,18 +170,34 @@ def fetch_today_tpex(
     return len(prices_by_stock)
 
 
+# 每次更新大盤時，往回一併重新抓取的天數(見fetch_today_taiex()說明)。10個日曆天
+# 涵蓋約6~7個交易日，足夠蓋過連續假期，成本可忽略(yfinance單一ticker的請求，範圍
+# 拉長不會明顯增加耗時)。
+TAIEX_REFETCH_WINDOW_DAYS = 10
+
+
 def fetch_today_taiex(conn, date_str: str) -> bool:
-    """更新大盤(台股加權指數，`yfinance_client.TAIEX_STOCK_ID`)當天的OHLCV資料。
+    """更新大盤(台股加權指數，`yfinance_client.TAIEX_STOCK_ID`)的OHLCV資料。
 
     獨立於TWSE/TPEx兩條個股抓取路徑之外，只有一筆OHLCV資料要處理(不像個股還要合併
     三大法人/融資融券報表)。先upsert_stocks()寫一筆market="INDEX"的紀錄滿足
     stock_prices.stock_id的外鍵參照(見yfinance_client.fetch_taiex_prices()
     docstring)，再寫入價格。呼叫端(`run_daily_pipeline()`)應該把這個函式包在自己的
     try/except裡——任何一方失敗都不應該互相影響，這裡本身不吞例外。
+
+    ⚠️ 2026-08-01發現：這裡原本只抓`date_str`當天單一天，之後排程永遠不會回頭重新
+    查詢過去的日期。實測發現Yahoo Finance的^TWII成交量資料在當天查詢時常常還沒回補
+    完整(觀察到連續4天volume=0)，但幾天後同一天再查就有正確數字——這是Yahoo那端的
+    資料延遲，不是我們解析錯誤(個股股價那邊有TWSE官方查詢+is_intraday機制處理類似的
+    「盤中查詢資料還沒到位」情境，大盤原本沒有對應機制)。改成每次順便回頭多抓
+    `TAIEX_REFETCH_WINDOW_DAYS`天(不只當天)，`storage.upsert_stock_prices()`本來
+    就是ON CONFLICT DO UPDATE，回抓到比之前更完整的資料時會自動覆蓋掉舊的0值，不需要
+    額外偵測「哪幾天資料不完整」的邏輯，日後也會持續自我修正。
     """
     iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
     next_day = (date.fromisoformat(iso_date) + timedelta(days=1)).isoformat()
-    rows = yfinance_client.fetch_taiex_prices(iso_date, next_day)
+    start_date = (date.fromisoformat(iso_date) - timedelta(days=TAIEX_REFETCH_WINDOW_DAYS)).isoformat()
+    rows = yfinance_client.fetch_taiex_prices(start_date, next_day)
     if not rows:
         return False
     storage.upsert_stocks(conn, [{

@@ -127,6 +127,11 @@ class MainWindow(QMainWindow):
         # 通常有4~5MB，遠超過這個限制。改成寫進暫存檔案再用load(QUrl.fromLocalFile(...))，
         # 檔案大小沒有這個限制。同一個視窗重複使用同一個暫存檔案，不會每次渲染都留下新檔案。
         self._chart_html_path = Path(tempfile.gettempdir()) / f"tw_stock_chart_{id(self)}.html"
+        # 見showEvent()：「大盤」是分頁0、也是視窗一開啟就顯示的預設分頁，`tabs.
+        # currentChanged`訊號只在「真正切換」時觸發，開頭從-1變成0這個初始狀態不算
+        # 「切換」不會發訊號，導致大盤分頁沒有經過_on_tab_changed()、一直是空白，要手動
+        # 切到別的分頁再切回來才會有內容。這個旗標確保只在視窗第一次顯示時補打一次。
+        self._startup_tab_refreshed = False
 
         self._build_ui()
         self._refresh_date_list()
@@ -479,6 +484,19 @@ class MainWindow(QMainWindow):
             self._market_chart_html_path.write_text(html_content, encoding="utf-8")
             self.market_chart_view.load(QUrl.fromLocalFile(str(self._market_chart_html_path)))
         self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
+
+    def showEvent(self, event) -> None:
+        """視窗第一次顯示時，補打一次目前分頁(預設是分頁0「大盤」)的_on_tab_changed()，
+        見__init__()裡self._startup_tab_refreshed的說明——`tabs.currentChanged`訊號
+        在建構階段(-1→ 0)不會觸發，「大盤」分頁不像「個股清單」分頁那樣，一定會經過
+        使用者手動切換一次才觸發刷新。用QTimer.singleShot(0, ...)延到這次show事件處理
+        完之後才呼叫，確保跟手動切換分頁時一樣，viewport已經有真正的layout(不是0或
+        預設值)，算出來的高度/圖表才會正確，不是這裡直接同步呼叫。
+        """
+        super().showEvent(event)
+        if not self._startup_tab_refreshed:
+            self._startup_tab_refreshed = True
+            QTimer.singleShot(0, lambda: self._on_tab_changed(self.tabs.currentIndex()))
 
     def _on_tab_changed(self, index: int) -> None:
         if index == TAB_MARKET:

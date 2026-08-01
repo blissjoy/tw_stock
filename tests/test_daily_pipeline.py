@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 import pytest
 
 import scripts.daily_pipeline as daily_pipeline
@@ -517,6 +519,60 @@ def test_fetch_today_taiex_upserts_rows_and_returns_true(monkeypatch):
         (daily_pipeline.yfinance_client.TAIEX_STOCK_ID, "2026-07-22"),
     ).fetchone()
     assert row == (17050.0,)
+
+
+def test_fetch_today_taiex_requests_a_lookback_window_not_just_today(monkeypatch):
+    """2026-08-01修正：Yahoo Finance的^TWII成交量常在當天查詢時還沒回補完整(volume=0)，
+    幾天後同一天再查才有正確數字，但這裡原本只抓`date_str`當天，之後排程永遠不會回頭
+    重新查詢——資料因此永久卡在0。改成每次連同`TAIEX_REFETCH_WINDOW_DAYS`天前一併
+    重新抓取，這裡驗證真的把start往回拉，不是只抓當天那一天。"""
+    conn = _fresh_conn()
+    captured = {}
+
+    def _capture(start, end):
+        captured["start"] = start
+        captured["end"] = end
+        return []
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", _capture)
+
+    daily_pipeline.fetch_today_taiex(conn, "20260731")
+
+    assert captured["end"] == "2026-08-01"
+    expected_start = (
+        date(2026, 7, 31) - timedelta(days=daily_pipeline.TAIEX_REFETCH_WINDOW_DAYS)
+    ).isoformat()
+    assert captured["start"] == expected_start
+
+
+def test_fetch_today_taiex_repair_refetch_overwrites_stale_zero_volume(monkeypatch):
+    """驗證回抓的舊資料能透過upsert_stock_prices()的ON CONFLICT DO UPDATE正確覆蓋掉
+    先前存進DB的過期0成交量，不需要額外的「偵測哪幾天是0」邏輯。"""
+    conn = _fresh_conn()
+    stock_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    storage.upsert_stocks(conn, [{
+        "stock_id": stock_id, "name": "台股加權指數", "market": "INDEX",
+        "industry": None, "updated_at": "2026-07-28T19:30:00",
+    }])
+    storage.upsert_stock_prices(conn, [{
+        "stock_id": stock_id, "date": "2026-07-28", "open": 43000.0, "high": 43200.0,
+        "low": 41500.0, "close": 41603.36, "volume": 0, "trading_money": None,
+        "trading_turnover": None, "spread": None,
+    }])
+
+    fake_rows = [{
+        "stock_id": stock_id, "date": "2026-07-28", "open": 43000.0, "high": 43200.0,
+        "low": 41500.0, "close": 41603.36, "volume": 4492500, "trading_money": None,
+        "trading_turnover": None, "spread": None,
+    }]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: fake_rows)
+
+    daily_pipeline.fetch_today_taiex(conn, "20260731")
+
+    row = conn.execute(
+        "SELECT volume FROM stock_prices WHERE stock_id = ? AND date = ?", (stock_id, "2026-07-28"),
+    ).fetchone()
+    assert row == (4492500,)
 
 
 def test_fetch_today_taiex_returns_false_when_no_data(monkeypatch):
