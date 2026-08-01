@@ -73,15 +73,14 @@ def compute_ma_bullish_flags(
     才能算出最長那條均線，不能沿用MA5/10/20版本的60天預設值。
     資料不足以算出最長均線時該檔股票視為不成立(False)，不是拋例外或跳過。
     """
+    if not stock_ids:
+        return {}
     if lookback_days is None:
         lookback_days = max(periods)
+    closes_by_stock = _fetch_recent_columns_batched(conn, stock_ids, ["close"], lookback_days)
     flags: dict[str, bool] = {}
     for stock_id in stock_ids:
-        cur = conn.execute(
-            "SELECT close FROM stock_prices WHERE stock_id = ? ORDER BY date DESC LIMIT ?",
-            (stock_id, lookback_days),
-        )
-        closes = [row[0] for row in cur.fetchall()][::-1]
+        closes = closes_by_stock.get(stock_id, {}).get("close", [])
         if len(closes) < max(periods):
             flags[stock_id] = False
             continue
@@ -89,6 +88,50 @@ def compute_ma_bullish_flags(
         ma_frame = compute_ma_set(close_series, periods=periods)
         flags[stock_id] = bool(is_bullish_aligned(ma_frame, periods=periods).iloc[-1])
     return flags
+
+
+def _fetch_recent_columns_batched(
+    conn, stock_ids: list[str], columns: list[str], lookback_days: int,
+) -> dict[str, dict[str, list[float]]]:
+    """批次撈取多檔股票最近`lookback_days`個交易日的指定欄位，取代逐檔各自查詢一次
+    (N+1查詢)——候選清單股數多、又同時勾選多個篩選條件時，逐檔查詢的往返成本會疊加成
+    明顯的等待時間(2026-08-01效能調校：使用者回報篩選花的時間很多)。改成一次查全部、
+    用stock_id分組，SQLite/Turso執行單一大查詢的成本遠低於N次小查詢的往返總和。
+
+    回傳{stock_id: {column: [值...]}}，每檔股票的清單依日期由舊到新排序(呼叫端原本
+    逐檔查詢時就是這個順序，這裡維持一致，不用另外反轉)；查無資料的股票不會出現在
+    回傳dict裡(呼叫端用.get(stock_id, {})取用，天然對應「資料不足視為不成立」)。
+
+    ⚠️ 2026-08-01第一版曾經改用「用date字串概略限制查詢範圍」(以`date.today()`往前
+    推算日曆天數當WHERE條件)，結果讓部分回測/測試用的歷史資料(日期本來就跟「現在」
+    無關，例如整批補在2025年的合成測試資料)被這個跟真實現在時間綁死的WHERE條件誤
+    篩掉，算出跟舊版逐檔查詢不一致的結果——量測「最近N筆」不該用「現在的日曆時間」
+    當基準，跟資料本身實際涵蓋的時間範圍無關。改用SQL window function在資料庫端
+    直接算「每檔股票依日期新到舊的第幾筆」，只取前lookback_days筆，正確且不依賴
+    「現在」是哪一天。
+    """
+    placeholders = ",".join("?" * len(stock_ids))
+    column_list = ", ".join(columns)
+    cur = conn.execute(
+        f"""
+        SELECT stock_id, {column_list} FROM (
+            SELECT stock_id, {column_list},
+                   ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC) AS rn
+            FROM stock_prices
+            WHERE stock_id IN ({placeholders})
+        )
+        WHERE rn <= ?
+        ORDER BY stock_id, rn DESC
+        """,
+        [*stock_ids, lookback_days],
+    )
+    result: dict[str, dict[str, list[float]]] = {}
+    for row in cur.fetchall():
+        stock_id = row[0]
+        per_stock = result.setdefault(stock_id, {col: [] for col in columns})
+        for col, value in zip(columns, row[1:]):
+            per_stock[col].append(value)
+    return result
 
 
 def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str]], dict[str, bool]]:
@@ -131,19 +174,19 @@ def compute_sar_flip_flags(
     實際勾選SAR翻轉條件時才呼叫(見`apply_candidate_filters`的`sar_flip_option`參數)。歷史資料
     不足3天(compute_sar至少需要2天以上才有意義)的股票視為不成立(False)，不拋例外。
     """
+    if not stock_ids:
+        return {}
+    rows_by_stock = _fetch_recent_columns_batched(conn, stock_ids, ["high", "low", "close"], lookback_days)
     flags: dict[str, bool] = {}
     for stock_id in stock_ids:
-        cur = conn.execute(
-            "SELECT high, low, close FROM stock_prices WHERE stock_id = ? ORDER BY date DESC LIMIT ?",
-            (stock_id, lookback_days),
-        )
-        rows = cur.fetchall()[::-1]
-        if len(rows) < 3:
+        per_stock = rows_by_stock.get(stock_id, {})
+        high_vals = per_stock.get("high", [])
+        if len(high_vals) < 3:
             flags[stock_id] = False
             continue
-        high = pd.Series([row[0] for row in rows])
-        low = pd.Series([row[1] for row in rows])
-        close = pd.Series([row[2] for row in rows])
+        high = pd.Series(high_vals)
+        low = pd.Series(per_stock["low"])
+        close = pd.Series(per_stock["close"])
         sar_bull, _ = compute_sar(high, low, close)
         flags[stock_id] = sar_flipped_within(sar_bull, direction=direction, within_days=within_days)
     return flags

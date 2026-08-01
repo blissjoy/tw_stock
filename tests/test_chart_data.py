@@ -368,6 +368,39 @@ def test_compute_ma_bullish_flags_true_when_ma5_gt_ma10_gt_ma20():
     assert flags["2330"] is True
 
 
+def test_compute_ma_bullish_flags_batched_query_does_not_cross_contaminate_stocks():
+    """2026-08-01效能調校：改成一次批次查詢多檔股票(取代逐檔各自查詢一次)，這裡驗證
+    分組邏輯正確——2330持續上漲(多頭排列成立)、1101持續下跌(多頭排列不成立)，兩檔
+    股票的收盤價資料在同一批次查詢裡不能被混在一起判斷。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    rows = []
+    for d in range(40):
+        date_str = f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}"
+        rows.append({
+            "stock_id": "2330", "date": date_str, "open": 100.0, "high": 101.0, "low": 99.0,
+            "close": 100.0 + d * 0.5, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+        rows.append({
+            "stock_id": "1101", "date": date_str, "open": 100.0, "high": 101.0, "low": 99.0,
+            "close": 100.0 - d * 0.5, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    upsert_stock_prices(conn, rows)
+
+    flags = compute_ma_bullish_flags(conn, ["2330", "1101"])
+
+    assert flags["2330"] is True
+    assert flags["1101"] is False
+
+
+def test_compute_ma_bullish_flags_empty_stock_ids_returns_empty_dict():
+    conn = _fresh_conn()
+    assert compute_ma_bullish_flags(conn, []) == {}
+
+
 def test_compute_ma_bullish_flags_false_when_not_enough_history():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
@@ -920,6 +953,44 @@ def test_compute_sar_flip_flags_detects_bearish_flip_on_sharp_drop():
 
     flags_bull = compute_sar_flip_flags(conn, ["2330"], direction="多頭", within_days=1)
     assert flags_bull["2330"] is False
+
+
+def test_compute_sar_flip_flags_batched_query_does_not_cross_contaminate_stocks():
+    """2026-08-01效能調校：改成一次批次查詢多檔股票，這裡驗證分組邏輯正確——2330最後
+    一天暴跌(應翻轉為空頭)、1101維持平穩走勢(不應該翻轉)，兩檔股票的high/low/close
+    資料在同一批次查詢裡不能被混在一起算。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    highs = [10.0, 11.0, 12.0, 13.0, 9.0]
+    lows = [9.0, 10.0, 10.5, 11.5, 8.0]
+    # 1101用穩定上漲的走勢(不會翻轉為空頭)，跟2330(最後一天暴跌)明顯對比——刻意不用
+    # 完全持平的價格序列，那種簡併資料本身就可能觸發SAR演算法初始種子的邊界情況，
+    # 不是真正驗證「批次查詢有沒有分組正確」這件事所需要的。
+    rows = []
+    for d in range(5):
+        date_str = f"2026-07-{15 + d:02d}"
+        rows.append({
+            "stock_id": "2330", "date": date_str, "open": highs[d], "high": highs[d], "low": lows[d],
+            "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+        rows.append({
+            "stock_id": "1101", "date": date_str, "open": 50.0 + d, "high": 51.0 + d, "low": 49.0 + d,
+            "close": 50.0 + d, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None,
+        })
+    upsert_stock_prices(conn, rows)
+
+    flags = compute_sar_flip_flags(conn, ["2330", "1101"], direction="空頭", within_days=1)
+
+    assert flags["2330"] is True
+    assert flags["1101"] is False
+
+
+def test_compute_sar_flip_flags_empty_stock_ids_returns_empty_dict():
+    conn = _fresh_conn()
+    assert compute_sar_flip_flags(conn, []) == {}
 
 
 def test_apply_candidate_filters_sar_flip_option_filters_by_direction(monkeypatch):

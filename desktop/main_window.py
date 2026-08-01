@@ -118,6 +118,10 @@ class MainWindow(QMainWindow):
         # 字串)；手動查詢時設為None，右上角的來源標籤(self.stock_source_label)就不顯示
         # (見_on_candidate_selected()/_on_search())。
         self._current_stock_source: str | None = None
+        # 追蹤上一次輪詢到的「候選清單算至」時間戳，供_poll_pipeline_status()偵測候選
+        # 清單是否被外部(排程/Windows工作排程器背景觸發run_daily_pipeline())更新過，
+        # 見_check_for_external_candidate_update()的說明。
+        self._last_seen_candidate_update: str | None = None
         # QWebEngineView.setHtml()對內容大小有~2MB的隱性限制(Chromium的data: URL限制，超過
         # 會loadFinished(False)、畫面完全空白且不會報錯)——Plotly圖表把plotly.js整包內嵌後
         # 通常有4~5MB，遠超過這個限制。改成寫進暫存檔案再用load(QUrl.fromLocalFile(...))，
@@ -177,11 +181,16 @@ class MainWindow(QMainWindow):
         filter_bar.addWidget(self.date_combo)
         filter_bar.addSpacing(20)
         filter_bar.addWidget(QLabel("篩選條件："))
+        # ⚠️ 2026-08-01修正：篩選條件(以下這些勾選框/下拉/天數輸入)原本每改一個就立刻
+        # 呼叫_reload_candidates()重新查DB+套用篩選，勾選框一多、候選股數也多時，每次
+        # 微調都要等一次篩選運算，使用者反映「篩選花的時間很多」。改成不即時連動，
+        # 統一改完再按下面的「套用篩選」按鈕才真正執行一次，同一組條件不會因為連續
+        # 調整而重算好幾次。候選清單日期(上面的date_combo)例外，維持選了就立刻切換
+        # ——那是「看哪一天」的導覽動作，不是「調整篩選標準」，語意上不同。
         self.filter_checkboxes: dict[str, QCheckBox] = {}
         for label in chart_data.CANDIDATE_FILTERS:
             cb = QCheckBox(label)
             cb.setChecked(chart_data.CANDIDATE_FILTER_DEFAULTS.get(label, False))
-            cb.stateChanged.connect(self._reload_candidates)
             filter_bar.addWidget(cb)
             self.filter_checkboxes[label] = cb
 
@@ -190,18 +199,21 @@ class MainWindow(QMainWindow):
         # 的sar_flip_option參數(見src/presentation/chart_data.py)。
         filter_bar.addSpacing(20)
         self.sar_flip_checkbox = QCheckBox("SAR 翻轉")
-        self.sar_flip_checkbox.stateChanged.connect(self._reload_candidates)
         filter_bar.addWidget(self.sar_flip_checkbox)
         self.sar_flip_direction_combo = QComboBox()
         self.sar_flip_direction_combo.addItems(["多頭", "空頭"])
-        self.sar_flip_direction_combo.currentIndexChanged.connect(self._reload_candidates)
         filter_bar.addWidget(self.sar_flip_direction_combo)
         self.sar_flip_days_spin = QSpinBox()
         self.sar_flip_days_spin.setRange(1, 60)
         self.sar_flip_days_spin.setValue(1)
         self.sar_flip_days_spin.setSuffix(" 天內翻轉")
-        self.sar_flip_days_spin.valueChanged.connect(self._reload_candidates)
         filter_bar.addWidget(self.sar_flip_days_spin)
+
+        filter_bar.addSpacing(20)
+        self.apply_filter_btn = QPushButton("套用篩選")
+        self.apply_filter_btn.setToolTip("篩選條件改完後按這裡才會重新套用，不用每改一項就等一次運算")
+        self.apply_filter_btn.clicked.connect(self._reload_candidates)
+        filter_bar.addWidget(self.apply_filter_btn)
 
         filter_bar.addStretch()
         root_layout.addLayout(filter_bar)
@@ -834,6 +846,25 @@ class MainWindow(QMainWindow):
     # 狀態列（跟排程觸發的run_daily_pipeline()共用同一份pipeline_status.json）
     # ------------------------------------------------------------------
 
+    def _check_for_external_candidate_update(self) -> None:
+        """⚠️ 2026-08-01修正使用者回報的bug：排程(Windows工作排程器)背景觸發
+        run_daily_pipeline()完成後，狀態列的「候選清單算至：...」時間戳會正確更新
+        (直接查DB)，但候選清單日期下拉選單/候選清單表格本身完全沒有跟著重新載入——
+        因為原本的_poll_pipeline_status()只更新狀態文字，從來沒有呼叫_refresh_date_
+        list()/_reload_candidates()，只有「本視窗自己按按鈕觸發抓取/重新篩選」的路徑
+        才會主動刷新，排程在背景默默跑完的情況完全沒被感知到。
+
+        改成每次輪詢都比對候選清單最新一筆的created_at時間戳有沒有變化，變了(且不是
+        本函式第一次執行、只是在建立比對基準，避免視窗剛啟動時誤判成「外部更新」而
+        重複刷新一次)就代表候選清單被更新過(不管是誰觸發的)，主動重新載入日期下拉
+        選單跟候選清單表格。
+        """
+        latest = chart_data.get_latest_candidate_update_time(self.conn)
+        if self._last_seen_candidate_update is not None and latest != self._last_seen_candidate_update:
+            self._refresh_date_list()
+            self._reload_candidates()
+        self._last_seen_candidate_update = latest
+
     def _poll_pipeline_status(self) -> None:
         # 如果本視窗自己觸發的PipelineWorker正在跑，狀態列已經由_on_fetch_progress()顯示
         # 更細緻的下載進度(例如「TPEx 500/1980檔」)，這裡就不要每5秒用pipeline_status.json
@@ -841,6 +872,8 @@ class MainWindow(QMainWindow):
         # 剛好開著」的情境用的，跟本視窗自己觸發的抓取搶著更新同一個label沒有意義。
         if self._pipeline_worker is not None and self._pipeline_worker.isRunning():
             return
+        if self.conn is not None:
+            self._check_for_external_candidate_update()
         status = pipeline_status.read_status()
         state = status.get("status") if status else None
         if state == "running":

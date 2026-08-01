@@ -271,7 +271,8 @@ def run_daily_pipeline(
             # 兩個通知管道各自獨立try/except：例如Gmail憑證還沒設定時，LINE通知仍應正常發送，
             # 不應該讓其中一個管道還沒設定/暫時失敗就讓整條pipeline中斷（候選清單已經寫進Turso了）。
             try:
-                send_line_broadcast(format_candidates_message(iso_date, candidates))
+                stock_names = {sid: info.get("name", "") for sid, info in stock_info_by_id.items()}
+                send_line_broadcast(format_candidates_message(iso_date, candidates, stock_names=stock_names))
             except Exception as exc:  # noqa: BLE001
                 print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
             try:

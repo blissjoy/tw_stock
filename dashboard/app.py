@@ -315,7 +315,13 @@ def main() -> None:
         render_price_chart(TAIEX_STOCK_ID, widget_key="taiex", always_show_analysis=True)
 
     elif active_tab == TAB_SCREENER:
-        st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件）")
+        # ⚠️ 2026-08-01修正：篩選條件(以下勾選框/下拉/天數輸入)原本每改一個就立刻用
+        # apply_candidate_filters()重新查DB+套用篩選——Streamlit本來就是「互動一次
+        # 整個腳本重跑一次」的架構，沒辦法避免rerun本身，但rerun時"是否要重新套用
+        # 篩選"是可以自己控制的：改成勾選框只更新畫面上的UI狀態，實際套用篩選延後到
+        # 按下「套用篩選」按鈕才發生，儲存進session_state["applied_filters"]，同一組
+        # 條件不會因為連續調整而重算好幾次(見desktop/main_window.py同一天的對應修正)。
+        st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件），改完後按「套用篩選」才會重新套用")
         filter_cols = st.columns(len(CANDIDATE_FILTERS))
         active_filters = [
             label for col, label in zip(filter_cols, CANDIDATE_FILTERS)
@@ -325,7 +331,7 @@ def main() -> None:
         # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
         # 放進上面CANDIDATE_FILTERS那組迴圈，改用獨立的sar_flip_option參數傳給
         # apply_candidate_filters(見src/presentation/chart_data.py)。
-        sar_col1, sar_col2, sar_col3 = st.columns([1, 1, 2])
+        sar_col1, sar_col2, sar_col3, sar_col4 = st.columns([1, 1, 1.5, 1])
         sar_flip_enabled = sar_col1.checkbox("SAR 翻轉", value=False, key="filter_sar_flip_enabled")
         sar_flip_direction = sar_col2.selectbox("方向", ["多頭", "空頭"], index=0, key="filter_sar_flip_direction")
         sar_flip_within_days = sar_col3.number_input(
@@ -335,6 +341,15 @@ def main() -> None:
             {"direction": sar_flip_direction, "within_days": int(sar_flip_within_days)}
             if sar_flip_enabled else None
         )
+
+        if "applied_filters" not in st.session_state:
+            st.session_state["applied_filters"] = {"active_filters": [], "sar_flip_option": None}
+        with sar_col4:
+            st.markdown("&nbsp;")  # 對齊上面其他欄位的label高度，讓按鈕跟輸入框大致同一條水平線
+            if st.button("套用篩選"):
+                st.session_state["applied_filters"] = {
+                    "active_filters": active_filters, "sar_flip_option": sar_flip_option,
+                }
 
         button_col1, button_col2 = st.columns([1, 1])
         with button_col1:
@@ -368,7 +383,10 @@ def main() -> None:
             if candidate_dates else None
         )
         candidates_df, latest_date, is_intraday = load_candidates_for_date(conn, target_date=selected_date)
-        candidates_df = apply_candidate_filters(conn, candidates_df, active_filters, sar_flip_option=sar_flip_option)
+        applied = st.session_state["applied_filters"]
+        candidates_df = apply_candidate_filters(
+            conn, candidates_df, applied["active_filters"], sar_flip_option=applied["sar_flip_option"],
+        )
 
         if latest_date is None:
             st.info("目前 Turso 資料庫裡還沒有任何每日選股紀錄，點上方「立即重新篩選」或等 GitHub Actions 排程跑完後就會顯示。")

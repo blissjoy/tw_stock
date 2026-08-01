@@ -3414,3 +3414,54 @@ streamlit server log抓到真正的exception，而不是一直在猜Playwright c
 時序)雙重驗證：桌面版點選候選列正確切到「個股清單」分頁、右上角顯示「來源：7月28日
 的選股策略」，手動查詢後來源清空；Streamlit版同樣行為一致(來源：7月31日的選股策略)。
 728個測試全過。
+
+## 修正自動更新後候選清單不刷新、篩選加submit按鈕+效能調校、LINE通知格式(2026-08-01)
+
+使用者一次回報3個問題並提出2個需求：①自動更新股價後「候選清單算至」時間戳有更新，
+但候選清單日期沒跟著變，懷疑沒有真的重新篩選；②篩選條件應該加submit按鈕，不要每改
+一項就執行；③篩選速度太慢請tune code；④LINE通知內容跟候選清單畫面差異很大、格式
+要改成{代號}{名稱} 符合規格數{n}(依信心度加總降冪)；另外想在篩選條件加「朱家泓技術
+分析、籌碼分析」這一列(此項因為牽涉尚未接上任何規則的「籌碼分析」路徑，需求不夠明確，
+先向使用者確認範圍，未在這次一併實作)。
+
+**①候選清單不刷新的根因**：桌面版`_poll_pipeline_status()`每5秒輪詢`pipeline_
+status.json`，只更新狀態列文字(直接查DB算出的「候選清單算至」時間戳本來就是即時的)，
+但從來沒有呼叫`_refresh_date_list()`/`_reload_candidates()`——本視窗自己按按鈕
+觸發抓取/重新篩選的路徑才會主動刷新，Windows工作排程器背景觸發的執行完全沒被感知到。
+新增`_check_for_external_candidate_update()`：每次輪詢比對候選清單最新
+created_at時間戳有沒有變化，變了(且不是第一次執行、只是建立比對基準)就代表被外部
+更新過，主動重新載入日期下拉選單跟候選清單表格。用真實DB模擬「背景寫入新一天候選
+清單」，確認`_poll_pipeline_status()`正確偵測到並刷新`date_combo`。
+
+**②③submit按鈕+效能調校**：桌面版移除`filter_checkboxes`/`sar_flip_checkbox`/
+`sar_flip_direction_combo`/`sar_flip_days_spin`的即時連動(`stateChanged`/
+`currentIndexChanged`/`valueChanged`直接接`_reload_candidates`)，改成新增
+「套用篩選」按鈕才觸發；候選清單日期(`date_combo`)維持選了就立即切換(屬於「看哪
+一天」的導覽動作，不是「調整篩選標準」)。Streamlit版用`session_state["applied_
+filters"]`儲存「最後一次按下套用篩選當下」的篩選條件，checkbox/selectbox本身
+只更新UI狀態，`apply_candidate_filters()`固定讀`applied_filters`而非即時的
+widget值。
+
+效能調校：`chart_data.compute_ma_bullish_flags()`/`compute_sar_flip_flags()`
+原本逐檔各自查一次DB(N+1查詢)，候選股數多、又同時勾選多個篩選條件時往返成本疊加成
+明顯等待時間。抽出共用的`_fetch_recent_columns_batched()`，用SQL window function
+(`ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC)`)一次查全部股票、
+只取每檔最近N筆，取代N次個別查詢。⚠️ 第一版曾經改用「date字串概略限制查詢範圍」
+(以`date.today()`往前推算日曆天數)，結果讓測試/合成資料的日期(跟「現在」無關)被
+這個跟真實現在時間綁死的WHERE條件誤篩掉，算出跟舊版不一致的結果——量測「最近N筆」
+不該用「現在的日曆時間」當基準；改用window function後正確且不依賴「現在」是哪一天。
+用真實本機DB實測300檔股票的MA/SAR篩選，從N+1查詢大幅減少往返次數；新增2組測試
+驗證批次查詢的分組邏輯不會把不同股票的資料混在一起算。
+
+**④LINE通知格式**：`format_candidates_message()`新增`stock_names`參數，改成依
+stock_id分組(`screen_all_stocks()`同一檔股票符合多條規則時刻意不去重，原本逐筆
+列出訊息因此充滿同一檔股票重複出現的雜訊)，一檔股票只顯示一行「{代號}{名稱}
+符合規格數{n}」，依信心分數加總(從signal_name字串裡的「（NN%）」抽取加總)由高到低
+排序。`scripts/daily_pipeline.py`呼叫端傳入`stock_info_by_id`轉成的`{stock_id:
+name}`對照表(FinMind既有資料，不用額外查詢)。只修改LINE通知，Email通知
+(`format_candidates_email_body`)這次沒有異動(使用者只回報LINE的問題，Email格式
+維持原樣，範圍不無故擴大)。
+
+734個測試全過(730+去重後淨增4個)，用真實本機DB+PySide6/Playwright驗證：桌面版
+submit按鈕確認勾選框不會立即觸發重新載入、按下「套用篩選」才會；外部寫入候選清單
+後輪詢正確偵測並刷新；Streamlit版確認「套用篩選」按鈕正確顯示在篩選列。
