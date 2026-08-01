@@ -21,8 +21,10 @@ from src.indicators.macd import compute_macd
 from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned
 from src.indicators.parabolic_sar import compute_sar, sar_flipped_within
 from src.patterns import chart_overlays
+from src.rule_docs import load_rule_doc
 
 _CONFIDENCE_PATTERN = re.compile(r"（(\d+)%）")
+_RULE_ID_PATTERN = re.compile(r"(R-[A-Z]+-\d+)")
 
 MA_COLORS = {
     5: "#2e86de", 10: "#e67e22", 20: "#8e44ad",
@@ -192,21 +194,42 @@ def compute_sar_flip_flags(
     return flags
 
 
+def _signal_matches_zhu_rulebook(signal_name: str) -> bool:
+    """判斷這筆候選股訊號(可能用「\n」合併了同一檔股票符合的多條規則，見
+    `load_candidates_for_date`)是否至少有一條規則來自朱家泓的書(`ai/zhu-rules/`246條規則庫，
+    透過`src.rule_docs.load_rule_doc`查表判斷Rule ID是否存在)。
+
+    2026-08-01新增「朱家泓技術分析」篩選框時的現況：`_SCREEN_FUNCTIONS`/`scan_golden_tier()`
+    目前接上候選清單產生流程的規則全部來自朱家泓的書，陳家豐的籌碼分析規則(margin_trading.py/
+    volume_washout.py)還沒有被任何篩選函式呼叫、不會出現在candidates_df裡——因此這個函式
+    現階段對每一筆候選股都回傳True，勾選/不勾選這個篩選框目前不會改變候選清單內容，是刻意的
+    (見使用者需求：先做標示用的勾選框，等籌碼分析規則接上候選清單產生流程後這裡才會真正
+    篩出差異)。之後籌碼分析規則接上後，這裡不需要修改就能正確分辨兩種來源。
+    """
+    rule_ids = _RULE_ID_PATTERN.findall(signal_name or "")
+    return any(load_rule_doc(rule_id) is not None for rule_id in rule_ids)
+
+
 def apply_candidate_filters(
     conn, candidates_df: pd.DataFrame, active_filter_labels: list[str],
-    sar_flip_option: dict | None = None,
+    sar_flip_option: dict | None = None, zhu_rule_only: bool = False,
 ) -> pd.DataFrame:
     """依勾選的篩選標籤(CANDIDATE_FILTERS的key)逐一AND套用，回傳過濾後的候選清單。
-    未勾選任何篩選(active_filter_labels為空且sar_flip_option為None)時原樣回傳，不做任何運算。
+    未勾選任何篩選(active_filter_labels為空、sar_flip_option為None、zhu_rule_only為False)時
+    原樣回傳，不做任何運算。
 
     sar_flip_option：SAR翻轉篩選的參數，格式{"direction": "多頭"|"空頭", "within_days": int}，
     傳None代表沒有勾選這個條件。這個篩選條件的UI是「勾選框+方向下拉+天數輸入」三個元件綁在
     一起，不是單純的勾選框，不適合塞進`CANDIDATE_FILTERS`那種「label -> 純checkbox」的
     registry，因此用獨立參數傳入，不是加進`active_filter_labels`清單裡。
+
+    zhu_rule_only：「朱家泓技術分析」篩選框是否勾選，見`_signal_matches_zhu_rulebook`。跟
+    sar_flip_option同理，這是依`candidates_df`裡已經算好的`signal_name`欄位分類，不是像
+    `CANDIDATE_FILTERS`那樣重新查`stock_prices`算指標，因此也用獨立參數傳入。
     """
     if candidates_df.empty:
         return candidates_df
-    if not active_filter_labels and sar_flip_option is None:
+    if not active_filter_labels and sar_flip_option is None and not zhu_rule_only:
         return candidates_df
     stock_ids = candidates_df["stock_id"].tolist()
     mask = pd.Series(True, index=candidates_df.index)
@@ -220,6 +243,8 @@ def apply_candidate_filters(
             within_days=sar_flip_option.get("within_days", 1),
         )
         mask &= candidates_df["stock_id"].map(flags).fillna(False)
+    if zhu_rule_only:
+        mask &= candidates_df["signal_name"].map(_signal_matches_zhu_rulebook)
     return candidates_df[mask].reset_index(drop=True)
 
 

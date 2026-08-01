@@ -342,13 +342,24 @@ def main() -> None:
             if sar_flip_enabled else None
         )
 
+        # 「朱家泓技術分析」勾選框：2026-08-01新增，目前是標示用——候選清單目前100%來自
+        # 朱家泓的書(見chart_data._signal_matches_zhu_rulebook())，還沒有其他規則來源，
+        # 勾選/不勾選這裡暫時不會改變候選清單內容，等籌碼分析(陳家豐)規則接上候選清單
+        # 產生流程後才會真正篩出差異。預設勾選，跟現況(全部都是朱家泓規則)一致。
+        rule_source_col1, _rule_source_col2 = st.columns([1, 4])
+        zhu_rule_only = rule_source_col1.checkbox(
+            "朱家泓技術分析", value=True, key="filter_zhu_rule_only",
+            help="目前候選清單全部來自朱家泓的書，這裡暫為標示用；等籌碼分析規則接上後才會真正篩選",
+        )
+
         if "applied_filters" not in st.session_state:
-            st.session_state["applied_filters"] = {"active_filters": [], "sar_flip_option": None}
+            st.session_state["applied_filters"] = {"active_filters": [], "sar_flip_option": None, "zhu_rule_only": True}
         with sar_col4:
             st.markdown("&nbsp;")  # 對齊上面其他欄位的label高度，讓按鈕跟輸入框大致同一條水平線
             if st.button("套用篩選"):
                 st.session_state["applied_filters"] = {
                     "active_filters": active_filters, "sar_flip_option": sar_flip_option,
+                    "zhu_rule_only": zhu_rule_only,
                 }
 
         button_col1, button_col2 = st.columns([1, 1])
@@ -386,6 +397,7 @@ def main() -> None:
         applied = st.session_state["applied_filters"]
         candidates_df = apply_candidate_filters(
             conn, candidates_df, applied["active_filters"], sar_flip_option=applied["sar_flip_option"],
+            zhu_rule_only=applied.get("zhu_rule_only", True),
         )
 
         if latest_date is None:

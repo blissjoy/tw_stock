@@ -209,6 +209,16 @@ class MainWindow(QMainWindow):
         self.sar_flip_days_spin.setSuffix(" 天內翻轉")
         filter_bar.addWidget(self.sar_flip_days_spin)
 
+        # 「朱家泓技術分析」勾選框：2026-08-01新增，目前是標示用——候選清單目前100%來自
+        # 朱家泓的書(見chart_data._signal_matches_zhu_rulebook())，還沒有其他規則來源，
+        # 勾選/不勾選這裡暫時不會改變候選清單內容，等籌碼分析(陳家豐)規則接上候選清單
+        # 產生流程後才會真正篩出差異。預設勾選，跟現況(全部都是朱家泓規則)一致。
+        filter_bar.addSpacing(20)
+        self.zhu_rule_checkbox = QCheckBox("朱家泓技術分析")
+        self.zhu_rule_checkbox.setChecked(True)
+        self.zhu_rule_checkbox.setToolTip("目前候選清單全部來自朱家泓的書，這裡暫為標示用；等籌碼分析規則接上後才會真正篩選")
+        filter_bar.addWidget(self.zhu_rule_checkbox)
+
         filter_bar.addSpacing(20)
         self.apply_filter_btn = QPushButton("套用篩選")
         self.apply_filter_btn.setToolTip("篩選條件改完後按這裡才會重新套用，不用每改一項就等一次運算")
@@ -514,7 +524,10 @@ class MainWindow(QMainWindow):
                 "direction": self.sar_flip_direction_combo.currentText(),
                 "within_days": self.sar_flip_days_spin.value(),
             }
-        df = chart_data.apply_candidate_filters(self.conn, df, active_filters, sar_flip_option=sar_flip_option)
+        df = chart_data.apply_candidate_filters(
+            self.conn, df, active_filters, sar_flip_option=sar_flip_option,
+            zhu_rule_only=self.zhu_rule_checkbox.isChecked(),
+        )
         self.candidates_table.setRowCount(0)
         self.intraday_label.setVisible(is_intraday)
         if latest_date is None:

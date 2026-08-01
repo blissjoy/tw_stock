@@ -3465,3 +3465,36 @@ name}`對照表(FinMind既有資料，不用額外查詢)。只修改LINE通知�
 734個測試全過(730+去重後淨增4個)，用真實本機DB+PySide6/Playwright驗證：桌面版
 submit按鈕確認勾選框不會立即觸發重新載入、按下「套用篩選」才會；外部寫入候選清單
 後輪詢正確偵測並刷新；Streamlit版確認「套用篩選」按鈕正確顯示在篩選列。
+
+## 篩選列新增「朱家泓技術分析」勾選框(2026-08-01)
+
+延續上一則PLAN條目最後留下的問題：使用者要在篩選條件加「朱家泓技術分析、籌碼分析」
+這一列。用`AskUserQuestion`確認範圍後，使用者明確回覆：「先只做「朱家泓技術分析」
+勾選框(標示用，預設勾選)，籌碼分析等接上規則後再做」——因為目前`_SCREEN_FUNCTIONS`/
+`scan_golden_tier()`接上候選清單產生流程的規則全部來自朱家泓的書，陳家豐的籌碼分析
+規則(`margin_trading.py`/`volume_washout.py`)還沒有被任何篩選函式呼叫，不會出現在
+候選清單裡，所以「籌碼分析」這個勾選框目前沒有東西可以篩，先不做。
+
+**設計取捨**：沒有做成「不管候選內容、恆為True的假勾選框」，而是接上真正的分類邏輯
+`chart_data._signal_matches_zhu_rulebook()`——從候選股`signal_name`(可能用「\n」
+合併多條規則)裡用正規表示式抽出Rule ID(`R-[A-Z]+-\d+`)，查`src.rule_docs.
+load_rule_doc()`(既有的246條規則庫索引)確認是否為朱家泓書上的規則。這樣現階段(候選
+清單100%來自朱家泓規則)勾選/不勾選這個框不會改變候選清單內容(純標示用，符合使用者
+要求)，但邏輯本身是正確的分類，之後籌碼分析規則接上候選清單產生流程、`signal_name`
+出現非朱家泓Rule ID時，這個勾選框會自動開始產生實際篩選效果，不需要回頭改這裡的程式碼。
+
+`apply_candidate_filters()`新增`zhu_rule_only`參數，比照`sar_flip_option`的做法
+獨立傳入(不是塞進`CANDIDATE_FILTERS`那種「label -> 查stock_prices算指標」的
+registry，因為這個判斷要看的是`candidates_df`裡已經有的`signal_name`欄位，不是
+重新查價格資料)。兩個前端都在篩選列加了「朱家泓技術分析」勾選框，預設勾選，跟
+其他篩選條件一樣被「套用篩選」按鈕gate住(不即時連動)。
+
+新增4個測試(`_signal_matches_zhu_rulebook`已知/未知Rule ID各一個、
+`apply_candidate_filters`勾選/不勾選`zhu_rule_only`各一個)，738個測試全過。用真實
+本機DB驗證：Streamlit版篩選列正確顯示勾選框(預設勾選)，取消勾選+套用篩選後候選
+數量不變(1253檔，符合預期——目前沒有非朱家泓規則可以被篩掉)；桌面版同樣行為一致
+(87檔不變)。⚠️ Streamlit有一次重新整理後噴`TypeError: apply_candidate_filters()
+got an unexpected keyword argument 'zhu_rule_only'`——是本機`streamlit run`背景
+process沒有正確reload已import的`chart_data`模組(Streamlit的autoreload對script
+本身有效，但對已經`from module import func`進來的函式不保證重新綁定)，重啟
+process後恢復正常，不是程式邏輯的bug。

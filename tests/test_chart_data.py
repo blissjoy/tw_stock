@@ -508,6 +508,40 @@ def test_apply_candidate_filters_keeps_only_stocks_matching_ma_bullish(monkeypat
     assert list(result["stock_id"]) == ["2330", "2603"]
 
 
+def test_signal_matches_zhu_rulebook_true_for_known_rule_id():
+    assert chart_data._signal_matches_zhu_rulebook("R-TREND-14多頭短線進場（92%）") is True
+
+
+def test_signal_matches_zhu_rulebook_false_for_unknown_rule_id():
+    assert chart_data._signal_matches_zhu_rulebook("R-NOT-A-REAL-RULE（92%）") is False
+    assert chart_data._signal_matches_zhu_rulebook("") is False
+
+
+def test_apply_candidate_filters_zhu_rule_only_keeps_rows_matching_zhu_rulebook():
+    """2026-08-01新增「朱家泓技術分析」勾選框：目前候選清單全部來自朱家泓的書，勾選這個
+    篩選框暫時不該篩掉任何真正的朱家泓規則候選股，只有signal_name完全不含已知Rule ID的
+    才會被篩掉(見_signal_matches_zhu_rulebook())。"""
+    df = pd.DataFrame({
+        "stock_id": ["2330", "9999"],
+        "signal_name": ["R-TREND-14多頭短線進場（92%）", "R-NOT-A-REAL-RULE（92%）"],
+    })
+
+    result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=[], zhu_rule_only=True)
+
+    assert list(result["stock_id"]) == ["2330"]
+
+
+def test_apply_candidate_filters_unfiltered_when_zhu_rule_only_false():
+    df = pd.DataFrame({
+        "stock_id": ["2330", "9999"],
+        "signal_name": ["R-TREND-14多頭短線進場（92%）", "R-NOT-A-REAL-RULE（92%）"],
+    })
+
+    result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=[], zhu_rule_only=False)
+
+    assert list(result["stock_id"]) == ["2330", "9999"]
+
+
 def test_twse_tick_size_matches_official_price_tiers():
     """台灣證交所公告的股票升降單位：<10:0.01／10~50:0.05／50~100:0.1／100~500:0.5／
     500~1000:1／>=1000:5，邊界值(10/50/100/500/1000)歸入「較高」那一級。"""
