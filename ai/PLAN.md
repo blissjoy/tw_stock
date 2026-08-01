@@ -3652,3 +3652,65 @@ zhu_rule_only新語意、全市場掃描AND搭配朱家泓技術分析的組合�
 MA5>10>20+SAR多頭1天內翻轉，取消勾選朱家泓技術分析)：桌面版正確篩出
 `['1235', '1442', '1476', '2006', '2607', '2867', '3226', '6914', '6958']`——
 先前查證「架構性差異」的6958、1442這次都正確出現在結果裡，收斂到跟ref-project一致。
+
+## 新增daily_indicators表：均線/SAR篩選改成查表，不再即時計算(2026-08-02)
+
+延續上一則PLAN條目留下的效能已知代價(全市場SAR/均線掃描要15~35秒)，使用者提出：既然
+股價更新時朱家泓規則比對結果已經是「算一次、存daily_candidates、之後只查表」的模式，
+均線/SAR是否也能比照辦理，股價更新的同時順便算好存進一張新表，之後不管是「現在」還是
+「回溯過去某一天」都只需要查表。方向確認正確，且指出一個關鍵風險：這個快取不能做成
+「算過一次、永遠不再碰」——TWSE盤中價→收盤價的修正、以及這次session才修過的「TAIEX
+成交量延遲」bug，都證實股價資料確實會事後被修正，快取需要有「重新整理最近一段時間」
+的機制才能跟上。這次改動範圍較大，先用EnterPlanMode產出詳細設計(6個部分)讓使用者核准
+後才開始實作。
+
+**新增`daily_indicators`表**(`src/data/schema.sql`)：`(stock_id, date)`為主鍵，
+存原始均線數值(ma5/ma10/ma20/ma60/ma120/ma240，不是布林旗標，之後多加均線條件不用
+改schema)、`sar_value`/`sar_is_bull`/`sar_flip_days_ago`(第幾天前翻轉，語意對應
+`src/indicators/parabolic_sar.py`既有的`sar_flip_days_ago()`，「N天內翻轉」篩選
+變成`sar_flip_days_ago <= N`的單純比較)。
+
+**核心計算邏輯**：新模組`src/screener/indicator_precompute.py`的
+`compute_indicator_rows(stock_id, df, target_dates)`，完全重用已驗證過的
+`compute_ma_set()`/`compute_sar()`(不重新定義計算方式)，對傳入的df只算一次、從結果裡
+挑出`target_dates`要的列——新增`_sar_flip_days_ago_series()`一次算出整段序列每一天的
+「第幾天前翻轉」，跟官方`sar_flip_days_ago()`對「序列最後一天」算出的值逐一比對驗證
+一致(見`tests/test_indicator_precompute.py`)，避免對全部歷史回補時變成O(n²)。
+
+**Pipeline整合**：`src/screener/daily_screener.py`的`run_screen_and_store()`(候選
+清單「唯一重算入口」，桌面版/Streamlit「立即重新篩選」按鈕、`run_daily_pipeline()`
+三處共用)每次呼叫時順便算好當天的均線/SAR存進去；新增`refresh_indicator_window()`
+供`scripts/daily_pipeline.py`排程時額外往回刷新`INDICATOR_REFRESH_WINDOW_DAYS`
+(預設10)個交易日，吸收股價資料事後被修正的風險，只在排程跑、不在手動按鈕觸發，避免
+使用者連續手動點擊時重複付出成本。
+
+**一次性回補**：新增`scripts/backfill_daily_indicators.py`，對現有全部歷史(排除
+market='INDEX')算一輪均線/SAR寫進`daily_indicators`——這是必要的手動步驟，沒回補過
+的股票在均線/SAR篩選裡會直接判定不成立。真實本機DB實測：2435檔股票、全部歷史
+(~860天)，共183萬筆，耗時533秒(約9分鐘)，一次性成本可接受。
+
+**改寫查詢路徑**：`src/presentation/chart_data.py`新增`load_ma_bullish_flags_from_
+table()`/`load_sar_flip_flags_from_table()`查`daily_indicators`表，取代
+`CANDIDATE_FILTERS`/`apply_candidate_filters()`原本呼叫`compute_ma_bullish_flags()`/
+`compute_sar_flip_flags()`即時計算的路徑；這兩個即時計算函式保留不變、不刪除，是
+`indicator_precompute.py`背後真正的計算邏輯來源，也留給既有測試使用。
+
+**⚠️ 實作中發現、修正了原設計的一個效能假設錯誤**：原計畫認為`run_screen_and_store()`
+「只算iso_date當天一天，成本很低」，但實測發現`compute_sar()`/`compute_ma_set()`對
+整個df只算一次，這個「一次」的成本是O(df的總天數)、不是O(target_dates的數量)——傳入
+整段歷史(當時已累積~860天)會讓這一步多花69秒，拖慢「立即重新篩選」的體感速度，且會
+隨DB歷史持續累積而越來越慢。修正：日常增量更新(`run_screen_and_store()`/
+`refresh_indicator_window()`)呼叫前先用`df.tail(LIVE_UPDATE_LOOKBACK_DAYS)`(400天)
+裁切，只有`backfill_daily_indicators.py`的一次性回補才刻意傳入全部歷史。裁切後實測
+降到52秒，仍然是`run_screen_and_store()`既有基礎成本(單獨量測`load_trailing_frames()`
+16秒+`screen_all_stocks()`85秒，這部分是這次改動之前就存在的成本，不屬於這次變動
+範圍)之外額外增加約50秒——這點已如實記錄，還沒有進一步優化，效能上仍有改善空間，
+但候選清單篩選(這次要解決的主要問題)已經達到近乎即時的效果。
+
+**驗證**：新增26個測試(`test_indicator_precompute.py`7個、`chart_data.py`查表函式
+9個、`daily_screener.py`/`daily_pipeline.py`新增流程各數個)，766個測試全過。真實
+本機DB驗證：查表結果跟即時計算版本(`compute_ma_bullish_flags`/`compute_sar_flip_
+flags`)在同一份資料上完全一致；重跑使用者的ref-project比對案例(2026-07-30，
+MA5>10>20+SAR多頭1天內翻轉)，兩種情境(勾/不勾朱家泓技術分析)都跟改版前驗證過的正確
+結果完全吻合。**效能**：候選清單篩選從改表查詢前的5~37秒(依情境)降到0.03~0.35秒，
+兩前端(桌面版/Streamlit)都重新驗證過畫面正常、無crash。

@@ -777,3 +777,51 @@ def test_run_screen_and_store_does_not_affect_other_dates(monkeypatch):
     count_23 = conn.execute("SELECT COUNT(*) FROM daily_candidates WHERE date = '2026-07-23'").fetchone()[0]
     assert count_22 == 1
     assert count_23 == 1
+
+
+def test_run_screen_and_store_writes_indicator_cache_for_the_date(monkeypatch):
+    """2026-08-02新增：候選清單的均線/SAR篩選改成查daily_indicators表，run_screen_and_
+    store()每次重算候選清單時要順便把當天的均線/SAR算好存進去(見
+    src.screener.indicator_precompute.compute_indicator_rows())，不用另外一個步驟。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)  # 最後一天是2026-03-14
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+
+    daily_screener.run_screen_and_store(conn, iso_date="2026-03-14", min_days=60)
+
+    row = conn.execute(
+        "SELECT ma5, ma20, sar_flip_days_ago FROM daily_indicators WHERE stock_id = '2330' AND date = '2026-03-14'"
+    ).fetchone()
+    assert row is not None
+    ma5, ma20, sar_flip_days_ago = row
+    assert ma5 is not None
+    assert ma20 is not None
+    assert sar_flip_days_ago is not None
+
+
+def test_refresh_indicator_window_writes_multiple_recent_trading_days():
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)  # 最後一天是2026-03-14
+
+    written = daily_screener.refresh_indicator_window(conn, end_date="2026-03-14", window_days=5, min_days=60)
+
+    assert written == 5
+    dates = {
+        row[0] for row in conn.execute("SELECT date FROM daily_indicators WHERE stock_id = '2330'").fetchall()
+    }
+    assert len(dates) == 5
+    assert "2026-03-14" in dates  # 涵蓋end_date本身
+
+
+def test_refresh_indicator_window_only_recomputes_dates_on_or_before_end_date():
+    """往回刷新不該動到end_date之後的資料(這裡沒有意義，因為排程本身就是抓到end_date
+    為止，但驗證篩選邏輯沒有意外涵蓋超出範圍的日期)。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)  # 最後一天是2026-03-14
+
+    daily_screener.refresh_indicator_window(conn, end_date="2026-03-10", window_days=3, min_days=60)
+
+    dates = {
+        row[0] for row in conn.execute("SELECT date FROM daily_indicators WHERE stock_id = '2330'").fetchall()
+    }
+    assert dates == {"2026-03-08", "2026-03-09", "2026-03-10"}

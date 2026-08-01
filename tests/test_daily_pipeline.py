@@ -613,6 +613,51 @@ def test_run_daily_pipeline_updates_taiex_alongside_stocks(monkeypatch):
     assert stock_row == ("INDEX",)
 
 
+def test_run_daily_pipeline_refreshes_indicator_window_after_screening(monkeypatch):
+    """2026-08-02新增：均線/SAR快取(daily_indicators)除了run_screen_and_store()裡
+    只算當天一天之外，排程執行時要額外往回刷新INDICATOR_REFRESH_WINDOW_DAYS個交易日，
+    吸收股價資料事後被修正的風險(見scripts/daily_pipeline.py的INDICATOR_REFRESH_
+    WINDOW_DAYS常數說明)。"""
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+
+    calls = []
+    monkeypatch.setattr(
+        daily_pipeline, "refresh_indicator_window",
+        lambda conn, end_date, window_days: calls.append((end_date, window_days)) or 0,
+    )
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
+
+    assert calls == [("2026-07-22", daily_pipeline.INDICATOR_REFRESH_WINDOW_DAYS)]
+
+
+def test_run_daily_pipeline_continues_when_indicator_refresh_raises(monkeypatch):
+    """均線/SAR快取刷新失敗不應該讓整條pipeline中斷——候選清單已經算完寫入了，快取
+    只是輔助查詢用的衍生資料。"""
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+
+    def _raise(conn, end_date, window_days):
+        raise RuntimeError("模擬刷新失敗")
+
+    monkeypatch.setattr(daily_pipeline, "refresh_indicator_window", _raise)
+
+    candidates = daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
+
+    assert candidates == []  # 沒有中斷拋出
+
+
 def test_run_daily_pipeline_continues_when_taiex_update_raises(monkeypatch):
     """大盤更新失敗不應該讓整條pipeline中斷——個股資料已經抓完，候選清單照樣要算。"""
     conn = _fresh_conn()

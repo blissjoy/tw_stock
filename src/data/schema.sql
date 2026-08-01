@@ -130,3 +130,38 @@ CREATE TABLE IF NOT EXISTS daily_data_status (
     is_intraday     INTEGER NOT NULL,
     updated_at      TEXT NOT NULL
 );
+
+-- 每日均線/SAR快取：候選清單「篩選方法」(均線多頭排列/SAR翻轉)原本每次套用篩選都對
+-- stock_prices即時重算，改成全市場基礎池後(見chart_data.load_stock_universe_for_date())
+-- 這個即時計算的成本變得很高(SAR是逐日累積、無法簡單向量化的指標，全市場~2300檔要
+-- 15~35秒)。改成股價更新的同時(src/screener/daily_screener.py的run_screen_and_store())
+-- 順便把均線/SAR算好存進這張表，候選清單篩選只需要查表，見
+-- src/screener/indicator_precompute.py的計算邏輯、chart_data.py的
+-- load_ma_bullish_flags_from_table()/load_sar_flip_flags_from_table()查詢路徑。
+--
+-- 均線存原始數值(不是布林旗標)：CANDIDATE_FILTERS的幾種均線多排條件都能直接從這幾欄
+-- 用SQL比較大小算出來，之後多加其他均線條件也不用改schema。
+-- sar_flip_days_ago存「第幾天前翻轉」這個整數(不是日期字串)，跟現有
+-- src/indicators/parabolic_sar.py的sar_flip_days_ago()既有語意(以「第幾根K棒」為
+-- 單位，不是日曆天數，避免連假造成的落差)完全一致，1代表就是這一天翻轉。
+--
+-- ⚠️ 這不是「算過一次、永遠不再碰」的快取：TWSE收盤前用yfinance盤中即時價當備援、
+-- 收盤後可能重抓一次拿到最終數字，加上這次session才修過的「TAIEX成交量延遲」bug
+-- 證實歷史資料確實會事後被回補/修正，因此scripts/daily_pipeline.py每次排程執行時
+-- 會額外往回重刷INDICATOR_REFRESH_WINDOW_DAYS個交易日，不是只算當天這一筆。
+CREATE TABLE IF NOT EXISTS daily_indicators (
+    stock_id            TEXT NOT NULL REFERENCES stocks(stock_id),
+    date                TEXT NOT NULL,
+    ma5                 REAL,
+    ma10                REAL,
+    ma20                REAL,
+    ma60                REAL,
+    ma120               REAL,
+    ma240               REAL,
+    sar_value           REAL,
+    sar_is_bull         INTEGER,  -- 0/1，NULL代表資料不足(<3天)算不出SAR
+    sar_flip_days_ago   INTEGER,  -- 目前方向是第幾天前翻轉進來的；NULL代表算不出SAR
+    updated_at          TEXT NOT NULL,
+    PRIMARY KEY (stock_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_indicators_date ON daily_indicators(date);

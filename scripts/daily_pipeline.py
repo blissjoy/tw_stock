@@ -38,7 +38,7 @@ from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
 from src.presentation import pipeline_status  # noqa: E402
-from src.screener.daily_screener import run_screen_and_store  # noqa: E402
+from src.screener.daily_screener import refresh_indicator_window, run_screen_and_store  # noqa: E402
 
 
 def fetch_today_twse(
@@ -175,6 +175,15 @@ def fetch_today_tpex(
 # 拉長不會明顯增加耗時)。
 TAIEX_REFETCH_WINDOW_DAYS = 10
 
+# 每次排程執行時，往回重刷daily_indicators(均線/SAR快取)的交易日數(見
+# src.screener.daily_screener.refresh_indicator_window()、src/data/schema.sql的
+# daily_indicators表說明)。用來吸收股價資料事後被修正的風險——精神上跟上面的
+# TAIEX_REFETCH_WINDOW_DAYS一樣，10天(以交易日為單位，不是日曆天)是「安全邊際 vs
+# 排程多花的時間」的取捨，全市場~2300檔股票、每檔10天，比只算「今天」一天多了10倍
+# 運算量，但仍遠比之前「每次套用篩選都對全市場即時重算SAR」(15~35秒)划算，且是背景
+# 排程執行、不會卡住任何互動操作。
+INDICATOR_REFRESH_WINDOW_DAYS = 10
+
 
 def fetch_today_taiex(conn, date_str: str) -> bool:
     """更新大盤(台股加權指數，`yfinance_client.TAIEX_STOCK_ID`)的OHLCV資料。
@@ -280,6 +289,17 @@ def run_daily_pipeline(
         print(f"=== {iso_date} 候選清單（共{len(candidates)}檔）===")
         for c in candidates:
             print(f"  {c['stock_id']}：進場{c['entry_price']:.2f} 停損{c['stop_loss']:.2f}")
+
+        # 均線/SAR快取往回刷新：run_screen_and_store()本身只算iso_date當天，這裡額外
+        # 補刷最近INDICATOR_REFRESH_WINDOW_DAYS個交易日，吸收股價資料事後被修正的風險
+        # (見INDICATOR_REFRESH_WINDOW_DAYS常數說明)。獨立包一層try/except——失敗不應該
+        # 讓整條pipeline中斷，候選清單已經算完寫入了，均線/SAR快取只是輔助查詢用的
+        # 衍生資料，即使這裡失敗，篩選頂多退回「找不到快取列視為不成立」，不影響核心資料。
+        try:
+            refreshed = refresh_indicator_window(conn, iso_date, INDICATOR_REFRESH_WINDOW_DAYS)
+            print(f"均線/SAR快取：往回刷新{INDICATOR_REFRESH_WINDOW_DAYS}個交易日，共{refreshed}筆")
+        except Exception as exc:  # noqa: BLE001
+            print(f"均線/SAR快取刷新失敗（略過，不影響候選清單）：{exc}")
 
         if dry_run:
             print("--dry-run：略過實際發送LINE/Email通知。")

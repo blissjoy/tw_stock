@@ -47,6 +47,7 @@ from src.indicators.trend import (
 )
 from src.indicators.volume_price import is_big_volume_vs_prev_day
 from src.patterns import chart_overlays
+from src.screener.indicator_precompute import LIVE_UPDATE_LOOKBACK_DAYS, compute_indicator_rows
 from src.screener.screening_rules import narrow_range_bottom_breakout, slow_rally_channel_breakout
 from src.strategies.candle_mechanical import mechanical_long_trading_rule, mechanical_short_trading_rule
 from src.strategies.ma_strategies import (
@@ -754,4 +755,57 @@ def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) 
             }
             for c in candidates
         ])
+
+    # 均線/SAR快取：候選清單「篩選方法」原本每次套用篩選都對stock_prices即時重算，改成
+    # 查daily_indicators表(見chart_data.py的load_ma_bullish_flags_from_table()/
+    # load_sar_flip_flags_from_table())，這裡順便把iso_date這一天的均線/SAR算好存進去，
+    # 沿用上面已經讀出來的frames(不用另外查一次DB)。涵蓋①每天第一次算出當天指標②盤中價
+    # →收盤價修正(重新按一次這個函式，今天的指標會跟著重算覆蓋)。歷史資料事後被修正
+    # (例如這次session修過的TAIEX成交量延遲bug)的風險，由scripts/daily_pipeline.py
+    # 排程時額外往回刷新一段窗口涵蓋，不在這裡處理，避免使用者連續手動按「立即重新篩選」
+    # 時重複付出往回刷新的成本。
+    #
+    # ⚠️ 只傳入df.tail(LIVE_UPDATE_LOOKBACK_DAYS)，不是frames裡的整段歷史：
+    # compute_indicator_rows()對整個df只算一次SAR/均線，但這個「一次」的成本是O(df的
+    # 總天數)，不是O(target_dates的數量)——2026-08-02實測發現，傳整段歷史(當時已累積
+    # ~860天)會讓這裡多花69秒，拖慢使用者按「立即重新篩選」的體感速度，且會隨DB歷史
+    # 持續累積而越來越慢。裁切成最近LIVE_UPDATE_LOOKBACK_DAYS天，效能才會是固定成本，
+    # 見indicator_precompute.py模組docstring的詳細說明。
+    indicator_rows: list[dict] = []
+    for stock_id, df in frames.items():
+        indicator_rows.extend(compute_indicator_rows(stock_id, df.tail(LIVE_UPDATE_LOOKBACK_DAYS), {iso_date}))
+    if indicator_rows:
+        storage.upsert_daily_indicators(conn, indicator_rows)
+
     return candidates
+
+
+def refresh_indicator_window(conn, end_date: str, window_days: int, min_days: int = 60) -> int:
+    """往回刷新最近`window_days`個交易日的均線/SAR快取(`daily_indicators`)，不只
+    `end_date`當天一天——供`scripts/daily_pipeline.py`排程執行時呼叫，吸收股價資料
+    事後被修正的風險(例如TWSE盤中價→收盤價、或yfinance歷史資料事後回補，這次session
+    修過的TAIEX成交量延遲bug就是活生生的例子，見`src/data/schema.sql`的
+    `daily_indicators`表說明)。只在排程/完整pipeline呼叫，不在`run_screen_and_store()`
+    (手動「立即重新篩選」按鈕)裡做，避免使用者連續手動觸發時重複付出這筆額外成本。
+
+    每檔股票各自往回抓自己最近`window_days`筆(不是用單一交易日曆列表)，避免不同股票
+    資料涵蓋範圍略有落差(例如新上市、或個別股票資料缺漏)時互相影響。
+
+    回傳實際寫入的列數，供呼叫端記錄/印出。
+    """
+    frames = load_trailing_frames(conn, min_days=min_days)
+    end_ts = pd.Timestamp(end_date)
+    indicator_rows: list[dict] = []
+    for stock_id, df in frames.items():
+        bounded = df[df.index <= end_ts].tail(LIVE_UPDATE_LOOKBACK_DAYS)
+        recent = bounded.tail(window_days)
+        if recent.empty:
+            continue
+        target_dates = set(recent.index.strftime("%Y-%m-%d"))
+        # 跟run_screen_and_store()同樣的效能陷阱：傳入bounded(裁切過)而不是整段df，
+        # 避免每檔股票的SAR/均線計算成本隨DB歷史持續累積而越來越慢，見
+        # indicator_precompute.py模組docstring的說明。
+        indicator_rows.extend(compute_indicator_rows(stock_id, bounded, target_dates))
+    if indicator_rows:
+        storage.upsert_daily_indicators(conn, indicator_rows)
+    return len(indicator_rows)

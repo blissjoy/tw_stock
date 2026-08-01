@@ -155,7 +155,7 @@ def _fetch_recent_columns_batched(
 
 
 def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str], str | None], dict[str, bool]]:
-    return lambda conn, stock_ids, as_of_date: compute_ma_bullish_flags(
+    return lambda conn, stock_ids, as_of_date: load_ma_bullish_flags_from_table(
         conn, stock_ids, periods=periods, as_of_date=as_of_date
     )
 
@@ -220,6 +220,73 @@ def compute_sar_flip_flags(
     return flags
 
 
+_MA_COLUMN_BY_PERIOD = {5: "ma5", 10: "ma10", 20: "ma20", 60: "ma60", 120: "ma120", 240: "ma240"}
+
+
+def load_ma_bullish_flags_from_table(
+    conn, stock_ids: list[str], periods: tuple[int, ...], as_of_date: str,
+) -> dict[str, bool]:
+    """`compute_ma_bullish_flags()`的查表版本：候選清單「篩選條件」原本每次套用篩選都
+    對`stock_prices`即時重算均線，改成查`daily_indicators`(見`src/screener/
+    indicator_precompute.py`跟`src/data/schema.sql`的說明)——2026-08-02新增，取代
+    `CANDIDATE_FILTERS`裡原本呼叫`compute_ma_bullish_flags()`的路徑。
+
+    `compute_ma_bullish_flags()`本身不變、不刪除：它是`indicator_precompute.py`背後
+    真正的計算邏輯來源(用來產生要寫進`daily_indicators`的值)，也保留給既有測試使用。
+
+    查無紀錄的股票(還沒回補、或當天沒有價格資料)視為不成立(False)，跟即時計算版本
+    「資料不足視為不成立」的既有語意一致，不拋例外。
+    """
+    if not stock_ids:
+        return {}
+    placeholders = ",".join("?" * len(stock_ids))
+    columns = [_MA_COLUMN_BY_PERIOD[n] for n in periods]
+    column_list = ", ".join(columns)
+    cur = conn.execute(
+        f"SELECT stock_id, {column_list} FROM daily_indicators WHERE stock_id IN ({placeholders}) AND date = ?",
+        [*stock_ids, as_of_date],
+    )
+    flags: dict[str, bool] = {stock_id: False for stock_id in stock_ids}
+    for row in cur.fetchall():
+        stock_id = row[0]
+        values = row[1:]
+        if any(v is None for v in values):
+            continue
+        flags[stock_id] = all(shorter > longer for shorter, longer in zip(values, values[1:]))
+    return flags
+
+
+def load_sar_flip_flags_from_table(
+    conn, stock_ids: list[str], direction: str, within_days: int, as_of_date: str,
+) -> dict[str, bool]:
+    """`compute_sar_flip_flags()`的查表版本：候選清單「篩選方法」的SAR翻轉原本每次套用
+    篩選都對`stock_prices`即時重算(SAR是逐日累積、無法簡單向量化的指標，全市場~2300檔
+    要15~35秒)，改成查`daily_indicators`(見`src/screener/indicator_precompute.py`跟
+    `src/data/schema.sql`的說明)——2026-08-02新增，取代`apply_candidate_filters()`裡
+    原本呼叫`compute_sar_flip_flags()`的路徑。
+
+    `compute_sar_flip_flags()`本身不變、不刪除，理由同`load_ma_bullish_flags_from_
+    table()`。查無紀錄的股票(還沒回補、或資料不足<3天算不出SAR)視為不成立(False)。
+    """
+    if not stock_ids:
+        return {}
+    placeholders = ",".join("?" * len(stock_ids))
+    cur = conn.execute(
+        f"""
+        SELECT stock_id, sar_is_bull, sar_flip_days_ago FROM daily_indicators
+        WHERE stock_id IN ({placeholders}) AND date = ?
+        """,
+        [*stock_ids, as_of_date],
+    )
+    wants_bull = direction == "多頭"
+    flags: dict[str, bool] = {stock_id: False for stock_id in stock_ids}
+    for stock_id, sar_is_bull, sar_flip_days_ago in cur.fetchall():
+        if sar_is_bull is None or sar_flip_days_ago is None:
+            continue
+        flags[stock_id] = bool(sar_is_bull) == wants_bull and sar_flip_days_ago <= within_days
+    return flags
+
+
 def apply_candidate_filters(
     conn, candidates_df: pd.DataFrame, active_filter_labels: list[str],
     sar_flip_option: dict | None = None, zhu_rule_only: bool = False, as_of_date: str | None = None,
@@ -265,16 +332,19 @@ def apply_candidate_filters(
     mask = pd.Series(True, index=candidates_df.index)
     matched_condition_labels: list[str] = []
 
-    # ⚠️ 2026-08-02效能修正：候選清單基礎池改成全市場(~2000+檔)後，均線/SAR這類要重新
-    # 查stock_prices、逐檔算指標的條件如果無條件對candidates_df裡「當下的全部stock_id」
-    # 算一次，即使最後zhu_rule_only會篩掉九成結果，還是得先付出對全市場算一次的成本
-    # ——SAR尤其明顯(逐日累積、沒辦法簡單向量化)，實測連預設(勾朱家泓技術分析、等同
-    # 舊版「候選清單=已觸發規則的股票」)都要30幾秒，比改版前(只在小的daily_candidates
-    # 池子裡算)慢了一個數量級。改成zhu_rule_only(純欄位比對，不查DB、幾乎零成本)優先
-    # 套用、把stock_ids先縮小，後面才把縮小後的stock_ids交給真正花錢的CANDIDATE_FILTERS/
-    # compute_sar_flip_flags計算——最後篩出的結果集合不變(AND滿足交換律)，只是運算量
-    # 大幅減少。不勾朱家泓技術分析(全市場掃描)時沒有這個提前縮小的機會，那種情境本來就
-    # 是使用者主動要求對全市場算，需要花比較久時間是預期中的代價。
+    # ⚠️ 2026-08-02效能修正(第一版)：候選清單基礎池改成全市場(~2000+檔)後，均線/SAR
+    # 這類條件如果無條件對candidates_df裡「當下的全部stock_id」算一次，即使最後
+    # zhu_rule_only會篩掉九成結果，還是得先付出對全市場算一次的成本——SAR尤其明顯
+    # (逐日累積、沒辦法簡單向量化)，當時實測連預設(勾朱家泓技術分析、等同舊版「候選
+    # 清單=已觸發規則的股票」)都要30幾秒。改成zhu_rule_only(純欄位比對，不查DB、幾乎
+    # 零成本)優先套用、把stock_ids先縮小，後面才把縮小後的stock_ids交給CANDIDATE_
+    # FILTERS/SAR條件計算——最後篩出的結果集合不變(AND滿足交換律)，只是運算量減少。
+    #
+    # 2026-08-02第二版(當天稍晚)：均線/SAR進一步改成查`daily_indicators`表(見
+    # `load_ma_bullish_flags_from_table()`/`load_sar_flip_flags_from_table()`)，
+    # 不再即時對`stock_prices`重算，即使對全市場~2300檔查詢也只是單一次索引查詢，
+    # 效能問題已經從根本解決；這裡保留先套用zhu_rule_only縮小stock_ids的做法，
+    # 是因為多一個縮小的IN子句仍然是免費的效能提升，且不影響正確性，沒有理由拿掉。
     if zhu_rule_only:
         mask &= candidates_df["signal_name"].notna()
 
@@ -287,7 +357,7 @@ def apply_candidate_filters(
     if sar_flip_option is not None:
         direction = sar_flip_option.get("direction", "多頭")
         within_days = sar_flip_option.get("within_days", 1)
-        flags = compute_sar_flip_flags(
+        flags = load_sar_flip_flags_from_table(
             conn, stock_ids, direction=direction, within_days=within_days, as_of_date=as_of_date,
         )
         mask &= candidates_df["stock_id"].map(flags).fillna(False)

@@ -1,7 +1,7 @@
 import pandas as pd
 
 import src.presentation.chart_data as chart_data
-from src.data.storage import init_db, upsert_daily_candidates, upsert_stock_prices, upsert_stocks
+from src.data.storage import init_db, upsert_daily_candidates, upsert_daily_indicators, upsert_stock_prices, upsert_stocks
 from src.presentation.chart_data import (
     apply_candidate_filters,
     build_candlestick_figure,
@@ -12,14 +12,28 @@ from src.presentation.chart_data import (
     get_stock_name,
     list_candidate_dates,
     load_holidays_for_chart,
+    load_ma_bullish_flags_from_table,
     load_price_history,
+    load_sar_flip_flags_from_table,
     load_stock_universe_for_date,
     resolve_stock_id,
 )
+from src.screener.indicator_precompute import compute_indicator_rows
 
 
 def _fresh_conn():
     return init_db(":memory:")
+
+
+def _populate_indicators(conn, stock_id: str, price_rows: list[dict]) -> None:
+    """把price_rows(list of stock_prices dict)算成均線/SAR、寫進daily_indicators，
+    模擬run_screen_and_store()/backfill_daily_indicators.py會做的事，供需要
+    daily_indicators已經有資料的測試使用。"""
+    df = pd.DataFrame(price_rows)
+    df.index = pd.to_datetime(df["date"])
+    target_dates = {r["date"] for r in price_rows}
+    rows = compute_indicator_rows(stock_id, df, target_dates)
+    upsert_daily_indicators(conn, rows)
 
 
 def test_load_stock_universe_for_date_returns_empty_when_no_records():
@@ -519,6 +533,101 @@ def test_compute_ma_bullish_flags_batched_query_does_not_cross_contaminate_stock
 def test_compute_ma_bullish_flags_empty_stock_ids_returns_empty_dict():
     conn = _fresh_conn()
     assert compute_ma_bullish_flags(conn, []) == {}
+
+
+def test_load_ma_bullish_flags_from_table_matches_live_computed_result():
+    """查daily_indicators表算出的結果，要跟即時計算版本(compute_ma_bullish_flags)
+    在同一份資料上算出的結果一致——這是2026-08-02改版的核心保證：查表只是換一個
+    資料來源，不是重新定義均線多排的判斷邏輯。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    rows_2330 = [
+        {"stock_id": "2330", "date": f"2026-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 100.0 + d, "high": 101.0 + d,
+         "low": 99.0 + d, "close": 100.0 + d, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(25)
+    ]
+    rows_1101 = [
+        {"stock_id": "1101", "date": f"2026-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 50.0, "high": 50.5,
+         "low": 49.5, "close": 50.0, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(25)
+    ]
+    upsert_stock_prices(conn, rows_2330 + rows_1101)
+    _populate_indicators(conn, "2330", rows_2330)
+    _populate_indicators(conn, "1101", rows_1101)
+    as_of_date = rows_2330[-1]["date"]
+
+    table_flags = load_ma_bullish_flags_from_table(conn, ["2330", "1101"], periods=(5, 10, 20), as_of_date=as_of_date)
+    live_flags = compute_ma_bullish_flags(conn, ["2330", "1101"], periods=(5, 10, 20), as_of_date=as_of_date)
+
+    assert table_flags == live_flags
+    assert table_flags["2330"] is True   # 持續上漲，均線多排成立
+    assert table_flags["1101"] is False  # 持平走勢，均線糾結在一起不成立
+
+
+def test_load_ma_bullish_flags_from_table_false_when_no_row_for_that_date():
+    """股票沒有回補過、或該日期還沒有對應的daily_indicators列，視為不成立，不拋例外。"""
+    conn = _fresh_conn()
+    flags = load_ma_bullish_flags_from_table(conn, ["9999"], periods=(5, 10, 20), as_of_date="2026-07-22")
+    assert flags == {"9999": False}
+
+
+def test_load_ma_bullish_flags_from_table_empty_stock_ids_returns_empty_dict():
+    conn = _fresh_conn()
+    assert load_ma_bullish_flags_from_table(conn, [], periods=(5, 10, 20), as_of_date="2026-07-22") == {}
+
+
+def test_load_sar_flip_flags_from_table_matches_live_computed_result():
+    """跟上面均線的測試同理：查表結果要跟即時計算版本(compute_sar_flip_flags)一致。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    highs = [10.0, 11.0, 12.0, 13.0, 9.0]
+    lows = [9.0, 10.0, 10.5, 11.5, 8.0]
+    rows = [
+        {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
+         "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(5)
+    ]
+    upsert_stock_prices(conn, rows)
+    _populate_indicators(conn, "2330", rows)
+    as_of_date = rows[-1]["date"]
+
+    table_flags = load_sar_flip_flags_from_table(conn, ["2330"], direction="空頭", within_days=1, as_of_date=as_of_date)
+    live_flags = compute_sar_flip_flags(conn, ["2330"], direction="空頭", within_days=1, as_of_date=as_of_date)
+
+    assert table_flags == live_flags == {"2330": True}
+
+
+def test_load_sar_flip_flags_from_table_false_when_direction_mismatch():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    highs = [10.0, 11.0, 12.0, 13.0, 9.0]
+    lows = [9.0, 10.0, 10.5, 11.5, 8.0]
+    rows = [
+        {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
+         "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(5)
+    ]
+    upsert_stock_prices(conn, rows)
+    _populate_indicators(conn, "2330", rows)
+    as_of_date = rows[-1]["date"]
+
+    flags = load_sar_flip_flags_from_table(conn, ["2330"], direction="多頭", within_days=1, as_of_date=as_of_date)
+
+    assert flags == {"2330": False}
+
+
+def test_load_sar_flip_flags_from_table_false_when_no_row_for_that_date():
+    conn = _fresh_conn()
+    flags = load_sar_flip_flags_from_table(conn, ["9999"], direction="多頭", within_days=1, as_of_date="2026-07-22")
+    assert flags == {"9999": False}
+
+
+def test_load_sar_flip_flags_from_table_empty_stock_ids_returns_empty_dict():
+    conn = _fresh_conn()
+    assert load_sar_flip_flags_from_table(conn, [], direction="多頭", within_days=1, as_of_date="2026-07-22") == {}
 
 
 def test_compute_ma_bullish_flags_false_when_not_enough_history():
@@ -1231,8 +1340,12 @@ def test_compute_sar_flip_flags_as_of_date_ignores_rows_after_that_date():
 
 
 def test_apply_candidate_filters_as_of_date_scopes_sar_and_ma_to_historical_candidate_date():
-    """跟上面compute_sar_flip_flags的情境相同，但驗證整條apply_candidate_filters()都有
-    正確把as_of_date傳下去(不是只有直接呼叫compute_sar_flip_flags本身才對)。"""
+    """2026-08-02改版：SAR/均線篩選改成查daily_indicators表(見load_sar_flip_flags_
+    from_table())，「as_of_date」現在直接對應要查表的日期，不再是「用date<=as_of_date
+    篩stock_prices回看窗口」——這裡驗證apply_candidate_filters()確實把as_of_date傳給
+    查表函式，讀到的是那一天的列，不是候選清單基礎池裡剛好也在candidates_df的其他日期。
+    價格資料在07-19暴跌翻轉為空頭，之後07-20/07-21延續下跌(不會再翻轉)：以07-19為準
+    「1天內翻轉」應該成立，以07-21(最新一天)為準則已經是3天前翻轉的事，不成立。"""
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     highs = [10.0, 11.0, 12.0, 13.0, 9.0, 8.5, 8.0]
@@ -1243,6 +1356,7 @@ def test_apply_candidate_filters_as_of_date_scopes_sar_and_ma_to_historical_cand
         for d in range(7)
     ]
     upsert_stock_prices(conn, rows)
+    _populate_indicators(conn, "2330", rows)
     df = pd.DataFrame({"stock_id": ["2330"], "signal_name": ["R-TREND-14多頭短線進場（92%）"]})
 
     result_as_of_flip_date = apply_candidate_filters(
@@ -1250,10 +1364,10 @@ def test_apply_candidate_filters_as_of_date_scopes_sar_and_ma_to_historical_cand
     )
     assert list(result_as_of_flip_date["stock_id"]) == ["2330"]
 
-    result_without_as_of_date = apply_candidate_filters(
-        conn, df, [], sar_flip_option={"direction": "空頭", "within_days": 1},
+    result_as_of_later_date = apply_candidate_filters(
+        conn, df, [], sar_flip_option={"direction": "空頭", "within_days": 1}, as_of_date="2026-07-21",
     )
-    assert list(result_without_as_of_date["stock_id"]) == []
+    assert list(result_as_of_later_date["stock_id"]) == []
 
 
 def test_fetch_recent_columns_batched_as_of_date_excludes_later_rows():
@@ -1274,7 +1388,7 @@ def test_fetch_recent_columns_batched_as_of_date_excludes_later_rows():
 def test_apply_candidate_filters_sar_flip_option_filters_by_direction(monkeypatch):
     df = pd.DataFrame({"stock_id": ["2330", "1101", "2603"]})
     monkeypatch.setattr(
-        chart_data, "compute_sar_flip_flags",
+        chart_data, "load_sar_flip_flags_from_table",
         lambda conn, stock_ids, direction, within_days, as_of_date=None: {"2330": True, "1101": False, "2603": True},
     )
 

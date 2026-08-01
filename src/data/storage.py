@@ -210,6 +210,27 @@ def upsert_daily_data_status(conn: sqlite3.Connection, iso_date: str, is_intrada
     conn.commit()
 
 
+def upsert_daily_indicators(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """rows的每個dict需含 stock_id/date/ma5/ma10/ma20/ma60/ma120/ma240/sar_value/
+    sar_is_bull/sar_flip_days_ago/updated_at，見schema.sql的daily_indicators說明。
+    來源見src/screener/indicator_precompute.py。"""
+    conn.executemany(
+        """
+        INSERT INTO daily_indicators
+            (stock_id, date, ma5, ma10, ma20, ma60, ma120, ma240, sar_value, sar_is_bull, sar_flip_days_ago, updated_at)
+        VALUES
+            (:stock_id, :date, :ma5, :ma10, :ma20, :ma60, :ma120, :ma240, :sar_value, :sar_is_bull, :sar_flip_days_ago, :updated_at)
+        ON CONFLICT(stock_id, date) DO UPDATE SET
+            ma5 = excluded.ma5, ma10 = excluded.ma10, ma20 = excluded.ma20,
+            ma60 = excluded.ma60, ma120 = excluded.ma120, ma240 = excluded.ma240,
+            sar_value = excluded.sar_value, sar_is_bull = excluded.sar_is_bull,
+            sar_flip_days_ago = excluded.sar_flip_days_ago, updated_at = excluded.updated_at
+        """,
+        rows,
+    )
+    conn.commit()
+
+
 def get_daily_data_status(conn: sqlite3.Connection, iso_date: str) -> bool | None:
     """回傳指定日期是否為盤中即時價(True)/官方收盤價(False)；查無紀錄回傳None(例如這個
     功能上線前就存在的歷史資料，一律不特別標示，視為已收盤)。"""
