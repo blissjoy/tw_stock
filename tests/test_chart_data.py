@@ -475,7 +475,7 @@ def test_candidate_filter_ma240_requires_ma120_in_the_chain_too():
     assert old_buggy_flags["2330"] is True  # 舊寫法會漏掉MA120，誤判為多排成立
 
     filter_fn = chart_data.CANDIDATE_FILTERS["均線多頭排列（...>MA240）"]
-    fixed_flags = filter_fn(conn, ["2330"])
+    fixed_flags = filter_fn(conn, ["2330"], None)
     assert fixed_flags["2330"] is False  # 修正後正確抓出MA120<MA240，不算完整多排
 
 
@@ -500,7 +500,7 @@ def test_apply_candidate_filters_keeps_only_stocks_matching_ma_bullish(monkeypat
     df = pd.DataFrame({"stock_id": ["2330", "1101", "2603"]})
     monkeypatch.setitem(
         chart_data.CANDIDATE_FILTERS, "均線多頭排列（MA5>MA10>MA20）",
-        lambda conn, stock_ids: {"2330": True, "1101": False, "2603": True},
+        lambda conn, stock_ids, as_of_date: {"2330": True, "1101": False, "2603": True},
     )
 
     result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=["均線多頭排列（MA5>MA10>MA20）"])
@@ -1027,11 +1027,80 @@ def test_compute_sar_flip_flags_empty_stock_ids_returns_empty_dict():
     assert compute_sar_flip_flags(conn, []) == {}
 
 
+def test_compute_sar_flip_flags_as_of_date_ignores_rows_after_that_date():
+    """2026-08-01發現的bug：候選清單可以瀏覽「過去某一天」，但SAR/均線篩選條件原本不管
+    as_of_date、永遠用DB目前最新的資料算——SAR是路徑相關指標，多算了「之後才發生」的
+    交易日會讓翻轉判斷的日期往後推移。這裡建構2330在07-19暴跌翻轉為空頭、之後07-20/
+    07-21延續下跌(不會再翻轉)的走勢：以07-19為準(as_of_date)應該判定「1天內翻轉」為
+    True；不傳as_of_date(退回用DB目前最新的07-21)時，翻轉其實發生在3天前，「1天內
+    翻轉」應該是False——證明沒設定as_of_date會把候選清單瀏覽中的歷史日期誤判成DB目前
+    最新日期。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    highs = [10.0, 11.0, 12.0, 13.0, 9.0, 8.5, 8.0]
+    lows = [9.0, 10.0, 10.5, 11.5, 8.0, 7.5, 7.0]
+    rows = [
+        {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
+         "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(7)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    flags_as_of_flip_date = compute_sar_flip_flags(
+        conn, ["2330"], direction="空頭", within_days=1, as_of_date="2026-07-19"
+    )
+    assert flags_as_of_flip_date["2330"] is True
+
+    flags_using_latest_db_data = compute_sar_flip_flags(conn, ["2330"], direction="空頭", within_days=1)
+    assert flags_using_latest_db_data["2330"] is False
+
+
+def test_apply_candidate_filters_as_of_date_scopes_sar_and_ma_to_historical_candidate_date():
+    """跟上面compute_sar_flip_flags的情境相同，但驗證整條apply_candidate_filters()都有
+    正確把as_of_date傳下去(不是只有直接呼叫compute_sar_flip_flags本身才對)。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    highs = [10.0, 11.0, 12.0, 13.0, 9.0, 8.5, 8.0]
+    lows = [9.0, 10.0, 10.5, 11.5, 8.0, 7.5, 7.0]
+    rows = [
+        {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
+         "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(7)
+    ]
+    upsert_stock_prices(conn, rows)
+    df = pd.DataFrame({"stock_id": ["2330"], "signal_name": ["R-TREND-14多頭短線進場（92%）"]})
+
+    result_as_of_flip_date = apply_candidate_filters(
+        conn, df, [], sar_flip_option={"direction": "空頭", "within_days": 1}, as_of_date="2026-07-19",
+    )
+    assert list(result_as_of_flip_date["stock_id"]) == ["2330"]
+
+    result_without_as_of_date = apply_candidate_filters(
+        conn, df, [], sar_flip_option={"direction": "空頭", "within_days": 1},
+    )
+    assert list(result_without_as_of_date["stock_id"]) == []
+
+
+def test_fetch_recent_columns_batched_as_of_date_excludes_later_rows():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    rows = [
+        {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": 10.0 + d, "high": 10.0 + d,
+         "low": 10.0 + d, "close": 10.0 + d, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(5)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    result = chart_data._fetch_recent_columns_batched(conn, ["2330"], ["close"], lookback_days=10, as_of_date="2026-07-17")
+
+    assert result["2330"]["close"] == [10.0, 11.0, 12.0]  # 只到07-17，07-18/07-19被排除
+
+
 def test_apply_candidate_filters_sar_flip_option_filters_by_direction(monkeypatch):
     df = pd.DataFrame({"stock_id": ["2330", "1101", "2603"]})
     monkeypatch.setattr(
         chart_data, "compute_sar_flip_flags",
-        lambda conn, stock_ids, direction, within_days: {"2330": True, "1101": False, "2603": True},
+        lambda conn, stock_ids, direction, within_days, as_of_date=None: {"2330": True, "1101": False, "2603": True},
     )
 
     result = apply_candidate_filters(

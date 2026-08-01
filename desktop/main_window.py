@@ -553,7 +553,7 @@ class MainWindow(QMainWindow):
             }
         df = chart_data.apply_candidate_filters(
             self.conn, df, active_filters, sar_flip_option=sar_flip_option,
-            zhu_rule_only=self.zhu_rule_checkbox.isChecked(),
+            zhu_rule_only=self.zhu_rule_checkbox.isChecked(), as_of_date=latest_date,
         )
         self.candidates_table.setRowCount(0)
         self.intraday_label.setVisible(is_intraday)

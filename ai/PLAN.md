@@ -3555,3 +3555,54 @@ PySide6驗證：全新開啟視窗、完全不觸碰任何分頁，「大盤」�
 MA5>10>20交集SAR多頭)，畫面沒有跑版或錯誤。
 
 740個測試全過。
+
+## 修正重大bug：SAR/均線篩選瀏覽舊日期候選清單時沒有排除「之後才發生」的資料(2026-08-01)
+
+使用者拿ref-project(舊版PySide6桌面工具)以2026-07-30為基準跑「SAR多頭翻轉1天內」+
+「MA5>10>20」，算出5檔(6958/2006/2867/1442/6914)；同一組條件在本系統只篩出1檔
+(2882)，要求查明原因。
+
+**查證過程**：先確認兩邊`stock_prices`原始OHLC資料一致(不是資料源落差)、SAR加速因子
+參數(start=0.03/inc=0.03/max_af=0.6)跟演算法邏輯逐行對照`ref-project`的
+`calculate_sar()`也完全一致(`src/indicators/parabolic_sar.py`本來就是照抄那份邏輯)。
+關鍵差異在於`ref-project`用`start_date = target_date - (LOOKBACK_DAYS=600 +
+SAR_WARMUP=200)`天，本系統`compute_sar_flip_flags()`／`compute_ma_bullish_flags()`
+永遠只抓「DB目前最新的N筆」——而DB在使用者測試當下已經累積到8/1，等於用「多算了
+7/31那天」的資料去判斷「7/30當天」的SAR翻轉。SAR是路徑相關(path-dependent)指標，
+多算一天可能讓整個翻轉點的判定往後推移。實測直接把5檔股票的資料剪到`date<='2026-07-30'`
+重算：MA5>10>20跟SAR多頭1天內翻轉兩個條件，5檔全部True，翻轉日期正好是2026-07-30，
+跟ref-project的報表逐檔對上；而目前系統唯一篩出的2882，剪到07-30為止重算後兩個條件
+反而都是False——證實2882是「混入07-31之後資料」造成的誤判，5檔沒抓到則是因為
+翻轉點被多算的07-31那天推移掉了。
+
+**根因**：`_fetch_recent_columns_batched()`(`src/presentation/chart_data.py`)只用
+`ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC)`取每檔股票最新N筆，
+完全沒有任何跟候選清單「正在瀏覽哪一天」有關的條件——候選清單本來就可以切換到過去
+的日期查看(`date_combo`/Streamlit的候選清單日期下拉)，但SAR/均線篩選卻永遠用「DB
+目前實際累積到哪一天」為準，不是「候選清單正在瀏覽的那一天」為準。DB每天持續累積
+新資料是常態，這個bug會讓「回頭看過去某一天的候選清單」的篩選結果隨著時間推移逐漸
+偏離「那一天當時真正符合的股票」。
+
+**修正**：`_fetch_recent_columns_batched()`／`compute_ma_bullish_flags()`／
+`compute_sar_flip_flags()`／`apply_candidate_filters()`全部新增`as_of_date`參數，
+有傳入時在SQL加上`date <= ?`。`CANDIDATE_FILTERS`registry的callable簽章也從
+`(conn, stock_ids)`改成`(conn, stock_ids, as_of_date)`。兩個前端呼叫
+`apply_candidate_filters()`時一律傳入`load_candidates_for_date()`回傳的`latest_date`
+(候選清單實際解析出來的日期，不是使用者選單上可能還沒選定的None)，確保篩選條件
+永遠「以候選清單正在瀏覽的那一天為準」，不是「以呼叫當下DB累積到哪一天為準」。
+
+新增4個測試(`_fetch_recent_columns_batched`的as_of_date排除法、`compute_sar_flip_
+flags`用同一份sharp-drop資料分別驗證「以翻轉當天為準」跟「用DB最新資料(多算3天)」
+兩種結果不同、`apply_candidate_filters`整條路徑的對應驗證)，743個測試全過。用真實
+本機DB重跑使用者原本的案例(候選清單切到2026-07-30、勾選MA5>10>20+SAR多頭1天內
+翻轉)，兩前端都正確篩出`['1476', '2006', '2867', '3226', '6914']`——ref-project
+清單裡的2006/2867/6914都正確出現，2882(舊bug的誤判結果)正確消失。
+
+**尚未解決、已告知使用者的架構性差異**：ref-project的5檔裡6958跟1442仍然沒有出現在
+本系統的篩選結果——查證後這不是計算錯誤：這兩檔股票在2026-07-30當天完全沒有觸發
+任何一條朱家泓規則(`daily_candidates`表裡查無紀錄)，而本系統的SAR/均線勾選框是在
+「候選清單」(已經先被`_SCREEN_FUNCTIONS`/`scan_golden_tier()`篩過一輪的股票池)
+裡面再篩選，不是像ref-project那樣對全市場獨立跑SAR+均線掃描、不受其他規則篩選門檻
+限制。這是兩套系統架構上的既有差異，不是這次bug的一部分，需要使用者確認是否要另外
+新增一個「全市場SAR/均線掃描」功能(不透過候選清單)才能收斂到跟ref-project完全一致，
+目前先如實回報這個差異。

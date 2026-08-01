@@ -401,7 +401,7 @@ def main() -> None:
         applied = st.session_state["applied_filters"]
         candidates_df = apply_candidate_filters(
             conn, candidates_df, applied["active_filters"], sar_flip_option=applied["sar_flip_option"],
-            zhu_rule_only=applied.get("zhu_rule_only", True),
+            zhu_rule_only=applied.get("zhu_rule_only", True), as_of_date=latest_date,
         )
 
         if latest_date is None:

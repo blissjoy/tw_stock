@@ -64,22 +64,27 @@ SR_ROLE_COLORS = {"支撐": "#16a085", "壓力": "#c0392b"}
 
 
 def compute_ma_bullish_flags(
-    conn, stock_ids: list[str], periods: tuple[int, ...] = DEFAULT_BULLISH_PERIODS, lookback_days: int | None = None
+    conn, stock_ids: list[str], periods: tuple[int, ...] = DEFAULT_BULLISH_PERIODS, lookback_days: int | None = None,
+    as_of_date: str | None = None,
 ) -> dict[str, bool]:
     """對每檔股票算出「均線多頭排列」(依`periods`由短到長排列，例如MA5>MA10>MA20，或延伸到
-    書中「多線多排」的MA120/MA240)是否成立，取最新一筆已知資料為準。只在候選清單篩選器實際
-    勾選這個條件時才呼叫(見CANDIDATE_FILTERS)，不是每次載入候選清單都算，避免候選股數量
-    變多時拖慢清單載入速度。
+    書中「多線多排」的MA120/MA240)是否成立，取`as_of_date`(或None時取最新一筆已知資料)為準。
+    只在候選清單篩選器實際勾選這個條件時才呼叫(見CANDIDATE_FILTERS)，不是每次載入候選清單
+    都算，避免候選股數量變多時拖慢清單載入速度。
 
     lookback_days未指定時採`max(periods)`——延伸到MA120/MA240的篩選需要對應天數的收盤價
     才能算出最長那條均線，不能沿用MA5/10/20版本的60天預設值。
     資料不足以算出最長均線時該檔股票視為不成立(False)，不是拋例外或跳過。
+
+    as_of_date：見`_fetch_recent_columns_batched`的說明——候選清單可以瀏覽「過去某一天」
+    (不是DB目前最新一天)的紀錄，這裡一定要傳入該候選清單的日期，不能讓均線用「DB目前最新
+    資料」算，否則瀏覽舊日期候選清單時會混入該日期之後才發生的價格變化。
     """
     if not stock_ids:
         return {}
     if lookback_days is None:
         lookback_days = max(periods)
-    closes_by_stock = _fetch_recent_columns_batched(conn, stock_ids, ["close"], lookback_days)
+    closes_by_stock = _fetch_recent_columns_batched(conn, stock_ids, ["close"], lookback_days, as_of_date=as_of_date)
     flags: dict[str, bool] = {}
     for stock_id in stock_ids:
         closes = closes_by_stock.get(stock_id, {}).get("close", [])
@@ -93,12 +98,12 @@ def compute_ma_bullish_flags(
 
 
 def _fetch_recent_columns_batched(
-    conn, stock_ids: list[str], columns: list[str], lookback_days: int,
+    conn, stock_ids: list[str], columns: list[str], lookback_days: int, as_of_date: str | None = None,
 ) -> dict[str, dict[str, list[float]]]:
-    """批次撈取多檔股票最近`lookback_days`個交易日的指定欄位，取代逐檔各自查詢一次
-    (N+1查詢)——候選清單股數多、又同時勾選多個篩選條件時，逐檔查詢的往返成本會疊加成
-    明顯的等待時間(2026-08-01效能調校：使用者回報篩選花的時間很多)。改成一次查全部、
-    用stock_id分組，SQLite/Turso執行單一大查詢的成本遠低於N次小查詢的往返總和。
+    """批次撈取多檔股票「截至`as_of_date`為止」最近`lookback_days`個交易日的指定欄位，
+    取代逐檔各自查詢一次(N+1查詢)——候選清單股數多、又同時勾選多個篩選條件時，逐檔查詢的
+    往返成本會疊加成明顯的等待時間(2026-08-01效能調校：使用者回報篩選花的時間很多)。改成
+    一次查全部、用stock_id分組，SQLite/Turso執行單一大查詢的成本遠低於N次小查詢的往返總和。
 
     回傳{stock_id: {column: [值...]}}，每檔股票的清單依日期由舊到新排序(呼叫端原本
     逐檔查詢時就是這個順序，這裡維持一致，不用另外反轉)；查無資料的股票不會出現在
@@ -111,21 +116,36 @@ def _fetch_recent_columns_batched(
     當基準，跟資料本身實際涵蓋的時間範圍無關。改用SQL window function在資料庫端
     直接算「每檔股票依日期新到舊的第幾筆」，只取前lookback_days筆，正確且不依賴
     「現在」是哪一天。
+
+    ⚠️ 2026-08-01第二個bug：上面那版拿掉了日期WHERE條件之後，變成永遠抓「DB目前
+    最新的lookback_days筆」，完全沒有考慮候選清單本身可能是在瀏覽「過去某一天」
+    (例如DB已經累積到8/1，但使用者切候選清單日期選單看7/30那天)。SAR這種路徑相關
+    (path-dependent)指標的翻轉判斷因此會用到「7/30之後才發生」的價格資料，算出跟
+    真正「以7/30為基準」不一致的結果(使用者拿ref-project的7/30計算結果比對，5檔
+    應該偵測到SAR多頭翻轉的股票只有1檔對得上，其餘因為多算了7/31那天而把翻轉點
+    往後推移了一天，被「1天內翻轉」的篩選條件排除)。新增`as_of_date`參數，有傳入時
+    在WHERE子句加上`date <= as_of_date`，讓「篩選依據的最新一筆資料」跟「候選清單
+    正在瀏覽的日期」一致，不是跟「呼叫當下DB實際累積到哪一天」綁在一起。
     """
     placeholders = ",".join("?" * len(stock_ids))
     column_list = ", ".join(columns)
+    date_clause = "AND date <= ?" if as_of_date is not None else ""
+    params: list = [*stock_ids]
+    if as_of_date is not None:
+        params.append(as_of_date)
+    params.append(lookback_days)
     cur = conn.execute(
         f"""
         SELECT stock_id, {column_list} FROM (
             SELECT stock_id, {column_list},
                    ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC) AS rn
             FROM stock_prices
-            WHERE stock_id IN ({placeholders})
+            WHERE stock_id IN ({placeholders}) {date_clause}
         )
         WHERE rn <= ?
         ORDER BY stock_id, rn DESC
         """,
-        [*stock_ids, lookback_days],
+        params,
     )
     result: dict[str, dict[str, list[float]]] = {}
     for row in cur.fetchall():
@@ -136,15 +156,17 @@ def _fetch_recent_columns_batched(
     return result
 
 
-def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str]], dict[str, bool]]:
-    return lambda conn, stock_ids: compute_ma_bullish_flags(conn, stock_ids, periods=periods)
+def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str], str | None], dict[str, bool]]:
+    return lambda conn, stock_ids, as_of_date: compute_ma_bullish_flags(
+        conn, stock_ids, periods=periods, as_of_date=as_of_date
+    )
 
 
-# 候選清單篩選器registry：{顯示標籤: 計算函式(conn, stock_ids) -> {stock_id: bool}}。
+# 候選清單篩選器registry：{顯示標籤: 計算函式(conn, stock_ids, as_of_date) -> {stock_id: bool}}。
 # 之後要加其他篩選條件(例如量能/型態)時，在這裡多加一組標籤/函式即可，兩個前端
 # (dashboard/app.py、desktop/main_window.py)都是迴圈讀取這個registry動態產生勾選框、
 # 不用另外改UI程式碼。
-CANDIDATE_FILTERS: dict[str, Callable[[object, list[str]], dict[str, bool]]] = {
+CANDIDATE_FILTERS: dict[str, Callable[[object, list[str], str | None], dict[str, bool]]] = {
     "均線多頭排列（MA5>MA10>MA20）": _ma_bullish_filter((5, 10, 20)),
     "均線多頭排列（...>MA120）": _ma_bullish_filter((5, 10, 20, 120)),
     "均線多頭排列（...>MA240）": _ma_bullish_filter((5, 10, 20, 120, 240)),
@@ -169,16 +191,22 @@ SAR_FLIP_LOOKBACK_DAYS = 250
 
 def compute_sar_flip_flags(
     conn, stock_ids: list[str], direction: str = "多頭", within_days: int = 1,
-    lookback_days: int = SAR_FLIP_LOOKBACK_DAYS,
+    lookback_days: int = SAR_FLIP_LOOKBACK_DAYS, as_of_date: str | None = None,
 ) -> dict[str, bool]:
     """對每檔股票算出「SAR是否翻轉為`direction`(多頭/空頭)、且發生在最近`within_days`天以內」
     (見`src.indicators.parabolic_sar.sar_flipped_within`，含引用來源說明)。只在候選清單篩選器
     實際勾選SAR翻轉條件時才呼叫(見`apply_candidate_filters`的`sar_flip_option`參數)。歷史資料
     不足3天(compute_sar至少需要2天以上才有意義)的股票視為不成立(False)，不拋例外。
+
+    as_of_date：見`_fetch_recent_columns_batched`的說明——SAR是路徑相關(path-dependent)
+    指標，多算或少算一天都可能讓翻轉判斷的日期整個往後推移，候選清單瀏覽「過去某一天」時
+    一定要把這個日期傳進來，不能讓SAR用DB目前最新資料算。
     """
     if not stock_ids:
         return {}
-    rows_by_stock = _fetch_recent_columns_batched(conn, stock_ids, ["high", "low", "close"], lookback_days)
+    rows_by_stock = _fetch_recent_columns_batched(
+        conn, stock_ids, ["high", "low", "close"], lookback_days, as_of_date=as_of_date
+    )
     flags: dict[str, bool] = {}
     for stock_id in stock_ids:
         per_stock = rows_by_stock.get(stock_id, {})
@@ -212,7 +240,7 @@ def _signal_matches_zhu_rulebook(signal_name: str) -> bool:
 
 def apply_candidate_filters(
     conn, candidates_df: pd.DataFrame, active_filter_labels: list[str],
-    sar_flip_option: dict | None = None, zhu_rule_only: bool = False,
+    sar_flip_option: dict | None = None, zhu_rule_only: bool = False, as_of_date: str | None = None,
 ) -> pd.DataFrame:
     """依勾選的篩選標籤(CANDIDATE_FILTERS的key)逐一AND套用，回傳過濾後的候選清單。
     未勾選任何篩選(active_filter_labels為空、sar_flip_option為None、zhu_rule_only為False)時
@@ -226,6 +254,14 @@ def apply_candidate_filters(
     zhu_rule_only：「朱家泓技術分析」篩選框是否勾選，見`_signal_matches_zhu_rulebook`。跟
     sar_flip_option同理，這是依`candidates_df`裡已經算好的`signal_name`欄位分類，不是像
     `CANDIDATE_FILTERS`那樣重新查`stock_prices`算指標，因此也用獨立參數傳入。
+
+    as_of_date：呼叫端(兩個前端)應該一律傳入`load_candidates_for_date()`回傳的候選清單
+    日期(不是None)，確保均線/SAR這些依`stock_prices`重新計算的篩選條件是「以候選清單
+    正在瀏覽的那一天為準」，不是「以DB目前實際累積到哪一天為準」。⚠️ 2026-08-01發現：
+    沒有這個參數時，瀏覽過去日期的候選清單(DB隨每日排程持續往後累積資料後)會混入該日期
+    之後才發生的價格變化，SAR這種路徑相關指標尤其明顯——同一天的翻轉判斷會因為多算了
+    之後幾天的資料，被誤判成「已經是幾天前翻轉的」而被「N天內翻轉」篩選條件排除掉。見
+    `_fetch_recent_columns_batched`的詳細說明。
     """
     if candidates_df.empty:
         return candidates_df
@@ -234,13 +270,14 @@ def apply_candidate_filters(
     stock_ids = candidates_df["stock_id"].tolist()
     mask = pd.Series(True, index=candidates_df.index)
     for label in active_filter_labels or []:
-        flags = CANDIDATE_FILTERS[label](conn, stock_ids)
+        flags = CANDIDATE_FILTERS[label](conn, stock_ids, as_of_date)
         mask &= candidates_df["stock_id"].map(flags).fillna(False)
     if sar_flip_option is not None:
         flags = compute_sar_flip_flags(
             conn, stock_ids,
             direction=sar_flip_option.get("direction", "多頭"),
             within_days=sar_flip_option.get("within_days", 1),
+            as_of_date=as_of_date,
         )
         mask &= candidates_df["stock_id"].map(flags).fillna(False)
     if zhu_rule_only:
