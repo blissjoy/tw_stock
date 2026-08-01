@@ -328,10 +328,15 @@ def main() -> None:
             if col.checkbox(label, value=CANDIDATE_FILTER_DEFAULTS.get(label, False), key=f"filter_{label}")
         ]
 
+        # 「篩選方法：」這一列跟上面「篩選條件」分開放——SAR翻轉/朱家泓技術分析(日後還有
+        # 籌碼分析)是「訊號用什麼方法判斷出來的」，跟上面均線多頭排列這種「候選股本身要
+        # 滿足的門檻」概念上不同，使用者要求分開一列，視覺上也比較不擁擠(見
+        # desktop/main_window.py同一天的對應調整)。
+        st.caption("篩選方法：")
         # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
         # 放進上面CANDIDATE_FILTERS那組迴圈，改用獨立的sar_flip_option參數傳給
         # apply_candidate_filters(見src/presentation/chart_data.py)。
-        sar_col1, sar_col2, sar_col3, sar_col4 = st.columns([1, 1, 1.5, 1])
+        sar_col1, sar_col2, sar_col3, zhu_col, apply_col = st.columns([1, 1, 1.3, 1.3, 1])
         sar_flip_enabled = sar_col1.checkbox("SAR 翻轉", value=False, key="filter_sar_flip_enabled")
         sar_flip_direction = sar_col2.selectbox("方向", ["多頭", "空頭"], index=0, key="filter_sar_flip_direction")
         sar_flip_within_days = sar_col3.number_input(
@@ -346,15 +351,14 @@ def main() -> None:
         # 朱家泓的書(見chart_data._signal_matches_zhu_rulebook())，還沒有其他規則來源，
         # 勾選/不勾選這裡暫時不會改變候選清單內容，等籌碼分析(陳家豐)規則接上候選清單
         # 產生流程後才會真正篩出差異。預設勾選，跟現況(全部都是朱家泓規則)一致。
-        rule_source_col1, _rule_source_col2 = st.columns([1, 4])
-        zhu_rule_only = rule_source_col1.checkbox(
+        zhu_rule_only = zhu_col.checkbox(
             "朱家泓技術分析", value=True, key="filter_zhu_rule_only",
             help="目前候選清單全部來自朱家泓的書，這裡暫為標示用；等籌碼分析規則接上後才會真正篩選",
         )
 
         if "applied_filters" not in st.session_state:
             st.session_state["applied_filters"] = {"active_filters": [], "sar_flip_option": None, "zhu_rule_only": True}
-        with sar_col4:
+        with apply_col:
             st.markdown("&nbsp;")  # 對齊上面其他欄位的label高度，讓按鈕跟輸入框大致同一條水平線
             if st.button("套用篩選"):
                 st.session_state["applied_filters"] = {

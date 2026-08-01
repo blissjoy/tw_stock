@@ -179,59 +179,68 @@ class MainWindow(QMainWindow):
         screener_scroll.setWidget(screener_content)
         root_layout = QVBoxLayout(screener_content)
 
-        filter_bar = QHBoxLayout()
-        filter_bar.addWidget(QLabel("候選清單日期："))
+        date_bar = QHBoxLayout()
+        date_bar.addWidget(QLabel("候選清單日期："))
         self.date_combo = QComboBox()
         self.date_combo.currentIndexChanged.connect(self._reload_candidates)
-        filter_bar.addWidget(self.date_combo)
-        filter_bar.addSpacing(20)
-        filter_bar.addWidget(QLabel("篩選條件："))
+        date_bar.addWidget(self.date_combo)
+        date_bar.addStretch()
+        root_layout.addLayout(date_bar)
+
         # ⚠️ 2026-08-01修正：篩選條件(以下這些勾選框/下拉/天數輸入)原本每改一個就立刻
         # 呼叫_reload_candidates()重新查DB+套用篩選，勾選框一多、候選股數也多時，每次
         # 微調都要等一次篩選運算，使用者反映「篩選花的時間很多」。改成不即時連動，
         # 統一改完再按下面的「套用篩選」按鈕才真正執行一次，同一組條件不會因為連續
         # 調整而重算好幾次。候選清單日期(上面的date_combo)例外，維持選了就立刻切換
         # ——那是「看哪一天」的導覽動作，不是「調整篩選標準」，語意上不同。
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel("篩選條件："))
         self.filter_checkboxes: dict[str, QCheckBox] = {}
         for label in chart_data.CANDIDATE_FILTERS:
             cb = QCheckBox(label)
             cb.setChecked(chart_data.CANDIDATE_FILTER_DEFAULTS.get(label, False))
             filter_bar.addWidget(cb)
             self.filter_checkboxes[label] = cb
+        filter_bar.addStretch()
+        root_layout.addLayout(filter_bar)
 
+        # 「篩選方法：」這一列跟上面「篩選條件：」分開放——SAR翻轉/朱家泓技術分析是「訊號
+        # 從哪裡/用什麼方法判斷出來的」，跟上面均線多頭排列這種「候選股本身要滿足的條件」
+        # 概念上不同，使用者要求分開一列，視覺上也比較不擁擠。
+        method_bar = QHBoxLayout()
+        method_bar.addWidget(QLabel("篩選方法："))
         # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
-        # 塞進上面CANDIDATE_FILTERS的registry迴圈，另外獨立組裝、獨立傳給apply_candidate_filters
+        # 塞進CANDIDATE_FILTERS的registry迴圈，另外獨立組裝、獨立傳給apply_candidate_filters
         # 的sar_flip_option參數(見src/presentation/chart_data.py)。
-        filter_bar.addSpacing(20)
         self.sar_flip_checkbox = QCheckBox("SAR 翻轉")
-        filter_bar.addWidget(self.sar_flip_checkbox)
+        method_bar.addWidget(self.sar_flip_checkbox)
         self.sar_flip_direction_combo = QComboBox()
         self.sar_flip_direction_combo.addItems(["多頭", "空頭"])
-        filter_bar.addWidget(self.sar_flip_direction_combo)
+        method_bar.addWidget(self.sar_flip_direction_combo)
         self.sar_flip_days_spin = QSpinBox()
         self.sar_flip_days_spin.setRange(1, 60)
         self.sar_flip_days_spin.setValue(1)
         self.sar_flip_days_spin.setSuffix(" 天內翻轉")
-        filter_bar.addWidget(self.sar_flip_days_spin)
+        method_bar.addWidget(self.sar_flip_days_spin)
 
         # 「朱家泓技術分析」勾選框：2026-08-01新增，目前是標示用——候選清單目前100%來自
         # 朱家泓的書(見chart_data._signal_matches_zhu_rulebook())，還沒有其他規則來源，
         # 勾選/不勾選這裡暫時不會改變候選清單內容，等籌碼分析(陳家豐)規則接上候選清單
         # 產生流程後才會真正篩出差異。預設勾選，跟現況(全部都是朱家泓規則)一致。
-        filter_bar.addSpacing(20)
+        method_bar.addSpacing(20)
         self.zhu_rule_checkbox = QCheckBox("朱家泓技術分析")
         self.zhu_rule_checkbox.setChecked(True)
         self.zhu_rule_checkbox.setToolTip("目前候選清單全部來自朱家泓的書，這裡暫為標示用；等籌碼分析規則接上後才會真正篩選")
-        filter_bar.addWidget(self.zhu_rule_checkbox)
+        method_bar.addWidget(self.zhu_rule_checkbox)
 
-        filter_bar.addSpacing(20)
+        method_bar.addSpacing(20)
         self.apply_filter_btn = QPushButton("套用篩選")
         self.apply_filter_btn.setToolTip("篩選條件改完後按這裡才會重新套用，不用每改一項就等一次運算")
         self.apply_filter_btn.clicked.connect(self._reload_candidates)
-        filter_bar.addWidget(self.apply_filter_btn)
+        method_bar.addWidget(self.apply_filter_btn)
 
-        filter_bar.addStretch()
-        root_layout.addLayout(filter_bar)
+        method_bar.addStretch()
+        root_layout.addLayout(method_bar)
 
         top_bar = QHBoxLayout()
         self.refresh_btn = QPushButton("🔄 立即重新篩選")
