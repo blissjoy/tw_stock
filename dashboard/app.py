@@ -44,6 +44,23 @@ from src.presentation import pipeline_status  # noqa: E402
 
 TAIEX_DISPLAY_NAME = "台股加權指數"
 
+TAB_MARKET = "大盤"
+TAB_SCREENER = "選股"
+TAB_STOCK_DETAIL = "個股清單"
+TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL]
+
+
+def _format_month_day(date_str: str) -> str:
+    """"YYYY-MM-DD" -> "X月X日"(不補零)，供「個股清單」分頁右上角的來源標籤使用
+    (跟桌面版desktop/main_window.py的同名函式對齊)。格式不符預期時原樣回傳，不拋
+    例外——來源標籤只是輔助資訊，不應該因為格式問題讓整頁crash。
+    """
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return date_str
+    return f"{d.month}月{d.day}日"
+
 
 def main() -> None:
     import streamlit as st
@@ -263,13 +280,41 @@ def main() -> None:
             st.caption(f"股價更新至　{_fmt(get_latest_update_time(conn))}")
             st.caption(f"候選清單算至　{_fmt(get_latest_candidate_update_time(conn))}")
 
-    # 兩個分頁：分頁1是原本全部功能(候選清單篩選/立即重新篩選/手動抓取/候選清單/個股查詢)，
-    # 分頁2是新增的「大盤分析」——按鈕按下去才顯示，內容跟個股分析用的是同一個
-    # render_price_chart()(含K線圖+均線/切線/支撐壓力/MACD/KD/SAR切換+個股分析按鈕)，
-    # 只是套用在大盤(TAIEX_STOCK_ID)這個特殊stock_id上，不需要另外寫一套渲染邏輯。
-    tab1, tab2 = st.tabs(["選股", "大盤分析"])
+    # 三個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股清單(個股查詢+K線圖+個股
+    # 分析)——原本候選清單跟個股圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選
+    # 清單點選任一列會自動切到③並代入該股票資料。
+    #
+    # ⚠️ st.tabs()本身不支援用程式碼切換「目前使用中」的分頁(Streamlit已知限制，
+    # tabs是純前端狀態，session_state管不到)，改用st.radio(horizontal=True)模擬
+    # 分頁列，這是Streamlit唯一支援「用程式碼控制分頁」的做法(跟桌面版desktop/
+    # main_window.py的self.tabs.setCurrentIndex()對應)。
+    #
+    # ⚠️ 2026-08-01踩到的坑：不能在radio widget已經instantiate之後、同一輪script
+    # 執行裡直接`st.session_state["active_tab"] = ...`——會丟
+    # `StreamlitAPIException: cannot be modified after the widget with key
+    # active_tab is instantiated`(這裡的radio在最上面就建立了，候選清單點選事件
+    # 卻是在後面的分頁內容裡才觸發，時間點必然在widget instantiate之後)。正確做法
+    # 是改寫一個「不綁定任何widget」的中介session_state key(_pending_active_tab)，
+    # 在radio建立"之前"讀取它、寫回active_tab，候選清單點選時只設定這個中介key再
+    # st.rerun()，下一輪script重新執行到這裡時，radio都還沒建立，這時候寫入
+    # active_tab才合法。
+    if "_pending_active_tab" in st.session_state:
+        st.session_state["active_tab"] = st.session_state.pop("_pending_active_tab")
+    elif "active_tab" not in st.session_state:
+        st.session_state["active_tab"] = TAB_SCREENER
+    active_tab = st.radio(
+        "分頁", TAB_OPTIONS, key="active_tab", horizontal=True, label_visibility="collapsed",
+    )
+    st.divider()
 
-    with tab1:
+    if active_tab == TAB_MARKET:
+        # 大盤只有一檔、資料量固定，不像候選清單那樣「選了才知道要分析誰」，切到這個分頁
+        # 就直接顯示K線圖(含MACD/KD/SAR)+規則比對清單，不需要按鈕才展開(跟桌面版一致，
+        # 見desktop/main_window.py的_refresh_market_tab()說明)。
+        st.subheader(f"📈 {TAIEX_DISPLAY_NAME}")
+        render_price_chart(TAIEX_STOCK_ID, widget_key="taiex", always_show_analysis=True)
+
+    elif active_tab == TAB_SCREENER:
         st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件）")
         filter_cols = st.columns(len(CANDIDATE_FILTERS))
         active_filters = [
@@ -325,7 +370,6 @@ def main() -> None:
         candidates_df, latest_date, is_intraday = load_candidates_for_date(conn, target_date=selected_date)
         candidates_df = apply_candidate_filters(conn, candidates_df, active_filters, sar_flip_option=sar_flip_option)
 
-        selected_stock_id = None
         if latest_date is None:
             st.info("目前 Turso 資料庫裡還沒有任何每日選股紀錄，點上方「立即重新篩選」或等 GitHub Actions 排程跑完後就會顯示。")
         else:
@@ -335,7 +379,7 @@ def main() -> None:
             if candidates_df.empty:
                 st.write("這一天沒有符合條件的候選股。")
             else:
-                st.caption("點選任一列可在下方查看該檔股票的價格走勢")
+                st.caption("點選任一列會自動切換到「個股清單」分頁查看該檔股票的價格走勢")
                 event = st.dataframe(
                     candidates_df, use_container_width=True, hide_index=True,
                     on_select="rerun", selection_mode="single-row", key="candidates_table",
@@ -349,26 +393,39 @@ def main() -> None:
                 )
                 if event.selection.rows:
                     selected_stock_id = str(candidates_df.iloc[event.selection.rows[0]]["stock_id"])
+                    # 記錄來源候選清單日期，供「個股清單」分頁右上角顯示「來源：X月X日的
+                    # 選股策略」；順便清掉手動查詢欄位殘留的舊文字(不然下面「個股清單」
+                    # 分頁重新渲染時，text_input帶著上次查詢的舊文字又會把這裡剛設定的
+                    # stock_id蓋掉，見下面TAB_STOCK_DETAIL分支的說明)，再切到該分頁。
+                    st.session_state["detail_stock_id"] = selected_stock_id
+                    st.session_state["detail_stock_source"] = selected_date or latest_date
+                    st.session_state["detail_query_input"] = ""
+                    # 不能直接寫st.session_state["active_tab"](radio widget已經在這輪
+                    # script執行的更上面instantiate過了)，寫中介key、下一輪script重新
+                    # 執行到radio建立"之前"再轉寫進active_tab，見上面的說明。
+                    st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
+                    st.rerun()
 
-        st.divider()
-
-        if selected_stock_id:
-            st.subheader(f"📊 {selected_stock_id} 價格走勢（點選自候選清單）")
-            render_price_chart(selected_stock_id, widget_key="drilldown")
-            st.divider()
-
-        st.subheader("個股價格走勢查詢（輸入股票代號或名稱）")
-        query = st.text_input("輸入股票代號或名稱（例如 2330 或 台積電）", value="")
+    elif active_tab == TAB_STOCK_DETAIL:
+        query_col, source_col = st.columns([3, 1])
+        with query_col:
+            query = st.text_input(
+                "輸入股票代號或名稱（例如 2330 或 台積電）", value="", key="detail_query_input",
+            )
         if query:
-            stock_id = resolve_stock_id(conn, query) or query.strip()
-            render_price_chart(stock_id, widget_key="manual")
+            # 手動查詢：清掉來源標籤(不是從候選清單點過來的)。
+            st.session_state["detail_stock_id"] = resolve_stock_id(conn, query) or query.strip()
+            st.session_state["detail_stock_source"] = None
+        with source_col:
+            source_date = st.session_state.get("detail_stock_source")
+            if source_date:
+                st.caption(f"來源：{_format_month_day(source_date)}的選股策略")
 
-    with tab2:
-        # 大盤只有一檔、資料量固定，不像候選清單那樣「選了才知道要分析誰」，切到這個分頁
-        # 就直接顯示K線圖(含MACD/KD/SAR)+規則比對清單，不需要按鈕才展開(跟桌面版一致，
-        # 見desktop/main_window.py的_refresh_market_tab()說明)。
-        st.subheader(f"📈 {TAIEX_DISPLAY_NAME}")
-        render_price_chart(TAIEX_STOCK_ID, widget_key="taiex", always_show_analysis=True)
+        detail_stock_id = st.session_state.get("detail_stock_id")
+        if detail_stock_id:
+            render_price_chart(detail_stock_id, widget_key="detail")
+        else:
+            st.info("請輸入股票代號或名稱查詢，或到「選股」分頁點選候選股票。")
 
 
 if __name__ == "__main__":

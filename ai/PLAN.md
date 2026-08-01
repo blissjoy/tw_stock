@@ -3368,3 +3368,49 @@ Streamlit版`render_price_chart()`的`always_show_analysis=True`分支，把原�
 為820px、`market_analysis_view`切換到分頁後高度正確變成完整內容高度(1872px，不再是
 8px)、無外框；Streamlit版確認「大盤分析」不再是expander邊框盒子，直接接在圖表下方。
 728個測試全過。
+
+## 拆成3個分頁：大盤/選股/個股清單，候選清單點選自動切換+顯示來源(2026-08-01)
+
+使用者要求：①大盤放第一分頁、②選股放第二分頁、③個股清單放第三分頁；②的候選清單
+點選某股時自動focus到③並代入資料；③右上角要標明來源是幾月幾日的選股策略，手動查詢
+則不顯示。目的是解決選股畫面太擁擠的問題(候選清單跟個股圖表/分析原本擠在同一個畫面)。
+
+**桌面版**：`_build_stock_tab()`拆成`_build_screener_tab()`(候選清單篩選+清單本身，
+不含個股圖表)與`_build_stock_detail_tab()`(個股查詢+K線圖+個股分析，新增右上角
+`stock_source_label`)。候選清單跟個股圖表分開分頁後，不再需要原本共用的`QSplitter`
+(候選清單/圖表拖曳調整相對高度的機制)，改成兩個獨立的plain QVBoxLayout+QScrollArea，
+順便移除了`_sync_central_height_to_content()`那組因為QSplitter不轉發sizeHint而生的
+workaround(不再需要)。`_on_candidate_selected()`點選候選清單列時記錄
+`self._current_stock_source`(目前候選清單分頁選取的日期)、呼叫
+`self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)`自動切換；`_on_search()`(個股清單
+分頁自己的手動查詢)則把`_current_stock_source`設為None，`_rerender_chart()`依此
+更新來源標籤文字(`_format_month_day()`轉成「來源：X月X日的選股策略」)。跟大盤分頁
+同樣的「分頁未顯示時沒有真正layout」問題，改成監聽`tabs.currentChanged`、切到
+個股清單分頁(index==2)時才呼叫`_rerender_chart()`，`_on_candidate_selected()`
+只負責切換分頁+記錄狀態，不直接呼叫渲染(避免在分頁還沒真正顯示前計算高度)。
+
+**Streamlit版**：`st.tabs()`不支援用程式碼切換使用中的分頁(已知限制)，改用
+`st.radio(horizontal=True)`模擬分頁列，選取值綁定`session_state["active_tab"]`。
+
+⚠️ 踩到的坑(且一開始被Playwright的canvas互動問題掩蓋，一度誤判是測試腳本問題)：
+候選清單點選後直接`st.session_state["active_tab"] = TAB_STOCK_DETAIL`會丟
+`StreamlitAPIException: cannot be modified after the widget with key active_tab is
+instantiated`——因為radio在script最上面就已經instantiate，候選清單的點選事件
+卻是在後面的分頁內容裡才觸發，寫入的時間點必然晚於widget建立。從實際運行中的
+streamlit log(不是Playwright截圖)才抓到這個exception traceback，改用不綁定任何
+widget的中介key`_pending_active_tab`：候選清單點選時只設定這個中介key再
+`st.rerun()`，下一輪script重新執行、在radio建立"之前"才把中介key的值轉寫進
+`active_tab`，這時候寫入才合法。這是Streamlit程式化控制widget狀態的標準做法
+(先寫中介state+rerun，下一輪在widget建立前才真正賦值)，直接「建立widget後同一輪
+內就地修改」一律會丟例外，之後如果要再加類似的「點什麼東西自動切分頁/勾選」功能
+要記得套用同一個模式。
+
+候選清單點選時額外清空`detail_query_input`(手動查詢欄位)的殘留文字，避免切到
+「個股清單」分頁重新渲染時，text_input帶著上次查詢的舊文字又把剛設定的
+`detail_stock_id`蓋掉。
+
+用真實DB+PySide6/Playwright(桌面版直接檢查widget屬性；Streamlit版最後改用直接讀
+streamlit server log抓到真正的exception，而不是一直在猜Playwright canvas點擊
+時序)雙重驗證：桌面版點選候選列正確切到「個股清單」分頁、右上角顯示「來源：7月28日
+的選股策略」，手動查詢後來源清空；Streamlit版同樣行為一致(來源：7月31日的選股策略)。
+728個測試全過。

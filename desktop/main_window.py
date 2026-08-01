@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -51,6 +50,23 @@ from src.presentation import chart_data, pipeline_status
 from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
 TAIEX_DISPLAY_NAME = "台股加權指數"
+
+# 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股清單。
+TAB_MARKET = 0
+TAB_SCREENER = 1
+TAB_STOCK_DETAIL = 2
+
+
+def _format_month_day(date_str: str) -> str:
+    """"YYYY-MM-DD" -> "X月X日"(不補零)，供「個股清單」分頁右上角的來源標籤使用。
+    格式不符預期時原樣回傳，不拋例外——來源標籤只是輔助資訊，不應該因為格式問題讓
+    整個畫面crash。
+    """
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return date_str
+    return f"{d.month}月{d.day}日"
 
 
 class PipelineWorker(QThread):
@@ -98,6 +114,10 @@ class MainWindow(QMainWindow):
 
         self._pipeline_worker: PipelineWorker | None = None
         self._current_stock_id: str | None = None
+        # 目前「個股清單」分頁顯示的股票是從候選清單哪一天的選股策略點進來的("YYYY-MM-DD"
+        # 字串)；手動查詢時設為None，右上角的來源標籤(self.stock_source_label)就不顯示
+        # (見_on_candidate_selected()/_on_search())。
+        self._current_stock_source: str | None = None
         # QWebEngineView.setHtml()對內容大小有~2MB的隱性限制(Chromium的data: URL限制，超過
         # 會loadFinished(False)、畫面完全空白且不會報錯)——Plotly圖表把plotly.js整包內嵌後
         # 通常有4~5MB，遠超過這個限制。改成寫進暫存檔案再用load(QUrl.fromLocalFile(...))，
@@ -118,36 +138,37 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # 兩個分頁：分頁1是原本全部功能(候選清單/個股查詢/圖表/個股分析)，分頁2是新增的
-        # 「大盤分析」——同一套規則比對邏輯(_build_analysis_html())套用在大盤(^TWII)
-        # 這個特殊stock_id上，跟個股分析共用同一套渲染格式，只是分析對象不同。
+        # 三個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股清單(個股查詢+K線圖+
+        # 個股分析)——原本候選清單跟個股圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開
+        # 後候選清單點選任一列會自動切到③並代入該股票資料(見_on_candidate_selected())。
+        # ①跟③都用同一套規則比對邏輯(_build_analysis_html())，只是分析對象(大盤/個股)
+        # 不同，渲染格式共用。
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self._build_stock_tab()
         self._build_market_tab()
-        # ⚠️ 分頁還沒被切換過去顯示之前(例如視窗剛啟動時預設停在分頁1)，分頁2裡的
-        # QTextEdit/QWebEngineView實際上沒有真正的layout(viewport寬度等於0或預設值)，
-        # 這時候算「大盤分析」文字框需要的高度一定不準(實測算出來只有個位數px，見
-        # _build_market_tab()的說明)。改成切到分頁2時才(重新)整理內容，順便也讓
-        # 每次切回來都看得到最新資料，不用額外處理「視窗剛啟動、分頁2還沒被看過」
-        # 這種特例。
+        self._build_screener_tab()
+        self._build_stock_detail_tab()
+        # ⚠️ 分頁還沒被切換過去顯示之前，分頁裡的QTextEdit/QWebEngineView實際上沒有
+        # 真正的layout(viewport寬度等於0或預設值)，這時候算文字框需要的高度一定不準
+        # (實測算出來只有個位數px，見_build_market_tab()的說明)。改成切到對應分頁時
+        # 才(重新)整理內容，順便也讓每次切回來都看得到最新資料。
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-    def _build_stock_tab(self) -> None:
-        # 候選清單+搜尋列+均線/切線勾選+圖表+分析面板+摘要文字全部疊在一起，自然高度常常
-        # 超過視窗實際可見範圍(尤其視窗沒有最大化時)，之前各元件只能被硬擠壓、圖表下方的
-        # 摘要文字被截斷看不到。改成用QScrollArea包住整個central widget：視窗比內容小時
-        # 最外層會出現垂直捲軸，使用者可以捲動看到全部內容，而不是元件互相擠壓。
-        outer_scroll = QScrollArea()
-        outer_scroll.setWidgetResizable(True)
-        self.tabs.addTab(outer_scroll, "選股")
+    def _build_screener_tab(self) -> None:
+        """「選股」分頁：候選清單篩選條件+候選清單本身，不含個股圖表/分析(那些移到
+        「個股清單」分頁，見_build_stock_detail_tab())——原本候選清單跟個股圖表擠在
+        同一個分頁，使用者反映畫面太擁擠，拆開後這裡可以完整顯示候選清單，不用捲很久
+        才看得到後面的圖表。點選候選清單裡任一列會自動切到「個股清單」分頁並代入該
+        股票資料(見_on_candidate_selected())。
+        """
+        screener_scroll = QScrollArea()
+        screener_scroll.setWidgetResizable(True)
+        self.tabs.addTab(screener_scroll, "選股")
 
-        central = QWidget()
-        central.setMinimumHeight(1150)  # 足夠容納候選清單(320)+圖表(450)+摘要(220)等實務高度，視窗變小時才會出現捲軸
-        self._central_widget = central
-        outer_scroll.setWidget(central)
-        root_layout = QVBoxLayout(central)
+        screener_content = QWidget()
+        screener_scroll.setWidget(screener_content)
+        root_layout = QVBoxLayout(screener_content)
 
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(QLabel("候選清單日期："))
@@ -192,9 +213,9 @@ class MainWindow(QMainWindow):
         self.fetch_btn = QPushButton("▶ 手動抓取今日資料")
         self.fetch_btn.setToolTip("抓取當天TWSE/TPEx資料並重新選股，較耗時(TPEx約需1小時內)，在背景執行不會卡住畫面")
         self.fetch_btn.clicked.connect(self._on_fetch_clicked)
-        # 在候選清單「內」搜尋(跟下面bottom_layout的self.search_input不同——那個是不限
+        # 在候選清單「內」搜尋(跟「個股清單」分頁裡的self.search_input不同——那個是不限
         # 候選清單、對任意股票代號/名稱做全域查詢；這個只在目前候選清單的列裡找，找到就
-        # 選取+捲動過去，順便觸發_on_candidate_selected()連帶更新下方個股分析)。
+        # 選取+捲動過去，順便觸發_on_candidate_selected()連帶切到「個股清單」分頁)。
         self.candidate_search_input = QLineEdit()
         self.candidate_search_input.setPlaceholderText("在候選清單中搜尋代號或名稱")
         self.candidate_search_input.setMaximumWidth(220)
@@ -211,10 +232,6 @@ class MainWindow(QMainWindow):
         self.intraday_label.setStyleSheet("color: red; font-weight: bold;")
         self.intraday_label.setVisible(False)
         root_layout.addWidget(self.intraday_label)
-
-        splitter = QSplitter()
-        splitter.setOrientation(Qt.Orientation.Vertical)
-        root_layout.addWidget(splitter)
 
         self.candidates_table = QTableWidget()
         self.candidates_table.setColumnCount(8)
@@ -243,10 +260,26 @@ class MainWindow(QMainWindow):
         # 原本單行的列高裡看不全。
         self.candidates_table.setWordWrap(True)
         self.candidates_table.itemSelectionChanged.connect(self._on_candidate_selected)
-        splitter.addWidget(self.candidates_table)
+        root_layout.addWidget(self.candidates_table, stretch=1)
 
-        bottom = QWidget()
-        bottom_layout = QVBoxLayout(bottom)
+    def _build_stock_detail_tab(self) -> None:
+        """「個股清單」分頁：個股查詢+K線圖+均線/切線/支撐壓力/MACD/KD/SAR切換+個股分析+
+        最新交易日摘要。從「選股」分頁候選清單點選任一列時會自動切換到這個分頁並代入
+        該股票資料，右上角顯示「來源：X月X日的選股策略」；使用者在這個分頁自己手動
+        查詢股票時則不顯示來源(見_on_candidate_selected()/_on_search())。
+
+        這裡直接用QVBoxLayout(不是舊版候選清單+個股圖表共用的那個QSplitter)包在
+        QScrollArea裡——候選清單移到獨立分頁後，不再需要讓使用者拖曳調整候選清單/
+        圖表的相對高度，2026-07-29修正大盤分析截斷bug時發現的QSplitter不轉發
+        sizeHint變化問題也就不再適用，不需要額外的高度同步workaround。
+        """
+        detail_scroll = QScrollArea()
+        detail_scroll.setWidgetResizable(True)
+        self.tabs.addTab(detail_scroll, "個股清單")
+
+        detail_content = QWidget()
+        detail_scroll.setWidget(detail_content)
+        bottom_layout = QVBoxLayout(detail_content)
 
         search_row = QHBoxLayout()
         search_row.addWidget(QLabel("個股查詢："))
@@ -257,6 +290,12 @@ class MainWindow(QMainWindow):
         search_btn = QPushButton("查詢")
         search_btn.clicked.connect(self._on_search)
         search_row.addWidget(search_btn)
+        search_row.addStretch()
+        # 右上角標示這檔股票是從候選清單哪一天的選股策略點進來的，讓使用者知道現在看的
+        # 是「當時」符合規則的股票，不是憑空冒出來的；手動查詢時不顯示(見_on_search())。
+        self.stock_source_label = QLabel("")
+        self.stock_source_label.setStyleSheet("color: #666666;")
+        search_row.addWidget(self.stock_source_label)
         bottom_layout.addLayout(search_row)
 
         controls_row = QHBoxLayout()
@@ -317,11 +356,12 @@ class MainWindow(QMainWindow):
         #
         # ⚠️ 2026-07-29修正：原本用setMaximumHeight(200)固定高度，符合規則的訊號一多，內容
         # 塞不進200px，QTextEdit自己的捲軸就會出現——使用者反映「要在小框框裡捲動」體驗很差。
-        # 改成不設上限高度，改由_resize_analysis_view_to_content()依實際內容量動態算出
-        # 剛好的高度(setFixedHeight)，關掉QTextEdit自己的垂直捲軸，讓內容多的時候由最外層
-        # 的outer_scroll(整個視窗)捲動，不是在這個小框框內部另外捲動一次。
+        # 改成不設上限高度，依實際內容量動態算出剛好的高度(setFixedHeight，見
+        # _set_analysis_html())，關掉QTextEdit自己的垂直捲軸，讓內容多的時候由最外層
+        # 的detail_scroll(整個分頁)捲動，不是在這個小框框內部另外捲動一次。
         self.analysis_view = QTextEdit()
         self.analysis_view.setReadOnly(True)
+        self.analysis_view.setFrameShape(QFrame.Shape.NoFrame)
         self.analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.analysis_view.setVisible(False)
         bottom_layout.addWidget(self.analysis_view)
@@ -346,10 +386,6 @@ class MainWindow(QMainWindow):
         self.summary_view.setMaximumHeight(220)
         bottom_layout.addWidget(self.summary_view)
 
-        splitter.addWidget(bottom)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
-
     def _build_market_tab(self) -> None:
         """「大盤分析」分頁：跟個股分析共用同一套規則比對渲染邏輯(_build_analysis_html())，
         只是分析對象固定是大盤(TAIEX_STOCK_ID)，不是使用者目前選取的個股。
@@ -368,7 +404,7 @@ class MainWindow(QMainWindow):
         """
         market_scroll = QScrollArea()
         market_scroll.setWidgetResizable(True)
-        self.tabs.addTab(market_scroll, "大盤分析")
+        self.tabs.addTab(market_scroll, "大盤")
 
         market_content = QWidget()
         market_scroll.setWidget(market_content)
@@ -423,8 +459,14 @@ class MainWindow(QMainWindow):
         self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
 
     def _on_tab_changed(self, index: int) -> None:
-        if index == 1:  # 大盤分析
+        if index == TAB_MARKET:
             self._refresh_market_tab()
+        elif index == TAB_STOCK_DETAIL:
+            # 切到「個股清單」分頁時重新整理一次(不管是不是剛從候選清單點過來)，確保
+            # 圖表/分析面板都是在分頁真正顯示、有正確layout之後才計算(見_build_stock_
+            # detail_tab()的說明)；_rerender_chart()本身有「沒有選取任何股票」的
+            # 空狀態防呆，不會因為使用者還沒選過股票就直接切過來而出錯。
+            self._rerender_chart()
 
     # ------------------------------------------------------------------
     # 候選清單／圖表
@@ -493,7 +535,13 @@ class MainWindow(QMainWindow):
             return
         stock_id = self.candidates_table.item(rows[0].row(), 0).text()
         self._current_stock_id = stock_id
-        self._rerender_chart()
+        # 記錄來源候選清單日期(目前分頁選取的日期)，供「個股清單」分頁右上角顯示
+        # 「來源：X月X日的選股策略」。自動切到該分頁——切換會觸發_on_tab_changed()
+        # 呼叫_rerender_chart()，這裡不用另外呼叫(也不應該在切換前就呼叫：分頁還沒
+        # 顯示的話，圖表/分析面板還沒有正確的layout，見_build_stock_detail_tab()的
+        # 說明)。
+        self._current_stock_source = self.date_combo.currentText() or None
+        self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)
 
     def _on_candidate_search(self) -> None:
         """在目前候選清單的列裡搜尋代號或名稱是否存在，找到就選取該列並捲動過去——
@@ -521,11 +569,19 @@ class MainWindow(QMainWindow):
             return
         resolved = chart_data.resolve_stock_id(self.conn, query) if self.conn is not None else None
         self._current_stock_id = resolved or query
+        self._current_stock_source = None  # 手動查詢，右上角不顯示來源
         self._rerender_chart()
 
     def _rerender_chart(self) -> None:
         if self.conn is None or not self._current_stock_id:
             return
+        # 右上角來源標籤：從候選清單點過來的才顯示「來源：X月X日的選股策略」，讓使用者
+        # 知道現在看的是「當時」選股策略認為符合規則的股票；手動查詢(self.search_input)
+        # 時_current_stock_source是None，標籤保持空白不顯示(見_on_search())。
+        if self._current_stock_source:
+            self.stock_source_label.setText(f"來源：{_format_month_day(self._current_stock_source)}的選股策略")
+        else:
+            self.stock_source_label.setText("")
         price_df = chart_data.load_price_history(self.conn, self._current_stock_id)
         if price_df.empty:
             self.chart_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
@@ -618,50 +674,21 @@ class MainWindow(QMainWindow):
         self.analysis_collapse_btn.setVisible(checked)
         if checked:
             self._refresh_analysis_view()
-        else:
-            QTimer.singleShot(0, self._sync_central_height_to_content)
 
     def _set_analysis_html(self, html_content: str) -> None:
         """設定「個股分析」面板內容，並依實際內容量重新算出剛好的高度(setFixedHeight)，
         取代原本寫死的200px上限——訊號一多就會超過200px，QTextEdit自己的垂直捲軸(已在
-        _build_ui()關閉)原本就會被塞爆，變成使用者要在這個小框框裡另外捲動一次；改成
-        跟內容一樣高，多出來的部分交給最外層的outer_scroll(整個視窗)捲動，只有一層
-        捲軸，不是兩層。
+        _build_stock_detail_tab()關閉)原本就會被塞爆，變成使用者要在這個小框框裡另外
+        捲動一次；改成跟內容一樣高，多出來的部分交給最外層的detail_scroll(整個分頁)
+        捲動，只有一層捲軸，不是兩層。「個股清單」分頁用plain QVBoxLayout+QScrollArea
+        (不像候選清單/個股圖表過去共用同一分頁時包了一層QSplitter)，一般QVBoxLayout+
+        QScrollArea(setWidgetResizable(True))組合本來就能正確隨內容量調整捲軸範圍，
+        不需要額外的高度同步workaround(見2026-07-29大盤分析截斷bug的除錯記錄)。
         """
         self.analysis_view.setHtml(html_content)
         doc_height = self.analysis_view.document().size().height()
         frame_width = self.analysis_view.frameWidth() * 2
         self.analysis_view.setFixedHeight(int(doc_height) + frame_width + 8)
-        # ⚠️ setFixedHeight()對祖先元件(經過QSplitter)sizeHint的影響要等Qt處理完
-        # 目前這輪事件迴圈裡待處理的LayoutRequest事件才會反映出來——這裡如果馬上
-        # 同步呼叫_sync_central_height_to_content()，central.sizeHint()讀到的還是
-        # 舊值(還沒重新計算)，算出來的目標高度會不夠高。用QTimer.singleShot(0, ...)
-        # 排到下一輪事件迴圈執行，讓Qt先把待處理的layout事件處理完。
-        QTimer.singleShot(0, self._sync_central_height_to_content)
-
-    def _sync_central_height_to_content(self) -> None:
-        """⚠️ 2026-07-29修正：analysis_view改成setFixedHeight()動態撐高後，實測發現
-        outer_scroll(最外層QScrollArea)的捲軸範圍完全沒有跟著變大——用QApplication.
-        processEvents()等過layout事件處理後再檢查central.height()仍卡在建構時設定
-        的1150(舊值)，即使central.sizeHint()已經正確反映analysis_view變高後應有的
-        真實高度(例如3052)。原因是analysis_view所在的QSplitter(候選清單/圖表區domain)
-        不會像一般QVBoxLayout那樣把子元件sizeHint的變化即時轉發成LayoutRequest事件
-        往上傳給central——導致central的實際尺寸沒有跟著sizeHint調整，
-        outer_scroll(setWidgetResizable(True)雖然會依widget的尺寸決定要不要出現
-        捲軸，但這裡widget的尺寸從頭到尾沒真的變過)的捲軸範圍自然也不會變大，內容因此
-        被截斷、卻沒有任何捲軸可以捲過去看——這裡改成每次analysis_view顯示/隱藏或
-        內容變動時，直接手動把central.setMinimumHeight()同步成sizeHint()的高度
-        (但不低於原本1150的基準值，避免面板收合後又縮得太小)，繞過QSplitter不會
-        主動轉發的問題，強制outer_scroll重新計算出正確的捲軸範圍。
-        """
-        target_height = max(1150, self._central_widget.sizeHint().height())
-        self._central_widget.setFixedHeight(target_height)
-        # ⚠️ 已知限制：這個寫法能正確「長高」(展開內容變多時)，但實測發現QScrollArea
-        # 對於「縮小」(例如收合分析面板後，target_height應該變回1150)不會主動生效——
-        # central.height()會停在展開時的最大高度，直到下次視窗resize或有新的內容
-        # 撐得更高才會重新計算。影響：面板收合後，外層捲軸底部會多出一段空白可以捲，
-        # 不是內容被截斷(不影響本次修正的目標)，只是視覺上不夠精簡；之後如果要處理這個
-        # 才需要再深入研究QScrollArea+QSplitter巢狀結構下widget收縮的正確做法。
 
     def _build_analysis_html(self, stock_id: str, header_label: str) -> str:
         """組出「規則比對清單+總結分析」的HTML內容，供個股分析(_refresh_analysis_view())
@@ -761,13 +788,15 @@ class MainWindow(QMainWindow):
         self._refresh_date_list()
         self._reload_candidates()
         self._poll_pipeline_status()  # 立即刷新狀態列的「候選清單算至：...」，不等下一次5秒輪詢
-        if self._current_stock_id:
+        # 只在使用者目前真的停留在「大盤」/「個股清單」分頁時才立即整理——分頁還沒被
+        # 切換過去顯示的話，QTextEdit/QWebEngineView還沒有真正的layout，這時候整理
+        # 只會算出錯誤的高度(見_build_stock_detail_tab()/_build_market_tab()的說明)。
+        # 之後切過去時_on_tab_changed()會自動重新整理，資料本來就是即時查DB，不會
+        # 顯示到舊資料。
+        current_tab = self.tabs.currentIndex()
+        if current_tab == TAB_STOCK_DETAIL and self._current_stock_id:
             self._rerender_chart()
-        # 只在使用者目前真的停留在「大盤分析」分頁時才立即整理——分頁還沒被切換過去
-        # 顯示的話，QTextEdit/QWebEngineView還沒有真正的layout，這時候整理只會算出
-        # 錯誤的高度(見_build_market_tab()的說明)。之後切過去時_on_tab_changed()
-        # 會自動重新整理，資料本來就是即時查DB，不會顯示到舊資料。
-        if self.tabs.currentIndex() == 1:
+        elif current_tab == TAB_MARKET:
             self._refresh_market_tab()
 
     def _on_fetch_clicked(self) -> None:
@@ -788,9 +817,12 @@ class MainWindow(QMainWindow):
         self._refresh_date_list()
         self._reload_candidates()
         self._poll_pipeline_status()  # 立即刷新狀態列成「資料更新至：...」，不等下一次5秒輪詢
-        # 手動抓取也會更新大盤資料(見fetch_today_taiex())，只在使用者目前就停留在「大盤
-        # 分析」分頁時才立即整理，理由同_on_refresh_clicked()。
-        if self.tabs.currentIndex() == 1:
+        # 手動抓取也會更新大盤資料(見fetch_today_taiex())跟目前選取股票的價格資料，
+        # 只在使用者目前就停留在對應分頁時才立即整理，理由同_on_refresh_clicked()。
+        current_tab = self.tabs.currentIndex()
+        if current_tab == TAB_STOCK_DETAIL and self._current_stock_id:
+            self._rerender_chart()
+        elif current_tab == TAB_MARKET:
             self._refresh_market_tab()
         QMessageBox.information(self, "完成", f"今日資料抓取完成，候選清單共{candidate_count}檔。")
 
