@@ -29,7 +29,7 @@ def format_candidates_message(date: str, candidates: list[dict], stock_names: di
     ⚠️ 2026-08-01改版：`candidates`(來自`screen_all_stocks()`)同一檔股票符合多條
     規則時刻意不去重、每條規則各自一筆(見該函式docstring)——原本這裡逐筆列出，
     使用者收到的LINE訊息因此充滿同一檔股票重複出現(只差在觸發哪條規則)的雜訊，
-    跟候選清單畫面(`chart_data.load_candidates_for_date()`已經合併成同一檔股票
+    跟候選清單畫面(`chart_data.load_stock_universe_for_date()`已經合併成同一檔股票
     一列)差異很大，讓人困惑。改成依stock_id分組，一檔股票只顯示一行
     「{代號}{名稱} 符合規格數{n}」，依信心分數加總由高到低排序(反映「這檔股票有
     多少、多強的訊號重疊」，不是隨意順序)。

@@ -35,7 +35,7 @@ from src.presentation.chart_data import (  # noqa: E402
     get_latest_candidate_update_time,
     get_latest_update_time,
     list_candidate_dates,
-    load_candidates_for_date,
+    load_stock_universe_for_date,
     load_holidays_for_chart,
     load_price_history,
     resolve_stock_id,
@@ -328,10 +328,13 @@ def main() -> None:
             if col.checkbox(label, value=CANDIDATE_FILTER_DEFAULTS.get(label, False), key=f"filter_{label}")
         ]
 
-        # 「篩選方法：」這一列跟上面「篩選條件」分開放——SAR翻轉/朱家泓技術分析(日後還有
-        # 籌碼分析)是「訊號用什麼方法判斷出來的」，跟上面均線多頭排列這種「候選股本身要
-        # 滿足的門檻」概念上不同，使用者要求分開一列，視覺上也比較不擁擠(見
-        # desktop/main_window.py同一天的對應調整)。
+        # 「篩選方法：」這一列跟上面「篩選條件」分開放，視覺上比較不擁擠。2026-08-02
+        # 使用者釐清語意：這裡跟上面的均線多頭排列彼此是獨立的AND條件，候選清單的基礎池
+        # 一律是全市場(見chart_data.load_stock_universe_for_date())——只勾均線多排
+        # 但不勾朱家泓技術分析，等同對全市場做均線掃描，不受「當天有沒有觸發朱家泓規則」
+        # 限制；勾了朱家泓技術分析才會額外要求當天有出現在daily_candidates。詳見
+        # chart_data.apply_candidate_filters()的說明(見desktop/main_window.py同一天
+        # 的對應調整)。
         st.caption("篩選方法：")
         # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
         # 放進上面CANDIDATE_FILTERS那組迴圈，改用獨立的sar_flip_option參數傳給
@@ -347,13 +350,15 @@ def main() -> None:
             if sar_flip_enabled else None
         )
 
-        # 「朱家泓技術分析」勾選框：2026-08-01新增，目前是標示用——候選清單目前100%來自
-        # 朱家泓的書(見chart_data._signal_matches_zhu_rulebook())，還沒有其他規則來源，
-        # 勾選/不勾選這裡暫時不會改變候選清單內容，等籌碼分析(陳家豐)規則接上候選清單
-        # 產生流程後才會真正篩出差異。預設勾選，跟現況(全部都是朱家泓規則)一致。
+        # 「朱家泓技術分析」勾選框：2026-08-01新增，2026-08-02改版跟其他「篩選方法」
+        # (SAR翻轉)一樣是獨立的AND條件，不是「候選清單本來就限定在這個範圍」的基礎池
+        # ——候選清單基礎池現在是全市場(見chart_data.load_stock_universe_for_date())，
+        # 勾選這裡才會額外要求「當天有出現在daily_candidates(觸發過某條朱家泓規則)」；
+        # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。預設勾選，維持
+        # 「候選清單=已觸發朱家泓規則的股票」這個原本的預設體驗。
         zhu_rule_only = zhu_col.checkbox(
             "朱家泓技術分析", value=True, key="filter_zhu_rule_only",
-            help="目前候選清單全部來自朱家泓的書，這裡暫為標示用；等籌碼分析規則接上後才會真正篩選",
+            help="勾選時只保留當天有觸發朱家泓規則的股票；取消勾選則不限制，均線/SAR等條件會對全市場掃描",
         )
 
         if "applied_filters" not in st.session_state:
@@ -397,7 +402,7 @@ def main() -> None:
             st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
             if candidate_dates else None
         )
-        candidates_df, latest_date, is_intraday = load_candidates_for_date(conn, target_date=selected_date)
+        candidates_df, latest_date, is_intraday = load_stock_universe_for_date(conn, target_date=selected_date)
         applied = st.session_state["applied_filters"]
         candidates_df = apply_candidate_filters(
             conn, candidates_df, applied["active_filters"], sar_flip_option=applied["sar_flip_option"],

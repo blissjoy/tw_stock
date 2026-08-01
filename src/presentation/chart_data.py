@@ -21,10 +21,8 @@ from src.indicators.macd import compute_macd
 from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned
 from src.indicators.parabolic_sar import compute_sar, sar_flipped_within
 from src.patterns import chart_overlays
-from src.rule_docs import load_rule_doc
 
 _CONFIDENCE_PATTERN = re.compile(r"（(\d+)%）")
-_RULE_ID_PATTERN = re.compile(r"(R-[A-Z]+-\d+)")
 
 MA_COLORS = {
     5: "#2e86de", 10: "#e67e22", 20: "#8e44ad",
@@ -222,22 +220,6 @@ def compute_sar_flip_flags(
     return flags
 
 
-def _signal_matches_zhu_rulebook(signal_name: str) -> bool:
-    """判斷這筆候選股訊號(可能用「\n」合併了同一檔股票符合的多條規則，見
-    `load_candidates_for_date`)是否至少有一條規則來自朱家泓的書(`ai/zhu-rules/`246條規則庫，
-    透過`src.rule_docs.load_rule_doc`查表判斷Rule ID是否存在)。
-
-    2026-08-01新增「朱家泓技術分析」篩選框時的現況：`_SCREEN_FUNCTIONS`/`scan_golden_tier()`
-    目前接上候選清單產生流程的規則全部來自朱家泓的書，陳家豐的籌碼分析規則(margin_trading.py/
-    volume_washout.py)還沒有被任何篩選函式呼叫、不會出現在candidates_df裡——因此這個函式
-    現階段對每一筆候選股都回傳True，勾選/不勾選這個篩選框目前不會改變候選清單內容，是刻意的
-    (見使用者需求：先做標示用的勾選框，等籌碼分析規則接上候選清單產生流程後這裡才會真正
-    篩出差異)。之後籌碼分析規則接上後，這裡不需要修改就能正確分辨兩種來源。
-    """
-    rule_ids = _RULE_ID_PATTERN.findall(signal_name or "")
-    return any(load_rule_doc(rule_id) is not None for rule_id in rule_ids)
-
-
 def apply_candidate_filters(
     conn, candidates_df: pd.DataFrame, active_filter_labels: list[str],
     sar_flip_option: dict | None = None, zhu_rule_only: bool = False, as_of_date: str | None = None,
@@ -246,43 +228,77 @@ def apply_candidate_filters(
     未勾選任何篩選(active_filter_labels為空、sar_flip_option為None、zhu_rule_only為False)時
     原樣回傳，不做任何運算。
 
+    2026-08-02使用者釐清語意後改版：`candidates_df`現在應該傳入`load_stock_universe_
+    for_date()`回傳的「全市場」DataFrame(不是只有daily_candidates裡已經觸發規則的股票)。
+    「篩選條件」(CANDIDATE_FILTERS的均線多排)、「篩選方法」的SAR翻轉、朱家泓技術分析
+    三者是彼此獨立、可任意組合的AND條件，不是「候選清單本來就限定在這個範圍」的基礎池：
+        - 只勾均線多排 → 全市場均線掃描(不要求當天有觸發任何朱家泓規則)。
+        - 均線多排+SAR翻轉 → 全市場「均線多排 且 SAR翻轉」掃描。
+        - 均線多排+SAR翻轉+朱家泓技術分析 → 在上面的基礎上，再要求當天有出現在
+          daily_candidates(等同於過去舊版「候選清單」的範圍)。
+    因此zhu_rule_only不再是判斷signal_name字串內容(那個規則ID比對法在候選清單100%
+    來自朱家泓規則的舊架構下恆為True，其實沒有篩選到任何東西)，改成單純檢查
+    `candidates_df["signal_name"]`是否非空(是否出現在當天的daily_candidates)。
+
     sar_flip_option：SAR翻轉篩選的參數，格式{"direction": "多頭"|"空頭", "within_days": int}，
     傳None代表沒有勾選這個條件。這個篩選條件的UI是「勾選框+方向下拉+天數輸入」三個元件綁在
     一起，不是單純的勾選框，不適合塞進`CANDIDATE_FILTERS`那種「label -> 純checkbox」的
     registry，因此用獨立參數傳入，不是加進`active_filter_labels`清單裡。
 
-    zhu_rule_only：「朱家泓技術分析」篩選框是否勾選，見`_signal_matches_zhu_rulebook`。跟
-    sar_flip_option同理，這是依`candidates_df`裡已經算好的`signal_name`欄位分類，不是像
-    `CANDIDATE_FILTERS`那樣重新查`stock_prices`算指標，因此也用獨立參數傳入。
-
-    as_of_date：呼叫端(兩個前端)應該一律傳入`load_candidates_for_date()`回傳的候選清單
-    日期(不是None)，確保均線/SAR這些依`stock_prices`重新計算的篩選條件是「以候選清單
+    as_of_date：呼叫端(兩個前端)應該一律傳入`load_stock_universe_for_date()`回傳的候選
+    清單日期(不是None)，確保均線/SAR這些依`stock_prices`重新計算的篩選條件是「以候選清單
     正在瀏覽的那一天為準」，不是「以DB目前實際累積到哪一天為準」。⚠️ 2026-08-01發現：
     沒有這個參數時，瀏覽過去日期的候選清單(DB隨每日排程持續往後累積資料後)會混入該日期
     之後才發生的價格變化，SAR這種路徑相關指標尤其明顯——同一天的翻轉判斷會因為多算了
     之後幾天的資料，被誤判成「已經是幾天前翻轉的」而被「N天內翻轉」篩選條件排除掉。見
     `_fetch_recent_columns_batched`的詳細說明。
+
+    回傳結果裡，靠均線/SAR條件篩出來、但當天沒有觸發任何朱家泓規則(signal_name原本是
+    None)的股票，「訊號」欄位會補上「符合條件本身」的描述文字(例如「均線多頭排列
+    （MA5>MA10>MA20）」)，不是留空——使用者要求這樣才知道這檔股票是「為什麼」出現在
+    清單裡，不是無中生有；已經有真正規則訊號的股票維持原樣，不會被覆蓋。
     """
     if candidates_df.empty:
         return candidates_df
     if not active_filter_labels and sar_flip_option is None and not zhu_rule_only:
         return candidates_df
-    stock_ids = candidates_df["stock_id"].tolist()
     mask = pd.Series(True, index=candidates_df.index)
+    matched_condition_labels: list[str] = []
+
+    # ⚠️ 2026-08-02效能修正：候選清單基礎池改成全市場(~2000+檔)後，均線/SAR這類要重新
+    # 查stock_prices、逐檔算指標的條件如果無條件對candidates_df裡「當下的全部stock_id」
+    # 算一次，即使最後zhu_rule_only會篩掉九成結果，還是得先付出對全市場算一次的成本
+    # ——SAR尤其明顯(逐日累積、沒辦法簡單向量化)，實測連預設(勾朱家泓技術分析、等同
+    # 舊版「候選清單=已觸發規則的股票」)都要30幾秒，比改版前(只在小的daily_candidates
+    # 池子裡算)慢了一個數量級。改成zhu_rule_only(純欄位比對，不查DB、幾乎零成本)優先
+    # 套用、把stock_ids先縮小，後面才把縮小後的stock_ids交給真正花錢的CANDIDATE_FILTERS/
+    # compute_sar_flip_flags計算——最後篩出的結果集合不變(AND滿足交換律)，只是運算量
+    # 大幅減少。不勾朱家泓技術分析(全市場掃描)時沒有這個提前縮小的機會，那種情境本來就
+    # 是使用者主動要求對全市場算，需要花比較久時間是預期中的代價。
+    if zhu_rule_only:
+        mask &= candidates_df["signal_name"].notna()
+
+    stock_ids = candidates_df.loc[mask, "stock_id"].tolist()
     for label in active_filter_labels or []:
         flags = CANDIDATE_FILTERS[label](conn, stock_ids, as_of_date)
         mask &= candidates_df["stock_id"].map(flags).fillna(False)
+        matched_condition_labels.append(label)
+        stock_ids = candidates_df.loc[mask, "stock_id"].tolist()
     if sar_flip_option is not None:
+        direction = sar_flip_option.get("direction", "多頭")
+        within_days = sar_flip_option.get("within_days", 1)
         flags = compute_sar_flip_flags(
-            conn, stock_ids,
-            direction=sar_flip_option.get("direction", "多頭"),
-            within_days=sar_flip_option.get("within_days", 1),
-            as_of_date=as_of_date,
+            conn, stock_ids, direction=direction, within_days=within_days, as_of_date=as_of_date,
         )
         mask &= candidates_df["stock_id"].map(flags).fillna(False)
-    if zhu_rule_only:
-        mask &= candidates_df["signal_name"].map(_signal_matches_zhu_rulebook)
-    return candidates_df[mask].reset_index(drop=True)
+        matched_condition_labels.append(f"SAR翻轉（{direction}，{within_days}天內）")
+
+    result = candidates_df[mask].reset_index(drop=True)
+    if matched_condition_labels and "signal_name" in result.columns:
+        blank_signal = result["signal_name"].isna()
+        if blank_signal.any():
+            result.loc[blank_signal, "signal_name"] = "\n".join(matched_condition_labels)
+    return result
 
 
 def list_candidate_dates(conn) -> list[str]:
@@ -313,9 +329,22 @@ def get_latest_candidate_update_time(conn) -> str | None:
     return row[0] if row is not None else None
 
 
-def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.DataFrame, str | None, bool]:
-    """回傳 (指定日期的候選清單DataFrame, 該日期字串, is_intraday)；target_date為None時
-    取最新一天。尚無任何紀錄(或指定日期查無資料)時回傳(空DataFrame, 對應日期字串或None, False)。
+def load_stock_universe_for_date(conn, target_date: str | None = None) -> tuple[pd.DataFrame, str | None, bool]:
+    """回傳 (指定日期「全市場」股票的DataFrame, 該日期字串, is_intraday)；target_date為
+    None時取daily_candidates裡最新一天。尚無任何daily_candidates紀錄、或指定日期當天
+    查無任何股票價格資料時回傳(空DataFrame, 對應日期字串或None, False)。
+
+    2026-08-02使用者釐清語意後改版(舊名`load_candidates_for_date`)：候選清單的篩選
+    列(「篩選條件」的均線多排、「篩選方法」的SAR翻轉／朱家泓技術分析)彼此是獨立的AND
+    條件，不是「候選清單一開始就限定在daily_candidates(已經觸發某條朱家泓規則的股票)
+    範圍內」——使用者要求勾MA5>MA10>MA20+SAR、但不勾朱家泓技術分析時，等同對全市場做
+    「均線多排+SAR翻轉」掃描，不受「當天有沒有觸發朱家泓規則」限制；只有勾選朱家泓
+    技術分析才會額外要求「當天有出現在daily_candidates」(見`apply_candidate_filters`)。
+    因此這裡改成以`stocks`(排除market='INDEX'的大盤)為主表，用INNER JOIN當天的
+    `stock_prices`(當天沒有價格資料的股票，MA/SAR/漲跌幅本來就無從算起，直接排除，不是
+    LEFT JOIN留著全部NaN)，再合併當天`daily_candidates`裡「這檔股票有沒有觸發規則、
+    觸發了哪些」的資訊(沒觸發的股票signal_name/entry_price/stop_loss是None，由
+    `apply_candidate_filters`視情況補上「符合條件本身」的描述文字)。
 
     is_intraday：這天的資料是否來自yfinance盤中即時價備援(True)而非TWSE官方最終收盤價
     (False)，讀daily_data_status表(見schema.sql與scripts/daily_pipeline.py的
@@ -323,14 +352,14 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
     特別標示。呼叫端(兩個前端)依此顯示「尚未收盤」提示，讓使用者知道這天的訊號可能還會
     隨收盤價格微調而改變。
 
-    同一檔股票如果同時符合多條規則(daily_candidates裡有多筆同stock_id、不同signal_name
-    的紀錄，例如同時觸發R-TREND-14跟R-SCREEN-15)，這裡會合併成一列顯示，不是一條規則
-    一列——signal_name欄位用「\n」換行字元分隔多條規則的內容(而不是逗號/頓號這類同一行內
-    的分隔符)，讓桌面版(desktop/main_window.py開了word wrap + resizeRowsToContents)
-    能在同一格內分成好幾行顯示，一條規則一行，比擠在同一行裡好讀。⚠️ Streamlit的
-    `st.dataframe`不支援儲存格內換行(實測\n會被吃成空白、HTML的<br>則會顯示成字面文字)，
-    這是該元件本身的限制；用\n分隔在那邊會退化成單行、規則之間用空白隔開，不是bug，是
-    目前Streamlit這個次要前端能接受的降級效果。
+    同一檔股票如果當天同時符合多條規則(daily_candidates裡有多筆同stock_id、不同
+    signal_name的紀錄，例如同時觸發R-TREND-14跟R-SCREEN-15)，這裡會合併成一列顯示，
+    不是一條規則一列——signal_name欄位用「\n」換行字元分隔多條規則的內容(而不是逗號/
+    頓號這類同一行內的分隔符)，讓桌面版(desktop/main_window.py開了word wrap +
+    resizeRowsToContents)能在同一格內分成好幾行顯示，一條規則一行，比擠在同一行裡好讀。
+    ⚠️ Streamlit的`st.dataframe`不支援儲存格內換行(實測\n會被吃成空白、HTML的<br>則會
+    顯示成字面文字)，這是該元件本身的限制；用\n分隔在那邊會退化成單行、規則之間用空白
+    隔開，不是bug，是目前Streamlit這個次要前端能接受的降級效果。
     entry_price/stop_loss取合併前第一筆的值：目前已接上的規則都是用同一天的收盤價/同一套
     停損公式(bull_short_term_stop_loss)，理論上同一檔股票不管觸發幾條規則，算出來的值
     本來就會相同；之後如果加入用不同公式的規則導致同一天算出不同的進場價/停損價，這裡
@@ -350,19 +379,28 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
     status_row = conn.execute("SELECT is_intraday FROM daily_data_status WHERE date = ?", (target_date,)).fetchone()
     is_intraday = bool(status_row[0]) if status_row is not None else False
 
+    candidate_rows = conn.execute(
+        "SELECT stock_id, signal_name, entry_price, stop_loss FROM daily_candidates WHERE date = ? ORDER BY stock_id, created_at",
+        (target_date,),
+    ).fetchall()
+    candidates_by_stock: dict[str, dict] = {}
+    for stock_id, signal_name, entry_price, stop_loss in candidate_rows:
+        entry = candidates_by_stock.setdefault(
+            stock_id, {"signal_names": [], "entry_price": entry_price, "stop_loss": stop_loss}
+        )
+        entry["signal_names"].append(signal_name)
+
     cur = conn.execute(
         """
-        SELECT dc.stock_id, s.name, s.industry, dc.signal_name, dc.entry_price, dc.stop_loss,
-               sp.close AS today_close, sp.volume AS today_volume,
+        SELECT s.stock_id, s.name, s.industry, sp.close AS today_close, sp.volume AS today_volume,
                (SELECT sp2.close FROM stock_prices sp2
-                WHERE sp2.stock_id = dc.stock_id AND sp2.date < dc.date
+                WHERE sp2.stock_id = s.stock_id AND sp2.date < ?
                 ORDER BY sp2.date DESC LIMIT 1) AS prev_close
-        FROM daily_candidates dc
-        LEFT JOIN stocks s ON dc.stock_id = s.stock_id
-        LEFT JOIN stock_prices sp ON sp.stock_id = dc.stock_id AND sp.date = dc.date
-        WHERE dc.date = ? ORDER BY dc.stock_id, dc.created_at
+        FROM stocks s
+        JOIN stock_prices sp ON sp.stock_id = s.stock_id AND sp.date = ?
+        WHERE s.market != 'INDEX'
         """,
-        (target_date,),
+        (target_date, target_date),
     )
     columns = [d[0] for d in cur.description]
     raw_df = pd.DataFrame(cur.fetchall(), columns=columns)
@@ -371,32 +409,34 @@ def load_candidates_for_date(conn, target_date: str | None = None) -> tuple[pd.D
 
     raw_df["pct_change"] = (raw_df["today_close"] - raw_df["prev_close"]) / raw_df["prev_close"] * 100
 
-    merged_rows = []
-    for stock_id, group in raw_df.groupby("stock_id", sort=False):
-        first = group.iloc[0]
-        signal_name = "\n".join(group["signal_name"])
-        merged_rows.append({
+    rows = []
+    for _, row in raw_df.iterrows():
+        stock_id = row["stock_id"]
+        cand = candidates_by_stock.get(stock_id)
+        signal_name = "\n".join(cand["signal_names"]) if cand else None
+        rows.append({
             "stock_id": stock_id,
-            "name": first["name"],
-            "industry": first["industry"],
+            "name": row["name"],
+            "industry": row["industry"],
             "signal_name": signal_name,
-            "entry_price": first["entry_price"],
-            "stop_loss": first["stop_loss"],
-            "pct_change": first["pct_change"],
-            "volume": first["today_volume"],
+            "entry_price": cand["entry_price"] if cand else None,
+            "stop_loss": cand["stop_loss"] if cand else None,
+            "pct_change": row["pct_change"],
+            "volume": row["today_volume"],
             # 排序用：這檔股票當天符合的所有規則信心分數加總，觸發越多條規則、信心分數
             # 越高的股票排越前面——不是最終顯示欄位，排序完就丟棄，不影響回傳的欄位結構。
-            "_confidence_sum": sum(int(m) for m in _CONFIDENCE_PATTERN.findall(signal_name)),
+            # 沒有觸發任何規則(全市場掃描補進來)的股票signal_name是None，加總視為0。
+            "_confidence_sum": sum(int(m) for m in _CONFIDENCE_PATTERN.findall(signal_name)) if signal_name else 0,
         })
-    merged_df = pd.DataFrame(
-        merged_rows,
+    universe_df = pd.DataFrame(
+        rows,
         columns=["stock_id", "name", "industry", "signal_name", "entry_price", "stop_loss", "pct_change", "volume", "_confidence_sum"],
     )
     # 預設排序：信心分數加總由高到低；同分時退回股票代號排序，確保結果穩定、可重現。
-    merged_df = merged_df.sort_values(
+    universe_df = universe_df.sort_values(
         ["_confidence_sum", "stock_id"], ascending=[False, True]
     ).drop(columns="_confidence_sum").reset_index(drop=True)
-    return merged_df, target_date, is_intraday
+    return universe_df, target_date, is_intraday
 
 
 def resolve_stock_id(conn, query: str) -> str | None:

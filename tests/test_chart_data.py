@@ -11,9 +11,9 @@ from src.presentation.chart_data import (
     get_latest_update_time,
     get_stock_name,
     list_candidate_dates,
-    load_candidates_for_date,
     load_holidays_for_chart,
     load_price_history,
+    load_stock_universe_for_date,
     resolve_stock_id,
 )
 
@@ -22,23 +22,29 @@ def _fresh_conn():
     return init_db(":memory:")
 
 
-def test_load_candidates_for_date_returns_empty_when_no_records():
+def test_load_stock_universe_for_date_returns_empty_when_no_records():
     conn = _fresh_conn()
-    df, latest_date, is_intraday = load_candidates_for_date(conn)
+    df, latest_date, is_intraday = load_stock_universe_for_date(conn)
     assert df.empty
     assert latest_date is None
     assert is_intraday is False
 
 
-def test_load_candidates_for_date_defaults_to_most_recent_date():
+def test_load_stock_universe_for_date_defaults_to_most_recent_date():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體", "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-21", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-21", "stock_id": "2330", "signal_name": "舊訊號", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-21T18:00:00"},
         {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": "測試", "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, latest_date, is_intraday = load_candidates_for_date(conn)
+    df, latest_date, is_intraday = load_stock_universe_for_date(conn)
     assert latest_date == "2026-07-22"
     assert len(df) == 1
     assert df.iloc[0]["stock_id"] == "2330"
@@ -46,6 +52,83 @@ def test_load_candidates_for_date_defaults_to_most_recent_date():
     assert df.iloc[0]["industry"] == "半導體"
     assert df.iloc[0]["signal_name"] == "R-TREND-14多頭短線進場"
     assert is_intraday is False  # 沒有daily_data_status紀錄時預設視為已收盤
+
+
+def test_load_stock_universe_for_date_includes_stocks_without_any_triggered_rule():
+    """2026-08-02改版：候選清單的基礎池不再只有daily_candidates(已觸發某條朱家泓規則的
+    股票)，而是當天有股價資料的全市場股票——沒有觸發任何規則的股票也應該出現在這裡，
+    signal_name/entry_price/stop_loss是None，由apply_candidate_filters()視篩選條件
+    決定要不要保留、要不要補上描述文字。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "1101", "date": "2026-07-22", "open": 50.0, "high": 51.0, "low": 49.0, "close": 50.0,
+         "volume": 2000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    df, _, _ = load_stock_universe_for_date(conn)
+
+    assert set(df["stock_id"]) == {"2330", "1101"}  # 1101沒觸發任何規則，但仍出現在全市場清單裡
+    row_1101 = df[df["stock_id"] == "1101"].iloc[0]
+    assert pd.isna(row_1101["signal_name"])
+    assert pd.isna(row_1101["entry_price"])
+    assert pd.isna(row_1101["stop_loss"])
+
+
+def test_load_stock_universe_for_date_excludes_stocks_without_price_data_that_day():
+    """跟上一個測試相反的情境：股票存在於`stocks`表，但當天完全沒有股價資料(例如還沒
+    開始交易、或資料缺漏)——這種股票連漲跌幅/均線/SAR都無從算起，應該直接排除，不是
+    用NaN價格硬塞一列進候選清單。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "9999", "name": "尚未交易", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    df, _, _ = load_stock_universe_for_date(conn)
+
+    assert set(df["stock_id"]) == {"2330"}
+
+
+def test_load_stock_universe_for_date_excludes_taiex_index():
+    """大盤(market='INDEX')不是一檔可以交易的股票，不該出現在全市場掃描結果裡，跟
+    src.screener.daily_screener.load_trailing_frames()排除INDEX的邏輯一致。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "^TWII", "name": "台股加權指數", "market": "INDEX", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "^TWII", "date": "2026-07-22", "open": 20000.0, "high": 20100.0, "low": 19900.0, "close": 20050.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    df, _, _ = load_stock_universe_for_date(conn)
+
+    assert set(df["stock_id"]) == {"2330"}
 
 
 def test_get_latest_update_time_returns_none_when_no_stocks():
@@ -77,35 +160,50 @@ def test_get_latest_candidate_update_time_returns_max_created_at():
     assert get_latest_candidate_update_time(conn) == "2026-07-22T18:30:00"
 
 
-def test_load_candidates_for_date_returns_specific_historical_date_when_given():
+def test_load_stock_universe_for_date_returns_specific_historical_date_when_given():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-21", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-21", "stock_id": "2330", "signal_name": "舊訊號", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-21T18:00:00"},
         {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": "測試", "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, returned_date, _ = load_candidates_for_date(conn, target_date="2026-07-21")
+    df, returned_date, _ = load_stock_universe_for_date(conn, target_date="2026-07-21")
 
     assert returned_date == "2026-07-21"
     assert len(df) == 1
     assert df.iloc[0]["signal_name"] == "舊訊號"
 
 
-def test_load_candidates_for_date_returns_empty_but_echoes_date_when_no_candidates_that_day():
+def test_load_stock_universe_for_date_returns_empty_but_echoes_date_when_no_price_data_that_day():
+    """跟舊版(load_candidates_for_date)語意不同：基礎池改成全市場(見上面
+    test_load_stock_universe_for_date_includes_stocks_without_any_triggered_rule)，
+    「查無資料」現在代表「這天完全沒有任何股票的股價資料」，不是單純「沒有觸發規則」——
+    這裡刻意不幫2330補07-23的股價，驗證INNER JOIN stock_prices會讓這天的全市場清單
+    正確回傳空DataFrame，日期字串本身仍要回傳。"""
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-22", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, returned_date, _ = load_candidates_for_date(conn, target_date="2026-07-23")
+    df, returned_date, _ = load_stock_universe_for_date(conn, target_date="2026-07-23")
 
     assert df.empty
     assert returned_date == "2026-07-23"  # 使用者選的日期本身仍要回傳，不是None
 
 
-def test_load_candidates_for_date_merges_multiple_signals_for_same_stock_into_one_row():
+def test_load_stock_universe_for_date_merges_multiple_signals_for_same_stock_into_one_row():
     """同一檔股票同一天同時觸發多條規則時，應該合併成一列顯示，不是一條規則一列
     （這是2026-07-23接上R-SCREEN-11/15後才會出現的情境：同一檔股票可能同時符合
     R-TREND-14跟R-SCREEN-15）。"""
@@ -113,6 +211,12 @@ def test_load_candidates_for_date_merges_multiple_signals_for_same_stock_into_on
     upsert_stocks(conn, [
         {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
         {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-23", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "1101", "date": "2026-07-23", "open": 48.0, "high": 51.0, "low": 47.0, "close": 50.0,
+         "volume": 2000, "trading_money": None, "trading_turnover": None, "spread": None},
     ])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
@@ -123,7 +227,7 @@ def test_load_candidates_for_date_merges_multiple_signals_for_same_stock_into_on
          "entry_price": 50.0, "stop_loss": 45.0, "note": "多頭架構＋攻擊量", "created_at": "2026-07-23T18:00:02"},
     ])
 
-    df, latest_date, _ = load_candidates_for_date(conn)
+    df, latest_date, _ = load_stock_universe_for_date(conn)
 
     assert latest_date == "2026-07-23"
     assert len(df) == 2  # 2330合併成一列，1101單獨一列，總共2列不是3列
@@ -136,7 +240,7 @@ def test_load_candidates_for_date_merges_multiple_signals_for_same_stock_into_on
     assert row_1101["signal_name"] == "R-TREND-14多頭短線進場"  # 只觸發一條規則時，格式維持不變
 
 
-def test_load_candidates_for_date_sorts_by_total_confidence_descending():
+def test_load_stock_universe_for_date_sorts_by_total_confidence_descending():
     """預設排序改成「這檔股票當天符合的所有規則信心分數加總」由高到低，不是股票代號——
     使用者要優先看到最值得留意的候選股，不是隨機的代號順序。1101觸發2條規則(87+92=179)
     應該排在只觸發1條規則的2330(87)前面，即使股票代號2330數字比較小。"""
@@ -145,6 +249,14 @@ def test_load_candidates_for_date_sorts_by_total_confidence_descending():
         {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
         {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
         {"stock_id": "3008", "name": "大立光", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-23", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "1101", "date": "2026-07-23", "open": 48.0, "high": 51.0, "low": 47.0, "close": 50.0,
+         "volume": 2000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "3008", "date": "2026-07-23", "open": 1950.0, "high": 2050.0, "low": 1940.0, "close": 2000.0,
+         "volume": 500, "trading_money": None, "trading_turnover": None, "spread": None},
     ])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-CLASSIC-24突破大量黑K買進（87%）",
@@ -157,12 +269,12 @@ def test_load_candidates_for_date_sorts_by_total_confidence_descending():
          "entry_price": 2000.0, "stop_loss": 1900.0, "note": None, "created_at": "2026-07-23T18:00:03"},
     ])
 
-    df, _, _ = load_candidates_for_date(conn)
+    df, _, _ = load_stock_universe_for_date(conn)
 
     assert list(df["stock_id"]) == ["1101", "3008", "2330"]  # 179 > 88 > 87
 
 
-def test_load_candidates_for_date_computes_pct_change_and_volume_from_stock_prices():
+def test_load_stock_universe_for_date_computes_pct_change_and_volume_from_stock_prices():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     upsert_stock_prices(conn, [
@@ -176,14 +288,14 @@ def test_load_candidates_for_date_computes_pct_change_and_volume_from_stock_pric
          "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, _, _ = load_candidates_for_date(conn)
+    df, _, _ = load_stock_universe_for_date(conn)
 
     row = df.iloc[0]
     assert row["volume"] == 8000
     assert row["pct_change"] == 5.0  # (105-100)/100*100
 
 
-def test_load_candidates_for_date_pct_change_is_nan_when_no_prior_day_price():
+def test_load_stock_universe_for_date_pct_change_is_nan_when_no_prior_day_price():
     """新上市或本機資料庫還沒有前一個交易日資料時，漲跌幅算不出來，應該是NaN不是crash或0。"""
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
@@ -196,14 +308,18 @@ def test_load_candidates_for_date_pct_change_is_nan_when_no_prior_day_price():
          "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
     ])
 
-    df, _, _ = load_candidates_for_date(conn)
+    df, _, _ = load_stock_universe_for_date(conn)
 
     assert pd.isna(df.iloc[0]["pct_change"])
 
 
-def test_load_candidates_for_date_reports_intraday_true_when_status_flagged(monkeypatch):
+def test_load_stock_universe_for_date_reports_intraday_true_when_status_flagged(monkeypatch):
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-24"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-24", "open": 100.0, "high": 106.0, "low": 100.0, "close": 105.0,
+         "volume": 8000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-24", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
          "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-24T10:00:00"},
@@ -211,14 +327,18 @@ def test_load_candidates_for_date_reports_intraday_true_when_status_flagged(monk
     from src.data.storage import upsert_daily_data_status
     upsert_daily_data_status(conn, "2026-07-24", is_intraday=True)
 
-    _, _, is_intraday = load_candidates_for_date(conn, target_date="2026-07-24")
+    _, _, is_intraday = load_stock_universe_for_date(conn, target_date="2026-07-24")
 
     assert is_intraday is True
 
 
-def test_load_candidates_for_date_reports_intraday_false_when_status_flagged_final():
+def test_load_stock_universe_for_date_reports_intraday_false_when_status_flagged_final():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-23"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-23", "open": 100.0, "high": 106.0, "low": 100.0, "close": 105.0,
+         "volume": 8000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-23", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
          "entry_price": 105.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-23T18:00:00"},
@@ -226,7 +346,7 @@ def test_load_candidates_for_date_reports_intraday_false_when_status_flagged_fin
     from src.data.storage import upsert_daily_data_status
     upsert_daily_data_status(conn, "2026-07-23", is_intraday=False)
 
-    _, _, is_intraday = load_candidates_for_date(conn, target_date="2026-07-23")
+    _, _, is_intraday = load_stock_universe_for_date(conn, target_date="2026-07-23")
 
     assert is_intraday is False
 
@@ -508,22 +628,14 @@ def test_apply_candidate_filters_keeps_only_stocks_matching_ma_bullish(monkeypat
     assert list(result["stock_id"]) == ["2330", "2603"]
 
 
-def test_signal_matches_zhu_rulebook_true_for_known_rule_id():
-    assert chart_data._signal_matches_zhu_rulebook("R-TREND-14多頭短線進場（92%）") is True
-
-
-def test_signal_matches_zhu_rulebook_false_for_unknown_rule_id():
-    assert chart_data._signal_matches_zhu_rulebook("R-NOT-A-REAL-RULE（92%）") is False
-    assert chart_data._signal_matches_zhu_rulebook("") is False
-
-
-def test_apply_candidate_filters_zhu_rule_only_keeps_rows_matching_zhu_rulebook():
-    """2026-08-01新增「朱家泓技術分析」勾選框：目前候選清單全部來自朱家泓的書，勾選這個
-    篩選框暫時不該篩掉任何真正的朱家泓規則候選股，只有signal_name完全不含已知Rule ID的
-    才會被篩掉(見_signal_matches_zhu_rulebook())。"""
+def test_apply_candidate_filters_zhu_rule_only_keeps_rows_with_a_signal_name():
+    """2026-08-02改版：「朱家泓技術分析」勾選框不再對signal_name字串做Rule ID比對(候選
+    清單改成全市場基礎池後，那個規則ID正規表示式比對法已經沒有意義)，改成單純檢查
+    signal_name是否非空——非空代表這檔股票當天確實出現在daily_candidates(觸發過某條
+    朱家泓規則)，None代表是靠均線/SAR全市場掃描補進來、當天沒有觸發任何規則的股票。"""
     df = pd.DataFrame({
         "stock_id": ["2330", "9999"],
-        "signal_name": ["R-TREND-14多頭短線進場（92%）", "R-NOT-A-REAL-RULE（92%）"],
+        "signal_name": ["R-TREND-14多頭短線進場（92%）", None],
     })
 
     result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=[], zhu_rule_only=True)
@@ -534,12 +646,75 @@ def test_apply_candidate_filters_zhu_rule_only_keeps_rows_matching_zhu_rulebook(
 def test_apply_candidate_filters_unfiltered_when_zhu_rule_only_false():
     df = pd.DataFrame({
         "stock_id": ["2330", "9999"],
-        "signal_name": ["R-TREND-14多頭短線進場（92%）", "R-NOT-A-REAL-RULE（92%）"],
+        "signal_name": ["R-TREND-14多頭短線進場（92%）", None],
     })
 
     result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=[], zhu_rule_only=False)
 
     assert list(result["stock_id"]) == ["2330", "9999"]
+
+
+def test_apply_candidate_filters_backfills_signal_name_with_matched_condition_when_missing(monkeypatch):
+    """全市場掃描時，若某檔股票是靠MA/SAR條件篩出來、但當天沒有觸發任何朱家泓規則
+    (signal_name原本是None)，使用者要求「訊號」欄要顯示條件本身，不是留空——已經有
+    真正規則訊號的股票(9527)則維持原樣，不會被覆蓋。"""
+    df = pd.DataFrame({
+        "stock_id": ["2330", "9527"],
+        "signal_name": [None, "R-TREND-14多頭短線進場（92%）"],
+    })
+    monkeypatch.setitem(
+        chart_data.CANDIDATE_FILTERS, "均線多頭排列（MA5>MA10>MA20）",
+        lambda conn, stock_ids, as_of_date: {"2330": True, "9527": True},
+    )
+
+    result = apply_candidate_filters(
+        conn=None, candidates_df=df, active_filter_labels=["均線多頭排列（MA5>MA10>MA20）"],
+    )
+
+    row_2330 = result[result["stock_id"] == "2330"].iloc[0]
+    assert row_2330["signal_name"] == "均線多頭排列（MA5>MA10>MA20）"
+    row_9527 = result[result["stock_id"] == "9527"].iloc[0]
+    assert row_9527["signal_name"] == "R-TREND-14多頭短線進場（92%）"  # 已有真訊號，不覆蓋
+
+
+def test_apply_candidate_filters_full_market_scan_includes_stocks_without_zhu_signal(monkeypatch):
+    """使用者2026-08-02釐清的語意：勾MA5>MA10>MA20+SAR、但不勾朱家泓技術分析，應該等同
+    對全市場做「均線多排+SAR翻轉」掃描，不受「當天有沒有觸發朱家泓規則」限制——即使
+    stock_id完全沒有出現在daily_candidates(signal_name是None)，只要符合勾選的方法
+    條件就要留在結果裡。"""
+    df = pd.DataFrame({
+        "stock_id": ["2330", "1101"],
+        "signal_name": [None, None],  # 兩檔都沒觸發任何朱家泓規則
+    })
+    monkeypatch.setitem(
+        chart_data.CANDIDATE_FILTERS, "均線多頭排列（MA5>MA10>MA20）",
+        lambda conn, stock_ids, as_of_date: {"2330": True, "1101": False},
+    )
+
+    result = apply_candidate_filters(
+        conn=None, candidates_df=df, active_filter_labels=["均線多頭排列（MA5>MA10>MA20）"], zhu_rule_only=False,
+    )
+
+    assert list(result["stock_id"]) == ["2330"]
+
+
+def test_apply_candidate_filters_zhu_rule_only_narrows_full_market_scan_further(monkeypatch):
+    """勾MA5>MA10>MA20+朱家泓技術分析：在均線條件的基礎上，再要求當天有出現在
+    daily_candidates——兩個2330都符合均線條件，但只有真正有signal_name的那檔會留下來。"""
+    df = pd.DataFrame({
+        "stock_id": ["2330", "1101"],
+        "signal_name": ["R-TREND-14多頭短線進場（92%）", None],
+    })
+    monkeypatch.setitem(
+        chart_data.CANDIDATE_FILTERS, "均線多頭排列（MA5>MA10>MA20）",
+        lambda conn, stock_ids, as_of_date: {"2330": True, "1101": True},
+    )
+
+    result = apply_candidate_filters(
+        conn=None, candidates_df=df, active_filter_labels=["均線多頭排列（MA5>MA10>MA20）"], zhu_rule_only=True,
+    )
+
+    assert list(result["stock_id"]) == ["2330"]
 
 
 def test_twse_tick_size_matches_official_price_tiers():

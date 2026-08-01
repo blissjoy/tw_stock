@@ -204,9 +204,12 @@ class MainWindow(QMainWindow):
         filter_bar.addStretch()
         root_layout.addLayout(filter_bar)
 
-        # 「篩選方法：」這一列跟上面「篩選條件：」分開放——SAR翻轉/朱家泓技術分析是「訊號
-        # 從哪裡/用什麼方法判斷出來的」，跟上面均線多頭排列這種「候選股本身要滿足的條件」
-        # 概念上不同，使用者要求分開一列，視覺上也比較不擁擠。
+        # 「篩選方法：」這一列跟上面「篩選條件：」分開放，視覺上比較不擁擠。2026-08-02
+        # 使用者釐清語意：這裡跟上面的均線多頭排列彼此是獨立的AND條件，候選清單的基礎池
+        # 一律是全市場(見chart_data.load_stock_universe_for_date())——只勾均線多排
+        # 但不勾朱家泓技術分析，等同對全市場做均線掃描，不受「當天有沒有觸發朱家泓規則」
+        # 限制；勾了朱家泓技術分析才會額外要求當天有出現在daily_candidates。詳見
+        # chart_data.apply_candidate_filters()的說明。
         method_bar = QHBoxLayout()
         method_bar.addWidget(QLabel("篩選方法："))
         # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
@@ -223,14 +226,16 @@ class MainWindow(QMainWindow):
         self.sar_flip_days_spin.setSuffix(" 天內翻轉")
         method_bar.addWidget(self.sar_flip_days_spin)
 
-        # 「朱家泓技術分析」勾選框：2026-08-01新增，目前是標示用——候選清單目前100%來自
-        # 朱家泓的書(見chart_data._signal_matches_zhu_rulebook())，還沒有其他規則來源，
-        # 勾選/不勾選這裡暫時不會改變候選清單內容，等籌碼分析(陳家豐)規則接上候選清單
-        # 產生流程後才會真正篩出差異。預設勾選，跟現況(全部都是朱家泓規則)一致。
+        # 「朱家泓技術分析」勾選框：2026-08-01新增，2026-08-02改版跟其他「篩選方法」
+        # (SAR翻轉)一樣是獨立的AND條件，不是「候選清單本來就限定在這個範圍」的基礎池
+        # ——候選清單基礎池現在是全市場(見chart_data.load_stock_universe_for_date())，
+        # 勾選這裡才會額外要求「當天有出現在daily_candidates(觸發過某條朱家泓規則)」；
+        # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。預設勾選，維持
+        # 「候選清單=已觸發朱家泓規則的股票」這個原本的預設體驗。
         method_bar.addSpacing(20)
         self.zhu_rule_checkbox = QCheckBox("朱家泓技術分析")
         self.zhu_rule_checkbox.setChecked(True)
-        self.zhu_rule_checkbox.setToolTip("目前候選清單全部來自朱家泓的書，這裡暫為標示用；等籌碼分析規則接上後才會真正篩選")
+        self.zhu_rule_checkbox.setToolTip("勾選時只保留當天有觸發朱家泓規則的股票；取消勾選則不限制，均線/SAR等條件會對全市場掃描")
         method_bar.addWidget(self.zhu_rule_checkbox)
 
         method_bar.addSpacing(20)
@@ -290,7 +295,7 @@ class MainWindow(QMainWindow):
         self.candidates_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.candidates_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         # 同一檔股票符合多條規則時，訊號欄位的內容用「\n」分隔多行(見
-        # src/presentation/chart_data.py的load_candidates_for_date())；開word wrap
+        # src/presentation/chart_data.py的load_stock_universe_for_date())；開word wrap
         # 讓Qt正確把每個\n斷行顯示，而不是被裁掉或擠在一行，_reload_candidates()填完
         # 資料後還要呼叫resizeRowsToContents()讓列高跟著撐開，不然多行內容會被壓在
         # 原本單行的列高裡看不全。
@@ -543,7 +548,7 @@ class MainWindow(QMainWindow):
         if self.conn is None:
             return
         target_date = self.date_combo.currentText() or None
-        df, latest_date, is_intraday = chart_data.load_candidates_for_date(self.conn, target_date=target_date)
+        df, latest_date, is_intraday = chart_data.load_stock_universe_for_date(self.conn, target_date=target_date)
         active_filters = [label for label, cb in self.filter_checkboxes.items() if cb.isChecked()]
         sar_flip_option = None
         if self.sar_flip_checkbox.isChecked():
@@ -568,9 +573,14 @@ class MainWindow(QMainWindow):
             volume = row["volume"]
             volume_text = f"{int(volume):,}" if pd.notna(volume) else "-"
             industry_text = row["industry"] if pd.notna(row["industry"]) else ""
+            # entry_price/stop_loss：全市場掃描補進來、當天沒有觸發任何朱家泓規則的股票
+            # (見chart_data.load_stock_universe_for_date())沒有對應的進場價/停損價可用，
+            # 是None不是數字，格式化前要先判斷，否則.2f格式化None會直接crash。
+            entry_price_text = f"{row['entry_price']:.2f}" if pd.notna(row["entry_price"]) else "-"
+            stop_loss_text = f"{row['stop_loss']:.2f}" if pd.notna(row["stop_loss"]) else "-"
             values = [
                 row["stock_id"], row["name"], industry_text, row["signal_name"],
-                f"{row['entry_price']:.2f}", f"{row['stop_loss']:.2f}", pct_text, volume_text,
+                entry_price_text, stop_loss_text, pct_text, volume_text,
             ]
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
