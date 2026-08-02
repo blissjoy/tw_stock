@@ -69,6 +69,34 @@ def _format_month_day(date_str: str) -> str:
     return f"{d.month}月{d.day}日"
 
 
+class _NumericTableWidgetItem(QTableWidgetItem):
+    """支援依實際數值排序的QTableWidgetItem，取代候選清單表格點欄位標題排序時預設的
+    字串排序——字串排序會把"10.00"排在"9.00"前面(逐字元比較，'1'<'9')、"1,000"這種
+    千分位逗號跟"+2.83%"的正負號/百分比也都會被字面當成一般字元、算不出正確大小關係。
+    用在進場價/停損價/漲跌幅/成交量這幾個數字欄位；股票代號/名稱/產業別/訊號欄位維持
+    QTableWidgetItem預設的字串排序即可，不需要特別處理。
+    """
+
+    def __lt__(self, other: object) -> bool:
+        self_value = self._parse(self.text())
+        other_value = self._parse(other.text()) if isinstance(other, QTableWidgetItem) else None
+        if self_value is None:
+            return other_value is not None  # "-"(無資料)固定排最前面
+        if other_value is None:
+            return False
+        return self_value < other_value
+
+    @staticmethod
+    def _parse(text: str) -> float | None:
+        text = text.strip()
+        if text in ("", "-"):
+            return None
+        try:
+            return float(text.replace(",", "").replace("%", "").replace("+", ""))
+        except ValueError:
+            return None
+
+
 class PipelineWorker(QThread):
     """背景執行緒呼叫run_daily_pipeline()，避免手動抓取按鈕卡住UI主執行緒。
 
@@ -301,6 +329,11 @@ class MainWindow(QMainWindow):
         # 原本單行的列高裡看不全。
         self.candidates_table.setWordWrap(True)
         self.candidates_table.itemSelectionChanged.connect(self._on_candidate_selected)
+        # 點欄位標題可以排序(股票代號/名稱/產業別/訊號用預設字串排序；進場價/停損價/
+        # 漲跌幅/成交量用_NumericTableWidgetItem依實際數值排序，見該類別說明)。
+        # _reload_candidates()填資料前後會暫時關掉/重新打開，避免QTableWidget在
+        # 逐格setItem()的過程中就即時重新排序，導致資料填到錯的列。
+        self.candidates_table.setSortingEnabled(True)
         root_layout.addWidget(self.candidates_table, stretch=1)
 
     def _build_stock_detail_tab(self) -> None:
@@ -566,7 +599,12 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("台股每日選股（本機版）— 尚無候選清單")
             return
         self.setWindowTitle(f"台股每日選股（本機版）— {latest_date}，共{len(df)}檔")
+        # 填資料期間先關掉排序：QTableWidget在setSortingEnabled(True)時，每次setItem()
+        # 都會立刻重新排序一次，逐格填值的過程中列的位置會一直變動，導致同一列裡不同欄位
+        # 的資料被錯配到不同列。填完畢後再打開，使用者才能點欄位標題排序。
+        self.candidates_table.setSortingEnabled(False)
         self.candidates_table.setRowCount(len(df))
+        _NUMERIC_COLUMNS = {4, 5, 6, 7}  # 進場價/停損價/漲跌幅/成交量
         for row_idx, row in df.reset_index(drop=True).iterrows():
             pct_change = row["pct_change"]
             pct_text = f"{pct_change:+.2f}" if pd.notna(pct_change) else "-"
@@ -583,12 +621,14 @@ class MainWindow(QMainWindow):
                 entry_price_text, stop_loss_text, pct_text, volume_text,
             ]
             for col_idx, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
+                item_cls = _NumericTableWidgetItem if col_idx in _NUMERIC_COLUMNS else QTableWidgetItem
+                item = item_cls(str(value))
                 # 部分欄位內容常常比欄寬長、會被截斷看不到完整內容(尤其訊號欄位同時符合多條
                 # 規則時)；設定tooltip讓滑鼠移過去任一儲存格都能懸浮顯示完整文字，不用特別
                 # 放寬欄寬。
                 item.setToolTip(str(value))
                 self.candidates_table.setItem(row_idx, col_idx, item)
+        self.candidates_table.setSortingEnabled(True)
         self.candidates_table.resizeRowsToContents()  # 讓多行的訊號欄位撐開列高，完整顯示
 
     def _on_candidate_selected(self) -> None:
