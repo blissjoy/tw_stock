@@ -377,6 +377,24 @@ def list_candidate_dates(conn) -> list[str]:
     return [row[0] for row in cur.fetchall()]
 
 
+def list_price_dates(conn) -> list[str]:
+    """回傳stock_prices裡所有有紀錄的日期，由新到舊排序——跟list_candidate_dates()不同，
+    這裡不受daily_candidates(是否觸發過朱家泓規則)限制，供「產業輪動」分頁的日期選單
+    使用(產業輪動只要有股價資料就能算，不需要當天有觸發任何規則)。
+    """
+    cur = conn.execute("SELECT DISTINCT date FROM stock_prices ORDER BY date DESC")
+    return [row[0] for row in cur.fetchall()]
+
+
+def list_industries(conn) -> list[str]:
+    """回傳stocks表裡所有相異的產業別分類，由字串排序，供「選股」分頁的產業別篩選下拉
+    選單、「產業輪動」分頁使用。industry為NULL的股票不列入(篩選下拉選單只需要真正存在
+    的分類值)。
+    """
+    cur = conn.execute("SELECT DISTINCT industry FROM stocks WHERE industry IS NOT NULL ORDER BY industry")
+    return [row[0] for row in cur.fetchall()]
+
+
 def get_latest_update_time(conn) -> str | None:
     """回傳stocks表裡最新的updated_at時間戳(ISO8601字串)，代表DB目前最新一次成功寫入
     股價資料的時間——TWSE/TPEx兩條抓取路徑(scripts/daily_pipeline.py的fetch_today_twse/
@@ -399,10 +417,25 @@ def get_latest_candidate_update_time(conn) -> str | None:
     return row[0] if row is not None else None
 
 
-def load_stock_universe_for_date(conn, target_date: str | None = None) -> tuple[pd.DataFrame, str | None, bool]:
+def load_stock_universe_for_date(
+    conn, target_date: str | None = None, market: str | None = None,
+) -> tuple[pd.DataFrame, str | None, bool]:
     """回傳 (指定日期「全市場」股票的DataFrame, 該日期字串, is_intraday)；target_date為
     None時取daily_candidates裡最新一天。尚無任何daily_candidates紀錄、或指定日期當天
     查無任何股票價格資料時回傳(空DataFrame, 對應日期字串或None, False)。
+
+    market：可選的市場篩選("TWSE"/"TPEx")，None代表不限制(排除大盤本身即可)——
+    2026-08-02新增，供桌面版「選股」分頁的「市場：全部/上市/上櫃」篩選使用。
+
+    DataFrame欄位除了原本的stock_id/name/industry/signal_name/entry_price/stop_loss/
+    pct_change/volume，2026-08-02新增：
+    - close：當天收盤價。
+    - sar_value/sar_status/sar_distance_pct：SAR相關欄位，查`daily_indicators`表
+      (LEFT JOIN，還沒回補到這張表的股票這幾欄是None，不影響整列被排除)。sar_status
+      是"多頭"/"空頭"文字(對應sar_is_bull)；sar_distance_pct是SAR值與收盤價的百分比
+      距離`(sar_value - close) / close * 100`，數值越接近0代表股價越接近翻轉點，公式
+      沿用`ref-project/tw_stock_analyzer/src/core/stock_scanner.py`既有的「SAR距離%」
+      定義，不是這裡另外發明的指標。
 
     2026-08-02使用者釐清語意後改版(舊名`load_candidates_for_date`)：候選清單的篩選
     列(「篩選條件」的均線多排、「篩選方法」的SAR翻轉／朱家泓技術分析)彼此是獨立的AND
@@ -460,17 +493,23 @@ def load_stock_universe_for_date(conn, target_date: str | None = None) -> tuple[
         )
         entry["signal_names"].append(signal_name)
 
+    market_clause = " AND s.market = ?" if market else ""
+    params: list = [target_date, target_date]
+    if market:
+        params.append(market)
     cur = conn.execute(
-        """
+        f"""
         SELECT s.stock_id, s.name, s.industry, sp.close AS today_close, sp.volume AS today_volume,
                (SELECT sp2.close FROM stock_prices sp2
                 WHERE sp2.stock_id = s.stock_id AND sp2.date < ?
-                ORDER BY sp2.date DESC LIMIT 1) AS prev_close
+                ORDER BY sp2.date DESC LIMIT 1) AS prev_close,
+               di.sar_value AS sar_value, di.sar_is_bull AS sar_is_bull
         FROM stocks s
         JOIN stock_prices sp ON sp.stock_id = s.stock_id AND sp.date = ?
-        WHERE s.market != 'INDEX'
+        LEFT JOIN daily_indicators di ON di.stock_id = s.stock_id AND di.date = sp.date
+        WHERE s.market != 'INDEX'{market_clause}
         """,
-        (target_date, target_date),
+        params,
     )
     columns = [d[0] for d in cur.description]
     raw_df = pd.DataFrame(cur.fetchall(), columns=columns)
@@ -484,15 +523,28 @@ def load_stock_universe_for_date(conn, target_date: str | None = None) -> tuple[
         stock_id = row["stock_id"]
         cand = candidates_by_stock.get(stock_id)
         signal_name = "\n".join(cand["signal_names"]) if cand else None
+        sar_value = row["sar_value"] if pd.notna(row["sar_value"]) else None
+        sar_is_bull = row["sar_is_bull"] if pd.notna(row["sar_is_bull"]) else None
+        sar_status = ("多頭" if sar_is_bull else "空頭") if sar_is_bull is not None else None
+        today_close = row["today_close"]
+        sar_distance_pct = (
+            (sar_value - today_close) / today_close * 100
+            if sar_value is not None and pd.notna(today_close) and today_close != 0
+            else None
+        )
         rows.append({
             "stock_id": stock_id,
             "name": row["name"],
             "industry": row["industry"],
             "signal_name": signal_name,
+            "close": today_close,
             "entry_price": cand["entry_price"] if cand else None,
             "stop_loss": cand["stop_loss"] if cand else None,
             "pct_change": row["pct_change"],
             "volume": row["today_volume"],
+            "sar_value": sar_value,
+            "sar_status": sar_status,
+            "sar_distance_pct": sar_distance_pct,
             # 排序用：這檔股票當天符合的所有規則信心分數加總，觸發越多條規則、信心分數
             # 越高的股票排越前面——不是最終顯示欄位，排序完就丟棄，不影響回傳的欄位結構。
             # 沒有觸發任何規則(全市場掃描補進來)的股票signal_name是None，加總視為0。
@@ -500,13 +552,66 @@ def load_stock_universe_for_date(conn, target_date: str | None = None) -> tuple[
         })
     universe_df = pd.DataFrame(
         rows,
-        columns=["stock_id", "name", "industry", "signal_name", "entry_price", "stop_loss", "pct_change", "volume", "_confidence_sum"],
+        columns=[
+            "stock_id", "name", "industry", "signal_name", "close", "entry_price", "stop_loss",
+            "pct_change", "volume", "sar_value", "sar_status", "sar_distance_pct", "_confidence_sum",
+        ],
     )
     # 預設排序：信心分數加總由高到低；同分時退回股票代號排序，確保結果穩定、可重現。
     universe_df = universe_df.sort_values(
         ["_confidence_sum", "stock_id"], ascending=[False, True]
     ).drop(columns="_confidence_sum").reset_index(drop=True)
     return universe_df, target_date, is_intraday
+
+
+def load_industry_rotation(conn, target_date: str | None = None) -> tuple[pd.DataFrame, str | None]:
+    """回傳(指定日期各產業別的成交量加總/平均漲跌幅/股票數DataFrame, 該日期字串)，供
+    「產業輪動」分頁使用——想看某一天資金比較集中往哪個產業移動，用成交量加總判斷資金
+    集中度、平均漲跌幅判斷該產業當天整體強弱。target_date為None時取stock_prices裡
+    最新一天(不是daily_candidates最新一天——產業輪動只要有股價資料就能算，跟當天有沒有
+    觸發朱家泓規則無關)。查無股價資料時回傳(空DataFrame, None)。
+
+    JOIN寫法沿用load_stock_universe_for_date()同一套(stocks INNER JOIN當天
+    stock_prices + 前一日收盤價的相關子查詢算漲跌幅)，差別是這裡最後依industry分組
+    加總，不是逐股列出。平均漲跌幅用簡單平均，不是市值加權——這個專案目前沒有市值資料。
+
+    ⚠️ 已知資料品質限制(這裡先如實呈現原始industry分組，不做正規化)：`stocks.industry`
+    裡有ETF/ETN/存託憑證/創新板股票等約8種非個股分類，以及少數同義產業因TWSE/TPEx
+    命名差異拆成兩個分類(例如「數位雲端」vs「數位雲端類」)，會讓「加總」的產業邊界
+    不夠精確，之後有需要再處理，不在這裡用不成熟的規則硬湊。
+    """
+    if target_date is None:
+        target_date = conn.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+        if target_date is None:
+            return pd.DataFrame(), None
+
+    cur = conn.execute(
+        """
+        SELECT s.industry AS industry, sp.volume AS volume,
+               (sp.close - (SELECT sp2.close FROM stock_prices sp2
+                             WHERE sp2.stock_id = s.stock_id AND sp2.date < ?
+                             ORDER BY sp2.date DESC LIMIT 1))
+               / (SELECT sp2.close FROM stock_prices sp2
+                  WHERE sp2.stock_id = s.stock_id AND sp2.date < ?
+                  ORDER BY sp2.date DESC LIMIT 1) * 100 AS pct_change
+        FROM stocks s
+        JOIN stock_prices sp ON sp.stock_id = s.stock_id AND sp.date = ?
+        WHERE s.market != 'INDEX' AND s.industry IS NOT NULL
+        """,
+        (target_date, target_date, target_date),
+    )
+    columns = [d[0] for d in cur.description]
+    raw_df = pd.DataFrame(cur.fetchall(), columns=columns)
+    if raw_df.empty:
+        return raw_df, target_date
+
+    rotation_df = raw_df.groupby("industry").agg(
+        total_volume=("volume", "sum"),
+        avg_pct_change=("pct_change", "mean"),
+        stock_count=("industry", "count"),
+    ).reset_index()
+    rotation_df = rotation_df.sort_values("total_volume", ascending=False).reset_index(drop=True)
+    return rotation_df, target_date
 
 
 def resolve_stock_id(conn, query: str) -> str | None:
@@ -628,9 +733,11 @@ def build_candlestick_figure(
     show_macd: bool = False, show_kd: bool = False, show_sar: bool = False,
 ):
     """把OHLC資料畫成K線圖(非線圖)+下方成交量子圖，可疊加均線/切線軌道線/支撐壓力/SAR點位，
-    並可選擇在最下方再疊加MACD/KD子圖。漲用紅、跌用黑，比照書中與規則庫(candles.py)一貫的
-    紅K/黑K命名慣例(台股K線圖傳統配色，紅漲黑跌，與美股常見的綠漲紅跌相反)；成交量長條比照
-    同一套配色，當天收紅用紅色、收黑用黑色。
+    並可選擇在最下方再疊加MACD/KD子圖。漲用紅，書中與規則庫(candles.py)裡「黑K」這個命名
+    是台股K線圖傳統的「陰線」術語(不是實際渲染顏色)；2026-08-02使用者要求把陰線的實際
+    渲染色從黑色改成跟MACD負值同一種綠色(#27ae60)，方便一眼分辨漲跌，避免跟成交量/K棒的黑
+    混在一起不容易分辨——「黑K」這個規則命名維持不變，只是圖表上這個概念改用綠色呈現。
+    成交量長條比照同一套配色，當天收紅用紅色、收黑(陰線)用綠色。
 
     holidays: 該資料範圍內的休市日期清單("YYYY-MM-DD")，連同週末一起設成x軸的
     rangebreaks，避免非交易日在圖上留白間斷(維持真正的日期型x軸，不是改用category型)。
@@ -646,8 +753,9 @@ def build_candlestick_figure(
     欄位不存在時(例如舊呼叫端傳入的df沒有這些欄位)直接跳過不畫，不會crash。
     show_sar: 是否在價格子圖疊加每根K棒的SAR點位(對應df裡由load_price_history()算好的
     SAR/SAR_BULL欄位，見src.indicators.parabolic_sar引用來源說明)，多頭(SAR在K棒下方)用
-    綠點、空頭(SAR在K棒上方)用紅點——這是SAR圖表的通用畫法慣例，跟本專案K棒本身「紅漲黑跌」
-    的配色是兩套獨立慣例，不會互相衝突混淆。欄位不存在時直接跳過不畫，不會crash。
+    綠點、空頭(SAR在K棒上方)用紅點——這是SAR圖表的通用畫法慣例，跟K棒本身「漲紅跌綠」的
+    配色是兩套獨立慣例(SAR的綠代表「多頭」、K棒的綠代表「收黑/陰線」，語意不同，只是剛好
+    都用了綠色，不是同一套規則)，不會互相衝突混淆。欄位不存在時直接跳過不畫，不會crash。
     """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -666,7 +774,7 @@ def build_candlestick_figure(
         x=df.index,
         open=df["open"], high=df["high"], low=df["low"], close=df["close"],
         increasing_line_color="#c0392b", increasing_fillcolor="#c0392b",
-        decreasing_line_color="#1a1a1a", decreasing_fillcolor="#1a1a1a",
+        decreasing_line_color="#27ae60", decreasing_fillcolor="#27ae60",
         name="", showlegend=False,
     ), row=1, col=1)
 
@@ -719,7 +827,7 @@ def build_candlestick_figure(
                 line=dict(color=color, dash="dot", width=1),
             ), row=1, col=1)
 
-    volume_colors = ["#c0392b" if c >= o else "#1a1a1a" for o, c in zip(df["open"], df["close"])]
+    volume_colors = ["#c0392b" if c >= o else "#27ae60" for o, c in zip(df["open"], df["close"])]
     fig.add_trace(go.Bar(x=df.index, y=df["volume"], marker_color=volume_colors, name="成交量", showlegend=False), row=2, col=1)
 
     # MACD/KD子圖各自右上角標示目前使用的參數(固定值，直接寫死跟load_price_history()
@@ -732,8 +840,9 @@ def build_candlestick_figure(
     annotations = list(fig.layout.annotations or ())
 
     if macd_row is not None and {"DIF", "MACD", "OSC"}.issubset(df.columns):
-        # OSC正值紅柱(多方動能)/負值綠柱(空方動能)是書中原文定義的顏色，跟K棒紅漲黑跌是
-        # 兩套獨立配色慣例，不要混用(見src/indicators/macd.py docstring)。
+        # OSC正值紅柱(多方動能)/負值綠柱(空方動能)是書中原文定義的顏色，跟K棒是兩套獨立
+        # 配色慣例(見src/indicators/macd.py docstring)——2026-08-02K棒陰線改成同一種
+        # 綠色(#27ae60)後兩者剛好用同一組色碼，純屬巧合，語意上仍是各自獨立判斷。
         osc_colors = ["#c0392b" if v >= 0 else "#27ae60" for v in df["OSC"].fillna(0)]
         fig.add_trace(go.Bar(x=df.index, y=df["OSC"], marker_color=osc_colors, name="OSC", showlegend=False), row=macd_row, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df["DIF"], mode="lines", name="DIF", line=dict(color="#e74c3c", width=1.2)), row=macd_row, col=1)

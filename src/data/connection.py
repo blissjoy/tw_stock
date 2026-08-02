@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-from src.data import storage, turso_client
+from src.data import portfolio_storage, storage, turso_client
 
 
 def get_default_connection(local_db_path: str | None = None):
@@ -27,3 +28,19 @@ def get_default_connection(local_db_path: str | None = None):
         # 拒絕跨thread共用同一個connection。
         return storage.init_db(local_db_path, check_same_thread=False)
     return turso_client.get_connection()
+
+
+def get_default_portfolio_connection(local_db_path: str | None = None):
+    """庫存清單／觀察清單專用連線，跟get_default_connection()回傳的主DB連線分開——
+    local_db_path未傳入時讀PORTFOLIO_DB_PATH環境變數，未設定時預設
+    `<專案根目錄>/data/portfolio.db`(desktop/main.py用os.environ.setdefault()
+    比照LOCAL_DB_PATH的寫法設定這個預設值)。
+
+    2026-08-02新增：這條連線永遠是本機sqlite，不像get_default_connection()那樣
+    有Turso分支——庫存/觀察清單是使用者個人資料，這次先不考慮多裝置雲端同步，
+    之後真的有需要再仿照主DB的Turso分支另外處理。
+    """
+    local_db_path = local_db_path or os.environ.get("PORTFOLIO_DB_PATH")
+    if not local_db_path:
+        local_db_path = str(Path(__file__).resolve().parent.parent.parent / "data" / "portfolio.db")
+    return portfolio_storage.init_portfolio_db(local_db_path, check_same_thread=False)

@@ -77,15 +77,17 @@ def test_render_chart_html_embeds_div_id_and_hover_js_hooks():
 
 
 def test_render_chart_html_embeds_y_axis_price_crosshair_js_hooks():
-    """仿TradingView：滑鼠十字線要在Y軸顯示游標對應的價格數值，見chart_render.py
-    2026-07-29新增的getPriceAtCursorY()+mousemove監聽。"""
+    """仿TradingView：滑鼠十字線要在Y軸顯示游標對應的數值，見chart_render.py
+    2026-07-29新增、2026-08-02廣義化成每個子圖都適用的getAxisValueAtCursorY()+
+    mousemove監聽(見axisValueBox，原本叫priceAxisBox/getPriceAtCursorY，只支援
+    價格子圖)。"""
     df = _sample_df()
     fig = chart_data.build_candlestick_figure(df)
 
     html = render_chart_html(fig, df)
 
-    assert "getPriceAtCursorY" in html
-    assert "priceAxisBox" in html
+    assert "getAxisValueAtCursorY" in html
+    assert "axisValueBox" in html
     assert "mousemove" in html
     assert "mouseleave" in html
 

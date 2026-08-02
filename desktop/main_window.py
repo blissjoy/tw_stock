@@ -11,26 +11,37 @@ chart_data.py`的圖表資料組裝、`src/patterns/chart_overlays.py`的切線/
 from __future__ import annotations
 
 import html
+import re
+import sqlite3
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -41,20 +52,31 @@ from PySide6.QtWidgets import (
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from desktop.chart_render import render_chart_html
-from src.data import storage
-from src.data.connection import get_default_connection
+from src.data import portfolio_storage, storage
+from src.data.connection import get_default_connection, get_default_portfolio_connection
 from src.data.yfinance_client import TAIEX_STOCK_ID
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
-from src.presentation import chart_data, pipeline_status
+from src.presentation import chart_data, pipeline_status, portfolio_data
 from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
 TAIEX_DISPLAY_NAME = "台股加權指數"
 
-# 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股清單。
+# 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股清單/產業輪動/庫存清單/觀察清單。
 TAB_MARKET = 0
 TAB_SCREENER = 1
 TAB_STOCK_DETAIL = 2
+TAB_INDUSTRY_ROTATION = 3
+TAB_INVENTORY = 4
+TAB_WATCHLIST = 5
+
+# 「選股」分頁「市場：」下拉選單顯示文字對應chart_data.load_stock_universe_for_date()
+# 的market參數值；"全部"不在這裡，get()查不到就是None(不限制)。
+_MARKET_FILTER_VALUES = {"上市": "TWSE", "上櫃": "TPEx"}
+
+# 庫存清單／觀察清單表格共用的欄位結構(見_populate_portfolio_table())：
+# 股票代號/名稱/現價/漲跌幅(%)/成本價/持股數/市值/帳面損益/報酬率(%)/SAR狀態/SAR距離%/備註
+_PORTFOLIO_NUMERIC_COLUMNS = {2, 3, 4, 5, 6, 7, 8, 10}
 
 
 def _format_month_day(date_str: str) -> str:
@@ -67,6 +89,27 @@ def _format_month_day(date_str: str) -> str:
     except ValueError:
         return date_str
     return f"{d.month}月{d.day}日"
+
+
+def _normalize_date_text(text: str) -> str:
+    """把使用者輸入的日期文字盡量轉成"YYYY-MM-DD"——2026-08-02新增，供
+    _StockEditDialog的「買入日期」欄位在離開焦點時自動轉格式，使用者不用自己
+    手動打分隔符號。做法是先去掉所有非數字字元，只要剩下的數字恰好是8碼(不論
+    原本是"20260802"、"2026/08/02"、"2026.08.02"哪種輸入方式，去掉分隔符號後
+    都是同樣8碼數字)，就照"YYYYMMDD"解析回"YYYY-MM-DD"；解析失敗(不是8碼、
+    或不是合法日期，例如月份13)原樣放回，不阻擋輸入——這個專案對輸入格式一律
+    採「盡量幫忙轉，轉不了就放過」的寬鬆原則。
+    """
+    text = text.strip()
+    if not text:
+        return text
+    digits_only = re.sub(r"\D", "", text)
+    if len(digits_only) != 8:
+        return text
+    try:
+        return datetime.strptime(digits_only, "%Y%m%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return text
 
 
 class _NumericTableWidgetItem(QTableWidgetItem):
@@ -95,6 +138,235 @@ class _NumericTableWidgetItem(QTableWidgetItem):
             return float(text.replace(",", "").replace("%", "").replace("+", ""))
         except ValueError:
             return None
+
+
+class _AutoHeightTabWidget(QTabWidget):
+    """QTabWidget預設的sizeHint()/minimumSizeHint()不會只反映『目前顯示中』那一頁的
+    高度，包在QScrollArea(setWidgetResizable=True)裡時，捲軸範圍抓不到正確的內容高度
+    ——跟過去QSplitter不轉發子元件sizeHint變化是同一類問題(2026-07-29修正大盤分析截斷
+    bug時發現的)。這裡覆寫成只回報目前分頁的高度，並在currentChanged時呼叫
+    updateGeometry()通知外層layout重新查詢，是Qt對這個已知限制的標準workaround
+    (只用到QWidget.sizeHint()/updateGeometry()這些公開API，不依賴任何內部屬性)。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.currentChanged.connect(lambda _: self.updateGeometry())
+
+    def sizeHint(self) -> QSize:
+        return self._current_size(super().sizeHint(), "sizeHint")
+
+    def minimumSizeHint(self) -> QSize:
+        return self._current_size(super().minimumSizeHint(), "minimumSizeHint")
+
+    def _current_size(self, base: QSize, method_name: str) -> QSize:
+        current = self.currentWidget()
+        if current is None:
+            return base
+        extra = self.tabBar().sizeHint().height() + 8
+        page_height = getattr(current, method_name)().height()
+        return QSize(base.width(), page_height + extra)
+
+
+class _CheckableComboBox(QComboBox):
+    """支援複選(打勾)的QComboBox，用法類似Excel欄位篩選——點下拉選單裡任一項目只是
+    切換打勾狀態，選單不會因此關閉，可以連續勾選多個項目再一次收合。第一項固定是
+    `ALL_LABEL`("全部")，跟其他項目互斥：勾選"全部"會自動取消其他所有項目；勾選任何
+    其他項目會自動取消"全部"。使用者把最後一個具體項目取消勾選、變成完全沒有勾選時，
+    自動退回勾選"全部"，避免「什麼都沒勾」被誤解成「篩出0筆」的空結果狀態。
+    """
+
+    ALL_LABEL = "全部"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setModel(QStandardItemModel(self))
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.view().pressed.connect(self._on_item_pressed)
+
+    def hidePopup(self) -> None:
+        # 攔截QComboBox內建「點了任一項目就收合下拉選單」的預設行為，讓使用者能連續
+        # 勾選多個項目不用重複點開；選單本身仍是獨立的popup視窗，點擊選單以外的地方
+        # 還是會透過視窗系統自己的失焦機制關閉，不受這裡覆寫影響。
+        pass
+
+    def set_items(self, items: list[str]) -> None:
+        self.model().clear()
+        all_item = QStandardItem(self.ALL_LABEL)
+        all_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+        all_item.setData(Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
+        self.model().appendRow(all_item)
+        for text in items:
+            item = QStandardItem(text)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+            self.model().appendRow(item)
+        self._refresh_display_text()
+
+    def checked_items(self) -> list[str]:
+        """回傳目前勾選的具體項目清單(不含"全部")；勾選"全部"或什麼都沒勾時回傳空list，
+        代表「不限制」，呼叫端看到空list就不用套用這個篩選條件。"""
+        items = []
+        for row in range(1, self.model().rowCount()):
+            item = self.model().item(row)
+            if item.checkState() == Qt.CheckState.Checked:
+                items.append(item.text())
+        return items
+
+    def _on_item_pressed(self, index) -> None:
+        item = self.model().itemFromIndex(index)
+        new_state = (
+            Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked
+            else Qt.CheckState.Checked
+        )
+        item.setCheckState(new_state)
+        if item.text() == self.ALL_LABEL:
+            if new_state == Qt.CheckState.Checked:
+                for row in range(1, self.model().rowCount()):
+                    self.model().item(row).setCheckState(Qt.CheckState.Unchecked)
+        elif new_state == Qt.CheckState.Checked:
+            self.model().item(0).setCheckState(Qt.CheckState.Unchecked)
+        elif not self.checked_items():
+            self.model().item(0).setCheckState(Qt.CheckState.Checked)
+        self._refresh_display_text()
+
+    def _refresh_display_text(self) -> None:
+        selected = self.checked_items()
+        if not selected:
+            text = self.ALL_LABEL
+        elif len(selected) == 1:
+            text = selected[0]
+        else:
+            text = f"已選{len(selected)}項：" + "、".join(selected)
+        self.lineEdit().setText(text)
+
+
+class _StockEditDialog(QDialog):
+    """庫存清單／觀察清單共用的新增/編輯對話框：股票代號＋(買入日期)＋成本價＋
+    持股數＋備註。2026-08-02新增(移植ref-project的inventory_list.py/
+    watchlist.py，兩者的編輯dialog欄位結構幾乎相同，這裡合併成一個共用class)。
+
+    股票代號欄位離開焦點時用chart_data.resolve_stock_id()即時查名稱顯示在旁邊，
+    查無此代號時只顯示提示文字、不阻擋送出——使用者可能想追蹤還沒被本系統資料庫
+    收錄的股票(例如剛上市)，不應該完全卡死；送出時仍會嘗試resolve一次，能解析
+    成功就存標準化後的stock_id，失敗就存使用者輸入的原始文字。
+
+    ⚠️ 2026-08-02改版：使用者反映庫存實際上是分批買入，同一檔股票可能有好幾筆
+    各自獨立的批次紀錄——「編輯」模式現在是編輯「某一筆批次」(用lot id識別，不是
+    股票代號)，股票代號欄位唯讀的原因也從「是主鍵」改成「批次的股票代號不該事後
+    亂改，要換股票應該是刪除重建，不是編輯」。show_buy_date控制要不要顯示「買入
+    日期」欄位——觀察清單不是真的持股，不需要記錄買入日期，只有庫存清單的呼叫端
+    會傳show_buy_date=True。
+    """
+
+    def __init__(
+        self, conn, title: str, initial: dict | None = None, parent=None, show_buy_date: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self._conn = conn
+        self._result_stock_id: str = ""
+        self._show_buy_date = show_buy_date
+        initial = initial or {}
+
+        layout = QFormLayout(self)
+
+        id_row = QHBoxLayout()
+        self.stock_id_input = QLineEdit(initial.get("stock_id", ""))
+        self.stock_id_input.setPlaceholderText("例如 2330 或 台積電")
+        if "stock_id" in initial:
+            self.stock_id_input.setReadOnly(True)  # 編輯模式是編輯「這一批」，股票代號不能改
+        self.stock_id_input.editingFinished.connect(self._update_name_label)
+        id_row.addWidget(self.stock_id_input)
+        self.name_label = QLabel("")
+        self.name_label.setStyleSheet("color: #666666;")
+        id_row.addWidget(self.name_label)
+        layout.addRow("股票代號：", id_row)
+
+        self.buy_date_input = QLineEdit(initial.get("buy_date") or "")
+        if show_buy_date:
+            self.buy_date_input.setPlaceholderText("YYYY-MM-DD，可留空，也可以直接打8碼數字如20260802")
+            # 離開這個欄位(Tab跳下一格/點別的地方)時自動把"20260802"這類8碼數字
+            # 轉成"2026-08-02"，不用使用者自己手動加分隔符號，見_normalize_date_
+            # text()的說明。
+            self.buy_date_input.editingFinished.connect(self._normalize_buy_date)
+            layout.addRow("買入日期：", self.buy_date_input)
+
+        # QDoubleSpinBox/QSpinBox沒有原生的「留空」狀態，用setSpecialValueText()
+        # 讓數值等於最小值(0)時顯示提示文字取代"0.00"，values()裡把0視為None——
+        # 成本價/持股數為0沒有實際意義，這個簡化不會誤傷真實情境。
+        self.cost_price_input = QDoubleSpinBox()
+        self.cost_price_input.setRange(0, 9_999_999)
+        self.cost_price_input.setDecimals(2)
+        self.cost_price_input.setSpecialValueText("（未填）")
+        self.cost_price_input.setValue(initial.get("cost_price") or 0)
+        layout.addRow("成本價：", self.cost_price_input)
+
+        self.shares_input = QSpinBox()
+        self.shares_input.setRange(0, 999_999_999)
+        self.shares_input.setSpecialValueText("（未填）")
+        self.shares_input.setValue(int(initial.get("shares") or 0))
+        layout.addRow("持股數：", self.shares_input)
+
+        self.note_input = QLineEdit(initial.get("note") or "")
+        layout.addRow("備註：", self.note_input)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+        self._update_name_label()
+
+    def _update_name_label(self) -> None:
+        query = self.stock_id_input.text().strip()
+        resolved = chart_data.resolve_stock_id(self._conn, query) if query and self._conn is not None else None
+        if resolved:
+            name = chart_data.get_stock_name(self._conn, resolved)
+            self.name_label.setText(f"{resolved} {name}" if name else resolved)
+        elif query:
+            self.name_label.setText("（查無此股票代號，仍可儲存）")
+        else:
+            self.name_label.setText("")
+
+    def _normalize_buy_date(self) -> None:
+        self.buy_date_input.setText(_normalize_date_text(self.buy_date_input.text()))
+
+    def _on_accept(self) -> None:
+        query = self.stock_id_input.text().strip()
+        if not query:
+            QMessageBox.warning(self, "請輸入股票代號", "股票代號不能留空。")
+            return
+        # 保險起見在送出前再轉一次格式——正常情況下editingFinished在跳到「確定」
+        # 按鈕時就已經觸發過，這裡是防呆(例如某些平台上按Enter直接送出、沒有真正
+        # 經過焦點轉移事件的情況)。
+        if self._show_buy_date:
+            self._normalize_buy_date()
+        buy_date = self.buy_date_input.text().strip()
+        if self._show_buy_date and buy_date:
+            try:
+                datetime.strptime(buy_date, "%Y-%m-%d")
+            except ValueError:
+                # 格式不符只提醒、不阻擋送出——跟股票代號解析不到時的處理方式一致，
+                # 這個專案對使用者輸入格式的態度一律是「提示但不擋」。
+                if QMessageBox.question(
+                    self, "買入日期格式", f"「{buy_date}」不是YYYY-MM-DD格式，仍要儲存嗎？",
+                ) != QMessageBox.StandardButton.Yes:
+                    return
+        resolved = chart_data.resolve_stock_id(self._conn, query) if self._conn is not None else None
+        self._result_stock_id = resolved or query
+        self.accept()
+
+    def values(self) -> dict:
+        """呼叫端在dialog.exec()回傳Accepted後呼叫，取得使用者輸入的結果。"""
+        return {
+            "stock_id": self._result_stock_id,
+            "buy_date": self.buy_date_input.text().strip() or None,
+            "cost_price": self.cost_price_input.value() or None,
+            "shares": self.shares_input.value() or None,
+            "note": self.note_input.text().strip(),
+        }
 
 
 class PipelineWorker(QThread):
@@ -140,6 +412,15 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "資料庫連線失敗", str(exc))
 
+        # 庫存清單／觀察清單專用連線，跟主DB(self.conn)分開——見src/data/portfolio_
+        # storage.py開頭的說明，這條連線失敗不影響其他分頁正常運作，只有「庫存清單」/
+        # 「觀察清單」兩個分頁會查不到資料。
+        self.portfolio_conn = None
+        try:
+            self.portfolio_conn = get_default_portfolio_connection()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "庫存清單資料庫連線失敗", str(exc))
+
         self._pipeline_worker: PipelineWorker | None = None
         self._current_stock_id: str | None = None
         # 目前「個股清單」分頁顯示的股票是從候選清單哪一天的選股策略點進來的("YYYY-MM-DD"
@@ -175,17 +456,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # 三個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股清單(個股查詢+K線圖+
-        # 個股分析)——原本候選清單跟個股圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開
-        # 後候選清單點選任一列會自動切到③並代入該股票資料(見_on_candidate_selected())。
-        # ①跟③都用同一套規則比對邏輯(_build_analysis_html())，只是分析對象(大盤/個股)
-        # 不同，渲染格式共用。
+        # 六個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股清單(個股查詢+K線圖+
+        # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單——原本候選清單跟個股圖表擠在
+        # 同一個分頁，使用者反映畫面太擁擠，拆開後候選清單點選任一列會自動切到③並代入
+        # 該股票資料(見_on_candidate_selected())。①跟③都用同一套規則比對邏輯
+        # (_build_analysis_html())，只是分析對象(大盤/個股)不同，渲染格式共用。
+        # ⑤⑥移植自ref-project的庫存清單/觀察清單，用獨立的self.portfolio_conn(見
+        # __init__())，不查主DB的候選清單/圖表相關資料。
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
         self._build_market_tab()
         self._build_screener_tab()
         self._build_stock_detail_tab()
+        self._build_industry_rotation_tab()
+        self._build_inventory_tab()
+        self._build_watchlist_tab()
         # ⚠️ 分頁還沒被切換過去顯示之前，分頁裡的QTextEdit/QWebEngineView實際上沒有
         # 真正的layout(viewport寬度等於0或預設值)，這時候算文字框需要的高度一定不準
         # (實測算出來只有個位數px，見_build_market_tab()的說明)。改成切到對應分頁時
@@ -214,6 +500,27 @@ class MainWindow(QMainWindow):
         date_bar.addWidget(self.date_combo)
         date_bar.addStretch()
         root_layout.addLayout(date_bar)
+
+        # 「市場」「產業別」篩選：2026-08-02新增，跟下面的filter_bar/method_bar一樣是
+        # 「篩選標準」(改完要按「套用篩選」才生效，不即時連動，見下面的說明)。產業別選項
+        # 用chart_data.list_industries()在建構時查一次填入，self.conn在_build_ui()呼叫
+        # 前就已經建好(見__init__())，這裡可以直接查。
+        market_industry_bar = QHBoxLayout()
+        market_industry_bar.addWidget(QLabel("市場："))
+        self.market_filter_combo = QComboBox()
+        self.market_filter_combo.addItems(["全部", "上市", "上櫃"])
+        market_industry_bar.addWidget(self.market_filter_combo)
+        market_industry_bar.addSpacing(20)
+        market_industry_bar.addWidget(QLabel("產業別："))
+        # 產業別可能同時符合好幾個想一起看的分類(使用者要求比照Excel欄位篩選的複選
+        # 方式)，改用_CheckableComboBox取代單選的QComboBox，見該類別的docstring。
+        self.industry_filter_combo = _CheckableComboBox()
+        self.industry_filter_combo.setMinimumWidth(160)
+        if self.conn is not None:
+            self.industry_filter_combo.set_items(chart_data.list_industries(self.conn))
+        market_industry_bar.addWidget(self.industry_filter_combo)
+        market_industry_bar.addStretch()
+        root_layout.addLayout(market_industry_bar)
 
         # ⚠️ 2026-08-01修正：篩選條件(以下這些勾選框/下拉/天數輸入)原本每改一個就立刻
         # 呼叫_reload_candidates()重新查DB+套用篩選，勾選框一多、候選股數也多時，每次
@@ -244,6 +551,10 @@ class MainWindow(QMainWindow):
         # 塞進CANDIDATE_FILTERS的registry迴圈，另外獨立組裝、獨立傳給apply_candidate_filters
         # 的sar_flip_option參數(見src/presentation/chart_data.py)。
         self.sar_flip_checkbox = QCheckBox("SAR 翻轉")
+        # 2026-08-02使用者要求候選清單預設就是「SAR多頭翻轉1天內」+「朱家泓技術分析」
+        # 兩個都打勾(下面sar_flip_direction_combo/sar_flip_days_spin本來就預設「多頭」/
+        # 1，這裡補上勾選框本身的預設勾選)。
+        self.sar_flip_checkbox.setChecked(True)
         method_bar.addWidget(self.sar_flip_checkbox)
         self.sar_flip_direction_combo = QComboBox()
         self.sar_flip_direction_combo.addItems(["多頭", "空頭"])
@@ -303,8 +614,14 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.intraday_label)
 
         self.candidates_table = QTableWidget()
-        self.candidates_table.setColumnCount(8)
-        self.candidates_table.setHorizontalHeaderLabels(["股票代號", "名稱", "產業別", "訊號(信心%)", "進場價", "停損價", "漲跌幅(%)", "成交量"])
+        self.candidates_table.setColumnCount(12)
+        self.candidates_table.setHorizontalHeaderLabels([
+            "股票代號", "名稱", "產業別", "訊號(信心%)", "收盤價", "進場價", "停損價",
+            "漲跌幅(%)", "成交量(張)", "SAR值", "SAR狀態", "SAR距離%",
+        ])
+        # 數值欄位靠右對齊(見下面_reload_candidates()裡的setTextAlignment)時，文字會
+        # 緊貼著儲存格右側格線，加一點padding-right留出呼吸空間，不要看起來擠在線上。
+        self.candidates_table.setStyleSheet("QTableWidget::item { padding-right: 10px; }")
         # ⚠️ 之前對整個header統一套用Stretch，會讓8欄一律平分寬度——「訊號」欄內容通常
         # 遠比其他欄位長，平分寬度下wrap出來的行數暴增、視覺上看起來像沒有斷行。改成除了
         # 「訊號」欄以外都用ResizeToContents(依內容自動給剛好的寬度)，多出來的空間全部
@@ -372,6 +689,42 @@ class MainWindow(QMainWindow):
         search_row.addWidget(self.stock_source_label)
         bottom_layout.addLayout(search_row)
 
+        # 2026-08-02改版：「個股分析」不再是按鈕展開/收合的內嵌面板，改成跟「圖表」平行的
+        # 內層tab(見下面self.detail_inner_tabs)——使用者切到這個tab才需要顯示，不用像
+        # 之前那樣另外維護一個顯示/隱藏的checkable按鈕狀態。
+        self.analysis_view = QTextEdit()
+        self.analysis_view.setReadOnly(True)
+        self.analysis_view.setFrameShape(QFrame.Shape.NoFrame)
+        self.analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # ⚠️ 2026-08-02修正：原本靠setMinimumHeight(450)+stretch=1「猜」一個夠用的高度，
+        # QWebEngineView的sizeHint()不會反映實際載入的Plotly圖表高度，_AutoHeightTabWidget
+        # 量到的頁面高度可能比實際圖表內容矮，圖表看起來被壓縮在小框內(使用者反映「圖表
+        # 圖示跟資訊框重疊」的一部分成因)。改成在_rerender_chart()裡讀
+        # `fig.layout.height`後直接setFixedHeight()，不用猜。
+        self.chart_view = QWebEngineView()
+
+        self.summary_view = QTextEdit()
+        self.summary_view.setReadOnly(True)
+        self.summary_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # ⚠️ 2026-08-02修正：原本setMaximumHeight(220)固定上限，內容多時被截斷、要在小
+        # 框裡另外捲動一次，使用者反映很難閱讀。拿掉上限，改成跟analysis_view同一套「依
+        # 內容動態算高度」的作法(見_rerender_chart()裡setPlainText()之後的setFixedHeight)，
+        # 交給detail_scroll(最外層QScrollArea)捲動，不是在這個小框內部另外捲動。
+
+        # 2026-08-02改版：「圖表＋最新交易日摘要」跟「個股分析」拆成內層兩個tab，取代
+        # 原本按鈕展開/收合的做法，版面不再同時擠著圖表跟一長串規則比對清單。
+        # _AutoHeightTabWidget讓外層detail_scroll(QScrollArea)的捲軸範圍能正確反映
+        # 「目前分頁」的實際高度(見該類別的docstring)。
+        self.detail_inner_tabs = _AutoHeightTabWidget()
+        chart_tab = QWidget()
+        chart_tab_layout = QVBoxLayout(chart_tab)
+
+        # ⚠️ 2026-08-02修正：這些均線/切線/支撐壓力/MACD/KD/SAR顯示切換原本跟搜尋列一樣
+        # 放在detail_inner_tabs外面，不管切到「圖表」還是「個股分析」tab都看得到——但這些
+        # checkbox只影響「圖表」的顯示內容，切到「個股分析」tab時完全用不到，使用者反映
+        # 這樣放不合理(而且佔掉了「個股分析」tab上方的空間)。改成收進「圖表」tab內部，
+        # 跟chart_view/summary_view放在同一個chart_tab_layout裡。
         controls_row = QHBoxLayout()
 
         ma_group = QGroupBox("顯示均線")
@@ -416,49 +769,600 @@ class MainWindow(QMainWindow):
         self.sar_checkbox.stateChanged.connect(self._rerender_chart)
         controls_row.addWidget(self.sar_checkbox)
         controls_row.addStretch()
+        chart_tab_layout.addLayout(controls_row)
 
-        self.analysis_btn = QPushButton("📊 個股分析")
-        self.analysis_btn.setCheckable(True)
-        self.analysis_btn.setToolTip("顯示這檔股票目前符合規則庫中哪些訊號，依信心分數排序")
-        self.analysis_btn.toggled.connect(self._on_analysis_toggled)
-        controls_row.addWidget(self.analysis_btn)
-        bottom_layout.addLayout(controls_row)
+        chart_tab_layout.addWidget(self.chart_view)
+        chart_tab_layout.addWidget(self.summary_view)
+        self.detail_inner_tabs.addTab(chart_tab, "圖表")
 
-        # 「個股分析」內嵌展開面板：預設隱藏，按下上面的按鈕才顯示/計算內容，跟切換均線/切線
-        # 那些checkbox不同(那些是「一定要顯示圖表」的常態設定)，這是選擇性才需要的額外資訊，
-        # 不用一直佔畫面空間。
-        #
-        # ⚠️ 2026-07-29修正：原本用setMaximumHeight(200)固定高度，符合規則的訊號一多，內容
-        # 塞不進200px，QTextEdit自己的捲軸就會出現——使用者反映「要在小框框裡捲動」體驗很差。
-        # 改成不設上限高度，依實際內容量動態算出剛好的高度(setFixedHeight，見
-        # _set_analysis_html())，關掉QTextEdit自己的垂直捲軸，讓內容多的時候由最外層
-        # 的detail_scroll(整個分頁)捲動，不是在這個小框框內部另外捲動一次。
-        self.analysis_view = QTextEdit()
-        self.analysis_view.setReadOnly(True)
-        self.analysis_view.setFrameShape(QFrame.Shape.NoFrame)
-        self.analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.analysis_view.setVisible(False)
-        bottom_layout.addWidget(self.analysis_view)
+        analysis_tab = QWidget()
+        analysis_tab_layout = QVBoxLayout(analysis_tab)
+        analysis_tab_layout.addWidget(self.analysis_view)
+        self.detail_inner_tabs.addTab(analysis_tab, "個股分析")
 
-        # 面板展開後可能撐得很高(訊號一多，見_set_analysis_html())，使用者反映展開後
-        # 要收合得捲回最上面重新點一次上面的按鈕很麻煩——在面板正下方另外放一個「收合」
-        # 按鈕，點了直接取消勾選analysis_btn(觸發跟上面按鈕完全相同的_on_analysis_
-        # toggled(False)邏輯)，不用捲動視窗。
-        self.analysis_collapse_btn = QPushButton("🔼 收合個股分析")
-        self.analysis_collapse_btn.setVisible(False)
-        self.analysis_collapse_btn.clicked.connect(lambda: self.analysis_btn.setChecked(False))
-        bottom_layout.addWidget(self.analysis_collapse_btn)
+        self.detail_inner_tabs.currentChanged.connect(self._on_detail_inner_tab_changed)
+        bottom_layout.addWidget(self.detail_inner_tabs)
 
-        self.chart_view = QWebEngineView()
-        self.chart_view.setMinimumHeight(450)  # 避免在QScrollArea裡被壓縮到看不出圖表內容
-        bottom_layout.addWidget(self.chart_view, stretch=1)
+    def _build_industry_rotation_tab(self) -> None:
+        """「產業輪動」分頁：某一天各產業別的成交量加總/平均漲跌幅/股票數，用來看資金
+        目前比較集中往哪個產業移動——跟chart_data.load_industry_rotation()的說明一樣，
+        日期選單用chart_data.list_price_dates()(不受daily_candidates限制)。表格內容
+        延後到分頁真正顯示時才查(見_on_tab_changed())，日期選單本身在建構時就可以填好。
+        """
+        rotation_scroll = QScrollArea()
+        rotation_scroll.setWidgetResizable(True)
+        self.tabs.addTab(rotation_scroll, "產業輪動")
 
-        self.summary_view = QTextEdit()
-        self.summary_view.setReadOnly(True)
-        # 目前趨勢改成短/中/長三行各自附上判斷依據後內容變多，原本120px只夠顯示1~2行，
-        # 拉高到220px讓大部分情況不用捲動就看得到完整的3行趨勢+K棒/型態/量價訊號。
-        self.summary_view.setMaximumHeight(220)
-        bottom_layout.addWidget(self.summary_view)
+        rotation_content = QWidget()
+        rotation_scroll.setWidget(rotation_content)
+        rotation_layout = QVBoxLayout(rotation_content)
+
+        date_bar = QHBoxLayout()
+        date_bar.addWidget(QLabel("日期："))
+        self.industry_date_combo = QComboBox()
+        if self.conn is not None:
+            self.industry_date_combo.addItems(chart_data.list_price_dates(self.conn))
+        self.industry_date_combo.currentIndexChanged.connect(self._refresh_industry_rotation_tab)
+        date_bar.addWidget(self.industry_date_combo)
+        date_bar.addStretch()
+        rotation_layout.addLayout(date_bar)
+
+        self.industry_table = QTableWidget()
+        self.industry_table.setColumnCount(4)
+        self.industry_table.setHorizontalHeaderLabels(["產業別", "成交量合計(張)", "平均漲跌幅(%)", "股票數"])
+        # 數值欄位靠右對齊(見_refresh_industry_rotation_tab()裡的setTextAlignment)時，
+        # 加一點padding-right留出呼吸空間，不要緊貼著儲存格右側格線，跟candidates_table
+        # 的做法一致。
+        self.industry_table.setStyleSheet("QTableWidget::item { padding-right: 10px; }")
+        header = self.industry_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.industry_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.industry_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.industry_table.setSortingEnabled(True)
+        rotation_layout.addWidget(self.industry_table, stretch=1)
+
+    def _refresh_industry_rotation_tab(self) -> None:
+        if self.conn is None:
+            return
+        target_date = self.industry_date_combo.currentText() or None
+        df, latest_date = chart_data.load_industry_rotation(self.conn, target_date=target_date)
+        self.industry_table.setSortingEnabled(False)
+        self.industry_table.setRowCount(0 if latest_date is None else len(df))
+        _NUMERIC_COLUMNS = {1, 2, 3}
+        for row_idx, row in df.reset_index(drop=True).iterrows():
+            values = [
+                row["industry"],
+                f"{int(row['total_volume']) // 1000:,}",
+                f"{row['avg_pct_change']:+.2f}" if pd.notna(row["avg_pct_change"]) else "-",
+                str(int(row["stock_count"])),
+            ]
+            for col_idx, value in enumerate(values):
+                item_cls = _NumericTableWidgetItem if col_idx in _NUMERIC_COLUMNS else QTableWidgetItem
+                item = item_cls(str(value))
+                if col_idx in _NUMERIC_COLUMNS:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.industry_table.setItem(row_idx, col_idx, item)
+        self.industry_table.setSortingEnabled(True)
+
+    # ------------------------------------------------------------------
+    # 庫存清單／觀察清單(2026-08-02移植自ref-project，DB跟主DB分開放，見
+    # src/data/portfolio_storage.py開頭的說明)
+    # ------------------------------------------------------------------
+
+    def _populate_portfolio_table(self, table: QTableWidget, df: pd.DataFrame) -> None:
+        """庫存清單／觀察清單共用的表格填值邏輯，兩者資料結構(portfolio_data.load_
+        inventory()/load_watchlist()回傳的DataFrame)完全一致，只有表頭文字(成本價 vs
+        參考成本價)不同，那個在各自_build_*_tab()裡設定，不影響這裡的填值邏輯。
+        """
+        table.setSortingEnabled(False)
+        table.setRowCount(len(df))
+        for row_idx, row in df.reset_index(drop=True).iterrows():
+            values = [
+                row["stock_id"],
+                row["name"] if pd.notna(row["name"]) else "-",
+                f"{row['close']:.2f}" if pd.notna(row["close"]) else "-",
+                f"{row['pct_change']:+.2f}" if pd.notna(row["pct_change"]) else "-",
+                f"{row['cost_price']:.2f}" if pd.notna(row["cost_price"]) else "-",
+                f"{int(row['shares']):,}" if pd.notna(row["shares"]) else "-",
+                f"{row['market_value']:,.0f}" if pd.notna(row["market_value"]) else "-",
+                f"{row['profit']:+,.0f}" if pd.notna(row["profit"]) else "-",
+                f"{row['return_pct']:+.2f}" if pd.notna(row["return_pct"]) else "-",
+                row["sar_status"] if pd.notna(row["sar_status"]) else "-",
+                f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-",
+                row["note"] if pd.notna(row["note"]) and row["note"] else "",
+            ]
+            for col_idx, value in enumerate(values):
+                item_cls = _NumericTableWidgetItem if col_idx in _PORTFOLIO_NUMERIC_COLUMNS else QTableWidgetItem
+                item = item_cls(str(value))
+                if col_idx in _PORTFOLIO_NUMERIC_COLUMNS:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_idx, col_idx, item)
+        table.setSortingEnabled(True)
+        table.resizeRowsToContents()
+
+    @staticmethod
+    def _selected_portfolio_stock_ids(table: QTableWidget) -> list[str]:
+        rows = table.selectionModel().selectedRows()
+        return [table.item(r.row(), 0).text() for r in rows]
+
+    @staticmethod
+    def _portfolio_summary_text(df: pd.DataFrame, cost_label: str, value_label: str, profit_label: str) -> str:
+        """算庫存清單／觀察清單頂部的摘要文字：總成本/總市值/累積損益(含%)/今日資產
+        變動——只加總「有算出值」的列(pandas sum預設skipna=True)，成本價/持股數
+        都沒填的列本來就不計入任何一個加總數字，不是遺漏。
+        """
+        total_cost = (df["cost_price"] * df["shares"]).sum()
+        total_value = df["market_value"].sum()
+        total_profit = df["profit"].sum()
+        total_change = df["today_change_value"].sum()
+        return_pct_text = f"（{total_profit / total_cost * 100:+.2f}%）" if total_cost else ""
+        return (
+            f"{cost_label}：{total_cost:,.0f}　{value_label}：{total_value:,.0f}　"
+            f"{profit_label}：{total_profit:+,.0f}{return_pct_text}　"
+            f"今日資產變動：{total_change:+,.0f}"
+        )
+
+    def _build_inventory_tab(self) -> None:
+        """「庫存清單」分頁：使用者實際持有的股票，記錄成本價/持股數，算浮動損益。
+        現價/SAR資料直接查主DB既有的stock_prices/daily_indicators(daily_pipeline.py
+        每天自動更新)，不像ref-project那樣需要另外做背景yfinance更新worker——本專案
+        的股價/技術指標資料本來就已經是最新的，不需要per-股票手動觸發更新。
+
+        ⚠️ 2026-08-02改版：使用者反映實際狀況是分批買入，同一檔股票要能存好幾筆各自
+        獨立的批次(lot)。新增「檢視方式：明細／彙總」切換(self.inventory_view_combo)，
+        用QStackedWidget放兩個獨立的QTableWidget(明細/彙總欄位結構不同，不能共用
+        同一個表格動態換欄位)：明細檢視每筆批次各自一列、可以編輯/刪除特定那一批；
+        彙總檢視依股票分組算加權平均成本，是唯讀的衍生資料，「編輯選取」/「刪除
+        選取」按鈕在這個檢視下會停用。
+        """
+        inventory_scroll = QScrollArea()
+        inventory_scroll.setWidgetResizable(True)
+        self.tabs.addTab(inventory_scroll, "庫存清單")
+
+        inventory_content = QWidget()
+        inventory_scroll.setWidget(inventory_content)
+        inventory_layout = QVBoxLayout(inventory_content)
+
+        view_bar = QHBoxLayout()
+        view_bar.addWidget(QLabel("檢視方式："))
+        self.inventory_view_combo = QComboBox()
+        self.inventory_view_combo.addItems(["明細（每批各自一列）", "彙總（依股票算加權平均成本）"])
+        self.inventory_view_combo.currentIndexChanged.connect(self._on_inventory_view_changed)
+        view_bar.addWidget(self.inventory_view_combo)
+        view_bar.addStretch()
+        inventory_layout.addLayout(view_bar)
+
+        self.inventory_summary_label = QLabel("")
+        inventory_layout.addWidget(self.inventory_summary_label)
+
+        toolbar = QHBoxLayout()
+        add_btn = QPushButton("新增")
+        add_btn.clicked.connect(self._on_inventory_add)
+        self.inventory_edit_btn = QPushButton("編輯選取")
+        self.inventory_edit_btn.clicked.connect(self._on_inventory_edit_selected)
+        self.inventory_delete_btn = QPushButton("刪除選取")
+        self.inventory_delete_btn.clicked.connect(self._on_inventory_delete_selected)
+        watchlist_btn = QPushButton("加入觀察清單")
+        watchlist_btn.clicked.connect(self._on_inventory_add_to_watchlist)
+        refresh_btn = QPushButton("🔄 重新整理")
+        refresh_btn.clicked.connect(self._refresh_inventory_tab)
+        for btn in (add_btn, self.inventory_edit_btn, self.inventory_delete_btn, watchlist_btn, refresh_btn):
+            toolbar.addWidget(btn)
+        toolbar.addStretch()
+        inventory_layout.addLayout(toolbar)
+
+        self.inventory_detail_table = self._build_portfolio_table(
+            ["股票代號", "名稱", "買入日期", "現價", "漲跌幅(%)", "成本價", "持股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "備註"],
+            stretch_column="備註",
+        )
+        self.inventory_summary_table = self._build_portfolio_table(
+            ["股票代號", "名稱", "現價", "漲跌幅(%)", "平均成本價", "總持股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "批次數"],
+            stretch_column="名稱",
+        )
+        self.inventory_table_stack = QStackedWidget()
+        self.inventory_table_stack.addWidget(self.inventory_detail_table)
+        self.inventory_table_stack.addWidget(self.inventory_summary_table)
+        inventory_layout.addWidget(self.inventory_table_stack, stretch=1)
+
+    def _build_portfolio_table(self, headers: list[str], stretch_column: str | None = None) -> QTableWidget:
+        """庫存清單／觀察清單表格的共用建構邏輯，只有表頭文字(跟要拉開間距的欄位)
+        不同(見_build_inventory_tab()/_build_watchlist_tab())。stretch_column
+        未指定時預設拉開最後一欄。"""
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setStyleSheet("QTableWidget::item { padding-right: 10px; }")
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        stretch_idx = headers.index(stretch_column) if stretch_column in headers else len(headers) - 1
+        header.setSectionResizeMode(stretch_idx, QHeaderView.ResizeMode.Stretch)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSortingEnabled(True)
+        return table
+
+    def _on_inventory_view_changed(self) -> None:
+        is_detail = self.inventory_view_combo.currentIndex() == 0
+        self.inventory_table_stack.setCurrentIndex(0 if is_detail else 1)
+        self.inventory_edit_btn.setEnabled(is_detail)
+        self.inventory_delete_btn.setEnabled(is_detail)
+        tooltip = "" if is_detail else "請切換到明細檢視才能編輯/刪除特定批次"
+        self.inventory_edit_btn.setToolTip(tooltip)
+        self.inventory_delete_btn.setToolTip(tooltip)
+        self._refresh_inventory_tab()
+
+    def _populate_inventory_detail_table(self, df: pd.DataFrame) -> None:
+        """明細檢視填值：每一列對應一筆批次(lot)，第一欄(股票代號)的item額外用
+        UserRole存這筆的lot id，供編輯/刪除選取列時精準指定是哪一批(不能用股票
+        代號——同一檔股票可能有好幾筆批次)。"""
+        table = self.inventory_detail_table
+        numeric_columns = {3, 4, 5, 6, 7, 8, 9, 11}
+        table.setSortingEnabled(False)
+        table.setRowCount(len(df))
+        for row_idx, row in df.reset_index(drop=True).iterrows():
+            values = [
+                row["stock_id"],
+                row["name"] if pd.notna(row["name"]) else "-",
+                row["buy_date"] if pd.notna(row["buy_date"]) and row["buy_date"] else "-",
+                f"{row['close']:.2f}" if pd.notna(row["close"]) else "-",
+                f"{row['pct_change']:+.2f}" if pd.notna(row["pct_change"]) else "-",
+                f"{row['cost_price']:.2f}" if pd.notna(row["cost_price"]) else "-",
+                f"{int(row['shares']):,}" if pd.notna(row["shares"]) else "-",
+                f"{row['market_value']:,.0f}" if pd.notna(row["market_value"]) else "-",
+                f"{row['profit']:+,.0f}" if pd.notna(row["profit"]) else "-",
+                f"{row['return_pct']:+.2f}" if pd.notna(row["return_pct"]) else "-",
+                row["sar_status"] if pd.notna(row["sar_status"]) else "-",
+                f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-",
+                row["note"] if pd.notna(row["note"]) and row["note"] else "",
+            ]
+            for col_idx, value in enumerate(values):
+                item_cls = _NumericTableWidgetItem if col_idx in numeric_columns else QTableWidgetItem
+                item = item_cls(str(value))
+                if col_idx in numeric_columns:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if col_idx == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
+                table.setItem(row_idx, col_idx, item)
+        table.setSortingEnabled(True)
+        table.resizeRowsToContents()
+
+    def _populate_inventory_summary_table(self, df: pd.DataFrame) -> None:
+        """彙總檢視填值：每一列對應一檔股票(所有批次加權平均後的結果)，沒有單一
+        lot id可以對應，這個表不支援編輯/刪除選取列(見_on_inventory_view_changed()
+        停用按鈕的邏輯)。"""
+        table = self.inventory_summary_table
+        numeric_columns = {2, 3, 4, 5, 6, 7, 8, 10, 11}
+        table.setSortingEnabled(False)
+        table.setRowCount(len(df))
+        for row_idx, row in df.reset_index(drop=True).iterrows():
+            values = [
+                row["stock_id"],
+                row["name"] if pd.notna(row["name"]) else "-",
+                f"{row['close']:.2f}" if pd.notna(row["close"]) else "-",
+                f"{row['pct_change']:+.2f}" if pd.notna(row["pct_change"]) else "-",
+                f"{row['cost_price']:.2f}" if pd.notna(row["cost_price"]) else "-",
+                f"{int(row['shares']):,}" if pd.notna(row["shares"]) else "-",
+                f"{row['market_value']:,.0f}" if pd.notna(row["market_value"]) else "-",
+                f"{row['profit']:+,.0f}" if pd.notna(row["profit"]) else "-",
+                f"{row['return_pct']:+.2f}" if pd.notna(row["return_pct"]) else "-",
+                row["sar_status"] if pd.notna(row["sar_status"]) else "-",
+                f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-",
+                str(int(row["lot_count"])),
+            ]
+            for col_idx, value in enumerate(values):
+                item_cls = _NumericTableWidgetItem if col_idx in numeric_columns else QTableWidgetItem
+                item = item_cls(str(value))
+                if col_idx in numeric_columns:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_idx, col_idx, item)
+        table.setSortingEnabled(True)
+        table.resizeRowsToContents()
+
+    @staticmethod
+    def _selected_inventory_lot_ids(table: QTableWidget) -> list[int]:
+        rows = table.selectionModel().selectedRows()
+        return [table.item(r.row(), 0).data(Qt.ItemDataRole.UserRole) for r in rows]
+
+    def _refresh_inventory_tab(self) -> None:
+        if self.conn is None or self.portfolio_conn is None:
+            return
+        lots_df = portfolio_data.load_inventory_lots(self.conn, self.portfolio_conn)
+        self._populate_inventory_detail_table(lots_df)
+        if self.inventory_view_combo.currentIndex() == 1:
+            summary_df = portfolio_data.load_inventory_summary(self.conn, self.portfolio_conn)
+            self._populate_inventory_summary_table(summary_df)
+        # 摘要列一律從明細資料算，不管目前顯示明細還是彙總檢視，確保兩種檢視看到
+        # 的總計數字一致(彙總檢視的加權平均只是換一種呈現方式，不影響加總結果)。
+        self.inventory_summary_label.setText(
+            self._portfolio_summary_text(lots_df, "總持股成本", "總市值", "累積總損益"),
+        )
+
+    def _on_inventory_add(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        dialog = _StockEditDialog(self.conn, "新增庫存批次", parent=self, show_buy_date=True)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            values = dialog.values()
+            portfolio_storage.add_inventory_stock(
+                self.portfolio_conn, values["stock_id"], values["buy_date"],
+                values["cost_price"], values["shares"], values["note"],
+            )
+            self._refresh_inventory_tab()
+
+    def _on_inventory_edit_selected(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        lot_ids = self._selected_inventory_lot_ids(self.inventory_detail_table)
+        if len(lot_ids) != 1:
+            QMessageBox.information(self, "編輯庫存", "請先在明細檢視選取一筆要編輯的批次。")
+            return
+        lot_id = lot_ids[0]
+        existing = portfolio_storage.get_inventory_lot(self.portfolio_conn, lot_id)
+        if existing is None:
+            return
+        dialog = _StockEditDialog(self.conn, "編輯庫存批次", initial=existing, parent=self, show_buy_date=True)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            values = dialog.values()
+            portfolio_storage.update_inventory_stock(
+                self.portfolio_conn, lot_id, values["buy_date"], values["cost_price"], values["shares"], values["note"],
+            )
+            self._refresh_inventory_tab()
+
+    def _on_inventory_delete_selected(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        lot_ids = self._selected_inventory_lot_ids(self.inventory_detail_table)
+        if not lot_ids:
+            QMessageBox.information(self, "刪除庫存", "請先在明細檢視選取要刪除的批次。")
+            return
+        if QMessageBox.question(
+            self, "刪除庫存", f"確定要刪除{len(lot_ids)}筆批次紀錄嗎？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for lot_id in lot_ids:
+            portfolio_storage.delete_inventory_stock(self.portfolio_conn, lot_id)
+        self._refresh_inventory_tab()
+
+    def _on_inventory_add_to_watchlist(self) -> None:
+        """庫存清單「加入觀察清單」：選取的股票批次加進使用者勾選的一個或多個觀察
+        清單群組——單向操作(庫存→觀察清單)，比照ref-project沒有反向的「轉為庫存」
+        功能，這次也不做。不管目前是明細還是彙總檢視都能操作，取選取列所在表格
+        (self.inventory_table_stack.currentWidget())第一欄的股票代號，明細檢視下
+        若選到同一檔股票的多筆批次會自動去重。
+        """
+        if self.portfolio_conn is None:
+            return
+        current_table = self.inventory_table_stack.currentWidget()
+        stock_ids = sorted(set(self._selected_portfolio_stock_ids(current_table)))
+        if not stock_ids:
+            QMessageBox.information(self, "加入觀察清單", "請先選取要加入的股票。")
+            return
+        groups = portfolio_storage.list_watchlist_groups(self.portfolio_conn)
+        if not groups:
+            QMessageBox.information(self, "加入觀察清單", "目前沒有任何觀察清單群組，請先到「觀察清單」分頁新增群組。")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("加入觀察清單")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"把 {len(stock_ids)} 檔股票加入以下群組（可複選）："))
+        list_widget = QListWidget()
+        for group in groups:
+            item = QListWidgetItem(group["group_name"])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, group["id"])
+            list_widget.addItem(item)
+        layout.addWidget(list_widget)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected_group_ids = [
+            list_widget.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(list_widget.count())
+            if list_widget.item(i).checkState() == Qt.CheckState.Checked
+        ]
+        if not selected_group_ids:
+            return
+        portfolio_storage.add_stocks_to_watchlist(self.portfolio_conn, selected_group_ids, stock_ids)
+        QMessageBox.information(self, "加入觀察清單", "已加入選取的群組。")
+
+    def _build_watchlist_tab(self) -> None:
+        """「觀察清單」分頁：想追蹤但還沒買的股票，支援多個群組(例如「半導體」
+        「金融股」分開放，比照ref-project)。表格結構/資料來源跟庫存清單同構，
+        只是多了群組管理，且成本價/持股數欄位標題改成「參考」開頭，強調不是
+        真的持股。
+        """
+        watchlist_scroll = QScrollArea()
+        watchlist_scroll.setWidgetResizable(True)
+        self.tabs.addTab(watchlist_scroll, "觀察清單")
+
+        watchlist_content = QWidget()
+        watchlist_scroll.setWidget(watchlist_content)
+        watchlist_layout = QVBoxLayout(watchlist_content)
+
+        group_bar = QHBoxLayout()
+        group_bar.addWidget(QLabel("群組："))
+        self.watchlist_group_combo = QComboBox()
+        self.watchlist_group_combo.currentIndexChanged.connect(self._refresh_watchlist_tab)
+        group_bar.addWidget(self.watchlist_group_combo)
+        add_group_btn = QPushButton("新增群組")
+        add_group_btn.clicked.connect(self._on_watchlist_add_group)
+        rename_group_btn = QPushButton("重新命名")
+        rename_group_btn.clicked.connect(self._on_watchlist_rename_group)
+        delete_group_btn = QPushButton("刪除群組")
+        delete_group_btn.clicked.connect(self._on_watchlist_delete_group)
+        for btn in (add_group_btn, rename_group_btn, delete_group_btn):
+            group_bar.addWidget(btn)
+        group_bar.addStretch()
+        watchlist_layout.addLayout(group_bar)
+
+        self.watchlist_summary_label = QLabel("")
+        watchlist_layout.addWidget(self.watchlist_summary_label)
+
+        toolbar = QHBoxLayout()
+        add_btn = QPushButton("新增")
+        add_btn.clicked.connect(self._on_watchlist_add_stock)
+        edit_btn = QPushButton("編輯選取")
+        edit_btn.clicked.connect(self._on_watchlist_edit_selected)
+        delete_btn = QPushButton("刪除選取")
+        delete_btn.clicked.connect(self._on_watchlist_delete_selected)
+        refresh_btn = QPushButton("🔄 重新整理")
+        refresh_btn.clicked.connect(self._refresh_watchlist_tab)
+        for btn in (add_btn, edit_btn, delete_btn, refresh_btn):
+            toolbar.addWidget(btn)
+        toolbar.addStretch()
+        watchlist_layout.addLayout(toolbar)
+
+        self.watchlist_table = self._build_portfolio_table(
+            ["股票代號", "名稱", "現價", "漲跌幅(%)", "參考成本價", "參考股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "備註"],
+        )
+        watchlist_layout.addWidget(self.watchlist_table, stretch=1)
+
+        self._reload_watchlist_groups()
+
+    def _reload_watchlist_groups(self) -> None:
+        """重新整理群組下拉選單，找不到任何群組時自動建立一個「預設觀察清單」
+        (比照ref-project第一次使用時的行為)。盡量保留使用者目前選取的群組，找
+        不到才退回選第一個(例如剛好是自己被刪除的那個群組)。
+        """
+        if self.portfolio_conn is None:
+            return
+        groups = portfolio_storage.list_watchlist_groups(self.portfolio_conn)
+        if not groups:
+            portfolio_storage.add_watchlist_group(self.portfolio_conn, "預設觀察清單")
+            groups = portfolio_storage.list_watchlist_groups(self.portfolio_conn)
+        current_selection = self.watchlist_group_combo.currentData()
+        self.watchlist_group_combo.blockSignals(True)
+        self.watchlist_group_combo.clear()
+        for group in groups:
+            self.watchlist_group_combo.addItem(group["group_name"], group["id"])
+        if current_selection is not None:
+            idx = self.watchlist_group_combo.findData(current_selection)
+            if idx >= 0:
+                self.watchlist_group_combo.setCurrentIndex(idx)
+        self.watchlist_group_combo.blockSignals(False)
+
+    def _refresh_watchlist_tab(self) -> None:
+        if self.conn is None or self.portfolio_conn is None:
+            return
+        group_id = self.watchlist_group_combo.currentData()
+        if group_id is None:
+            self.watchlist_table.setRowCount(0)
+            self.watchlist_summary_label.setText("")
+            return
+        df = portfolio_data.load_watchlist(self.conn, self.portfolio_conn, group_id)
+        self._populate_portfolio_table(self.watchlist_table, df)
+        self.watchlist_summary_label.setText(
+            self._portfolio_summary_text(df, "總參考成本", "總觀察市值", "累積預估損益"),
+        )
+
+    def _on_watchlist_add_group(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        name, ok = QInputDialog.getText(self, "新增觀察清單群組", "群組名稱：")
+        name = name.strip()
+        if not ok or not name:
+            return
+        try:
+            new_id = portfolio_storage.add_watchlist_group(self.portfolio_conn, name)
+        except sqlite3.IntegrityError:
+            QMessageBox.warning(self, "新增群組失敗", f"群組名稱「{name}」已經存在。")
+            return
+        self._reload_watchlist_groups()
+        idx = self.watchlist_group_combo.findData(new_id)
+        if idx >= 0:
+            self.watchlist_group_combo.setCurrentIndex(idx)
+
+    def _on_watchlist_rename_group(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        group_id = self.watchlist_group_combo.currentData()
+        if group_id is None:
+            return
+        current_name = self.watchlist_group_combo.currentText()
+        name, ok = QInputDialog.getText(self, "重新命名群組", "群組名稱：", text=current_name)
+        name = name.strip()
+        if not ok or not name or name == current_name:
+            return
+        try:
+            portfolio_storage.rename_watchlist_group(self.portfolio_conn, group_id, name)
+        except sqlite3.IntegrityError:
+            QMessageBox.warning(self, "重新命名失敗", f"群組名稱「{name}」已經存在。")
+            return
+        self._reload_watchlist_groups()
+
+    def _on_watchlist_delete_group(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        group_id = self.watchlist_group_combo.currentData()
+        if group_id is None:
+            return
+        group_name = self.watchlist_group_combo.currentText()
+        if QMessageBox.question(
+            self, "刪除群組", f"確定要刪除群組「{group_name}」嗎？裡面的股票也會一併刪除。",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        portfolio_storage.delete_watchlist_group(self.portfolio_conn, group_id)
+        self._reload_watchlist_groups()
+        self._refresh_watchlist_tab()
+
+    def _on_watchlist_add_stock(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        group_id = self.watchlist_group_combo.currentData()
+        if group_id is None:
+            return
+        dialog = _StockEditDialog(self.conn, "新增觀察股票", parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            values = dialog.values()
+            portfolio_storage.add_watchlist_stock(
+                self.portfolio_conn, group_id, values["stock_id"], values["cost_price"], values["shares"], values["note"],
+            )
+            self._refresh_watchlist_tab()
+
+    def _on_watchlist_edit_selected(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        group_id = self.watchlist_group_combo.currentData()
+        if group_id is None:
+            return
+        stock_ids = self._selected_portfolio_stock_ids(self.watchlist_table)
+        if len(stock_ids) != 1:
+            QMessageBox.information(self, "編輯觀察股票", "請先選取一筆要編輯的股票。")
+            return
+        stock_id = stock_ids[0]
+        existing = portfolio_storage.get_watchlist_stock(self.portfolio_conn, group_id, stock_id) or {"stock_id": stock_id}
+        dialog = _StockEditDialog(self.conn, "編輯觀察股票", initial=existing, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            values = dialog.values()
+            portfolio_storage.update_watchlist_stock(
+                self.portfolio_conn, group_id, stock_id, values["cost_price"], values["shares"], values["note"],
+            )
+            self._refresh_watchlist_tab()
+
+    def _on_watchlist_delete_selected(self) -> None:
+        if self.portfolio_conn is None:
+            return
+        group_id = self.watchlist_group_combo.currentData()
+        if group_id is None:
+            return
+        stock_ids = self._selected_portfolio_stock_ids(self.watchlist_table)
+        if not stock_ids:
+            QMessageBox.information(self, "刪除觀察股票", "請先選取要刪除的股票。")
+            return
+        if QMessageBox.question(
+            self, "刪除觀察股票", f"確定要刪除{len(stock_ids)}檔股票嗎？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for stock_id in stock_ids:
+            portfolio_storage.delete_watchlist_stock(self.portfolio_conn, group_id, stock_id)
+        self._refresh_watchlist_tab()
 
     def _build_market_tab(self) -> None:
         """「大盤分析」分頁：跟個股分析共用同一套規則比對渲染邏輯(_build_analysis_html())，
@@ -475,6 +1379,10 @@ class MainWindow(QMainWindow):
         外層QScrollArea，這裡沒有QSplitter，一般QVBoxLayout+QScrollArea(setWidgetResizable
         (True))組合本來就能正確隨內容量調整捲軸範圍，不需要_sync_central_height_to_
         content()那樣的手動同步workaround。
+
+        2026-08-02改版：K線圖跟大盤分析拆成內層兩個tab(見self.market_inner_tabs)，跟
+        個股清單分頁的處理方式一致(見_build_stock_detail_tab())，版面不再同時擠著圖表
+        跟一長串規則比對清單。
         """
         market_scroll = QScrollArea()
         market_scroll.setWidgetResizable(True)
@@ -484,15 +1392,12 @@ class MainWindow(QMainWindow):
         market_scroll.setWidget(market_content)
         market_layout = QVBoxLayout(market_content)
 
+        # ⚠️ 2026-08-02修正：原本靠setMinimumHeight(820)「猜」一個貼近840px實際圖表
+        # 高度的數字(build_candlestick_figure()固定show_macd=True/show_kd=True時算出
+        # 的圖表高度是560+140*2=840px)，QWebEngineView的sizeHint()不會反映實際載入的
+        # Plotly圖表高度，猜的數字容易跟實際內容有落差。改成在_refresh_market_tab()裡
+        # 讀`fig.layout.height`後直接setFixedHeight()，不用猜。
         self.market_chart_view = QWebEngineView()
-        # ⚠️ 2026-07-29修正：這裡固定show_macd=True/show_kd=True，build_candlestick_
-        # figure()算出來的圖表本身高度是560+140*2=840px(見該函式的height計算)，原本
-        # 這裡minimumHeight只給450且沒有stretch因子，QVBoxLayout會把多出來的空間都給
-        # 後面的addStretch()而不是圖表，導致圖表被壓縮得比實際內容還小，看起來像「沒有
-        # 展開」。改成minimumHeight貼近840的實際圖表高度、並給stretch=1(比照個股圖表
-        # chart_view的做法)，讓圖表優先取得可用空間。
-        self.market_chart_view.setMinimumHeight(820)
-        market_layout.addWidget(self.market_chart_view, stretch=1)
         # 跟self._chart_html_path(個股圖表用)分開的暫存檔案，避免兩個分頁互相覆寫對方的
         # 圖表內容(見__init__裡_chart_html_path的說明：QWebEngineView.setHtml()對內容
         # 大小有隱性限制，兩邊都是寫進暫存檔案再load()開啟)。
@@ -507,7 +1412,20 @@ class MainWindow(QMainWindow):
         self.market_analysis_view.setReadOnly(True)
         self.market_analysis_view.setFrameShape(QFrame.Shape.NoFrame)
         self.market_analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        market_layout.addWidget(self.market_analysis_view)
+
+        self.market_inner_tabs = _AutoHeightTabWidget()
+        market_chart_tab = QWidget()
+        market_chart_tab_layout = QVBoxLayout(market_chart_tab)
+        market_chart_tab_layout.addWidget(self.market_chart_view)
+        self.market_inner_tabs.addTab(market_chart_tab, "圖表")
+
+        market_analysis_tab = QWidget()
+        market_analysis_tab_layout = QVBoxLayout(market_analysis_tab)
+        market_analysis_tab_layout.addWidget(self.market_analysis_view)
+        self.market_inner_tabs.addTab(market_analysis_tab, "大盤分析")
+
+        self.market_inner_tabs.currentChanged.connect(self._on_market_inner_tab_changed)
+        market_layout.addWidget(self.market_inner_tabs)
         # ⚠️ 這裡不在建構時就呼叫_refresh_market_tab()：分頁2要等使用者實際切換過去才
         # 會有真正的layout(viewport寬度等於0或預設值)，document().size().height()算出來
         # 的高度會嚴重失真(實測只有個位數px)。改成在_on_tab_changed()裡、切到這個分頁時
@@ -527,10 +1445,28 @@ class MainWindow(QMainWindow):
                 price_df, holidays=holidays, ma_periods=FULL_PERIODS,
                 show_macd=True, show_kd=True, show_sar=True,
             )
+            # 直接讀build_candlestick_figure()算好的圖表高度，setFixedHeight()精準給
+            # QWebEngineView剛好的空間，不用像之前那樣用setMinimumHeight()「猜」一個
+            # 數字(見self.market_chart_view建構處的說明)。+20px緩衝對應瀏覽器預設
+            # body margin，實際數字以截圖核對為準。
+            self.market_chart_view.setFixedHeight(int(fig.layout.height) + 20)
             html_content = render_chart_html(fig, price_df, stock_label=TAIEX_DISPLAY_NAME)
             self._market_chart_html_path.write_text(html_content, encoding="utf-8")
             self.market_chart_view.load(QUrl.fromLocalFile(str(self._market_chart_html_path)))
-        self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
+        # 「大盤分析」內層tab還沒被切換過去顯示之前，QTextEdit沒有正確的layout寬度，
+        # document().size().height()算出來的高度會失真(見_on_market_inner_tab_changed()
+        # 的說明)，只在使用者目前就停留在這個tab時才順便重算。
+        if self.market_inner_tabs.currentIndex() == 1:
+            self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
+
+    def _on_market_inner_tab_changed(self, index: int) -> None:
+        """切到「大盤分析」tab(index==1)時才重新整理內容——沿用_on_tab_changed()/
+        showEvent()已經驗證過的模式：tab還沒真正顯示、layout寬度還不正確前就呼叫
+        document().size().height()，算出來的高度會嚴重失真(見_build_market_tab()的
+        說明)，不能在建構或背景重新整理時就無條件計算。
+        """
+        if index == 1 and self.conn is not None:
+            self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
 
     def showEvent(self, event) -> None:
         """視窗第一次顯示時，補打一次目前分頁(預設是分頁0「大盤」)的_on_tab_changed()，
@@ -554,6 +1490,12 @@ class MainWindow(QMainWindow):
             # detail_tab()的說明)；_rerender_chart()本身有「沒有選取任何股票」的
             # 空狀態防呆，不會因為使用者還沒選過股票就直接切過來而出錯。
             self._rerender_chart()
+        elif index == TAB_INDUSTRY_ROTATION:
+            self._refresh_industry_rotation_tab()
+        elif index == TAB_INVENTORY:
+            self._refresh_inventory_tab()
+        elif index == TAB_WATCHLIST:
+            self._refresh_watchlist_tab()
 
     # ------------------------------------------------------------------
     # 候選清單／圖表
@@ -581,7 +1523,18 @@ class MainWindow(QMainWindow):
         if self.conn is None:
             return
         target_date = self.date_combo.currentText() or None
-        df, latest_date, is_intraday = chart_data.load_stock_universe_for_date(self.conn, target_date=target_date)
+        # 「市場：全部/上市/上櫃」下拉對應load_stock_universe_for_date()的market參數
+        # ("TWSE"/"TPEx"/None)；「全部」不在對照表裡，get()查不到就維持None(不限制)。
+        market = _MARKET_FILTER_VALUES.get(self.market_filter_combo.currentText())
+        df, latest_date, is_intraday = chart_data.load_stock_universe_for_date(
+            self.conn, target_date=target_date, market=market,
+        )
+        # 「產業別」複選下拉：跟市場篩選一樣是「候選股票池的範圍」，在均線/SAR等篩選
+        # 條件套用之前先縮小df，池子越小後面的篩選運算量越少。checked_items()回傳空
+        # list代表勾選"全部"或什麼都沒勾，不套用這個篩選(見_CheckableComboBox說明)。
+        selected_industries = self.industry_filter_combo.checked_items()
+        if selected_industries:
+            df = df[df["industry"].isin(selected_industries)].reset_index(drop=True)
         active_filters = [label for label, cb in self.filter_checkboxes.items() if cb.isChecked()]
         sar_flip_option = None
         if self.sar_flip_checkbox.isChecked():
@@ -604,25 +1557,39 @@ class MainWindow(QMainWindow):
         # 的資料被錯配到不同列。填完畢後再打開，使用者才能點欄位標題排序。
         self.candidates_table.setSortingEnabled(False)
         self.candidates_table.setRowCount(len(df))
-        _NUMERIC_COLUMNS = {4, 5, 6, 7}  # 進場價/停損價/漲跌幅/成交量
+        _NUMERIC_COLUMNS = {4, 5, 6, 7, 8, 9, 11}  # 收盤價/進場價/停損價/漲跌幅/成交量/SAR值/SAR距離%
         for row_idx, row in df.reset_index(drop=True).iterrows():
             pct_change = row["pct_change"]
             pct_text = f"{pct_change:+.2f}" if pd.notna(pct_change) else "-"
             volume = row["volume"]
-            volume_text = f"{int(volume):,}" if pd.notna(volume) else "-"
+            # 成交量改用「張」(1張=1000股)顯示，跟ref-project既有慣例一致(int除法無條件
+            # 捨去)——DataFrame裡的volume欄位本身維持「股」不變，只在這裡顯示時轉換。
+            volume_text = f"{int(volume) // 1000:,}" if pd.notna(volume) else "-"
             industry_text = row["industry"] if pd.notna(row["industry"]) else ""
             # entry_price/stop_loss：全市場掃描補進來、當天沒有觸發任何朱家泓規則的股票
             # (見chart_data.load_stock_universe_for_date())沒有對應的進場價/停損價可用，
             # 是None不是數字，格式化前要先判斷，否則.2f格式化None會直接crash。
+            close_text = f"{row['close']:.2f}" if pd.notna(row["close"]) else "-"
             entry_price_text = f"{row['entry_price']:.2f}" if pd.notna(row["entry_price"]) else "-"
             stop_loss_text = f"{row['stop_loss']:.2f}" if pd.notna(row["stop_loss"]) else "-"
+            # SAR三欄：還沒回補到daily_indicators的股票這幾個值是None，顯示"-"(見
+            # chart_data.load_stock_universe_for_date()的說明)。
+            sar_value_text = f"{row['sar_value']:.2f}" if pd.notna(row["sar_value"]) else "-"
+            sar_status_text = row["sar_status"] if pd.notna(row["sar_status"]) else "-"
+            sar_distance_text = f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-"
             values = [
-                row["stock_id"], row["name"], industry_text, row["signal_name"],
+                row["stock_id"], row["name"], industry_text, row["signal_name"], close_text,
                 entry_price_text, stop_loss_text, pct_text, volume_text,
+                sar_value_text, sar_status_text, sar_distance_text,
             ]
             for col_idx, value in enumerate(values):
                 item_cls = _NumericTableWidgetItem if col_idx in _NUMERIC_COLUMNS else QTableWidgetItem
                 item = item_cls(str(value))
+                if col_idx in _NUMERIC_COLUMNS:
+                    # 數值欄位靠右對齊，跟表頭文字/其他文字欄位(靠左)的閱讀習慣區分開來——
+                    # 跟右邊格線的間距由candidates_table的stylesheet(padding-right)處理，
+                    # 不是緊貼著格線。
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 # 部分欄位內容常常比欄寬長、會被截斷看不到完整內容(尤其訊號欄位同時符合多條
                 # 規則時)；設定tooltip讓滑鼠移過去任一儲存格都能懸浮顯示完整文字，不用特別
                 # 放寬欄寬。
@@ -686,9 +1653,11 @@ class MainWindow(QMainWindow):
             self.stock_source_label.setText("")
         price_df = chart_data.load_price_history(self.conn, self._current_stock_id)
         if price_df.empty:
+            self.chart_view.setFixedHeight(80)
             self.chart_view.setHtml(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
             self.summary_view.setPlainText("")
-            if self.analysis_btn.isChecked():
+            self.summary_view.setFixedHeight(30)
+            if self.detail_inner_tabs.currentIndex() == 1:
                 self._set_analysis_html(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
             return
 
@@ -722,6 +1691,11 @@ class MainWindow(QMainWindow):
         # figure(桌面版改用render_chart_html的stock_label固定列顯示代號+名稱，見那裡的說明)。
         stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
         stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        # 直接讀build_candlestick_figure()算好的圖表高度，setFixedHeight()精準給
+        # QWebEngineView剛好的空間，不用像之前那樣用setMinimumHeight()「猜」一個數字
+        # (見self.chart_view建構處的說明)。+20px緩衝對應瀏覽器預設body margin，實際
+        # 數字以截圖核對為準。
+        self.chart_view.setFixedHeight(int(fig.layout.height) + 20)
         html = render_chart_html(fig, price_df, stock_label=stock_label)
         self._chart_html_path.write_text(html, encoding="utf-8")
         self.chart_view.load(QUrl.fromLocalFile(str(self._chart_html_path)))
@@ -767,14 +1741,22 @@ class MainWindow(QMainWindow):
         if not holidays_ok:
             lines.append("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
         self.summary_view.setPlainText("\n".join(lines))
+        # 依內容動態算高度，取代原本setMaximumHeight(220)的固定上限(見self.summary_view
+        # 建構處的說明)，讓內容多的時候完整展開，不用在小框裡另外捲動一次。
+        summary_doc_height = self.summary_view.document().size().height()
+        summary_frame_width = self.summary_view.frameWidth() * 2
+        self.summary_view.setFixedHeight(int(summary_doc_height) + summary_frame_width + 8)
 
-        if self.analysis_btn.isChecked():
+        if self.detail_inner_tabs.currentIndex() == 1:
             self._refresh_analysis_view()
 
-    def _on_analysis_toggled(self, checked: bool) -> None:
-        self.analysis_view.setVisible(checked)
-        self.analysis_collapse_btn.setVisible(checked)
-        if checked:
+    def _on_detail_inner_tab_changed(self, index: int) -> None:
+        """切到「個股分析」tab(index==1)時才重新整理內容——沿用_on_tab_changed()/
+        showEvent()已經驗證過的模式：tab還沒真正顯示、layout寬度還不正確前就呼叫
+        document().size().height()，算出來的高度會嚴重失真，不能在建構或背景重新
+        整理時就無條件計算(見_build_stock_detail_tab()/_AutoHeightTabWidget的說明)。
+        """
+        if index == 1:
             self._refresh_analysis_view()
 
     def _set_analysis_html(self, html_content: str) -> None:
@@ -814,7 +1796,24 @@ class MainWindow(QMainWindow):
         # HTML標籤、內容被吃掉一截(實測"目前狀態：MA5<MA10<MA20..."只會顯示到"MA5"就斷掉)。
         # Streamlit版沒有這個問題是因為st.write/st.caption預設unsafe_allow_html=False，
         # 不會把文字內容當HTML剖析；這裡是QTextEdit本身的行為，只有桌面版需要escape。
-        blocks = [header]
+        #
+        # 2026-08-02改版：「總結分析」搬到最前面(header之後、逐條規則清單之前)——使用者
+        # 反映一長串規則清單太雜亂，希望先看到歸納重點，細節往下捲再看，不用等捲到最下面
+        # 才看得到總結。
+        summary = summarize_signal_matches(matches)
+        top = summary["top_match"]
+        top_note = (top.get("note") or "").split("\n")[0] if top else ""
+        summary_block = (
+            "<p><b>📌 總結分析</b><br>"
+            f"本次共觸發 {summary['total']} 條規則"
+            f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
+            f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。<br>"
+            f"信心最高的訊號：{html.escape(top['rule_id'])}　{html.escape(top['title'])}"
+            f"（{top['confidence']}%）"
+            + (f"<br>目前狀態：{html.escape(top_note)}" if top_note else "")
+            + "</p><hr>"
+        )
+        blocks = [header, summary_block]
         for m in matches:
             block = f"<p><b>{html.escape(m['rule_id'])}　{html.escape(m['title'])}（信心{m['confidence']}%）</b><br>"
             # 「目前狀態」(這條規則今天為什麼觸發)排在規則名稱後第一個位置，跟dashboard/
@@ -835,23 +1834,6 @@ class MainWindow(QMainWindow):
                 block += f"<i>原文與頁碼：{html.escape(m['reference'])}</i>"
             block += "</p><hr>"
             blocks.append(block)
-        # 「總結分析」放在列完所有規則之後——使用者反映一長串規則清單太雜亂，這裡用
-        # daily_screener.summarize_signal_matches()統計出的多頭/空頭傾向數量+信心最高的
-        # 規則，讓使用者不用自己從落落長的清單裡歸納重點。
-        summary = summarize_signal_matches(matches)
-        top = summary["top_match"]
-        top_note = (top.get("note") or "").split("\n")[0] if top else ""
-        summary_block = (
-            "<p><b>📌 總結分析</b><br>"
-            f"本次共觸發 {summary['total']} 條規則"
-            f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
-            f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。<br>"
-            f"信心最高的訊號：{html.escape(top['rule_id'])}　{html.escape(top['title'])}"
-            f"（{top['confidence']}%）"
-            + (f"<br>目前狀態：{html.escape(top_note)}" if top_note else "")
-            + "</p><hr>"
-        )
-        blocks.append(summary_block)
         return "".join(blocks)
 
     def _refresh_analysis_view(self) -> None:

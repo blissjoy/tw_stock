@@ -902,7 +902,7 @@ def test_build_candlestick_figure_adds_volume_subplot_with_up_down_colors():
 
     volume_trace = next(t for t in fig.data if t.type == "bar")
     assert list(volume_trace.y) == [1000, 1200]
-    assert list(volume_trace.marker.color) == ["#c0392b", "#1a1a1a"]  # 第1天收紅、第2天收黑
+    assert list(volume_trace.marker.color) == ["#c0392b", "#27ae60"]  # 第1天收紅、第2天收黑(2026-08-02改綠色)
 
 
 def test_build_candlestick_figure_adds_selected_ma_lines():

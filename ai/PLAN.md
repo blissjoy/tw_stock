@@ -3822,3 +3822,326 @@ TWSE官方端點即時查詢其最早資料日期當天是否真的查得到」�
 刪掉，只保留轉上市後的資料，並重新跑`scripts/backfill_daily_indicators.py
 --stock-id <代號>`讓`daily_indicators`快取跟著更新。使用者尚未決定是否要修正，
 還是就只接受這4檔的均線/SAR結果可能不夠準確。
+
+## 桌面版「大盤」「個股清單」分頁重新排版：資訊列順序＋MA方向列＋圖表/分析分頁化＋字級放大(2026-08-02)
+
+使用者反映兩個分頁版面太擠、字太小，提出4點排版需求：①圖表左上角固定資訊框，股票
+標題列跟日期/OHLCV列對調順序（標題在第一列）；②新增第三列顯示MA5/10/20/120/240
+（跳過MA60，跟候選清單篩選沿用的天期組合一致）目前數值＋方向箭頭；③全域字級調大
+兩級，並把「圖表＋最新交易日摘要」跟「個股分析／大盤分析」拆成內層兩個tab；④確保
+拆成內層tab後，外層QScrollArea的捲軸仍正確隨內容高度調整。
+
+- `desktop/chart_render.py`：`labelBox`(股票標題)/`infoBox`(日期/OHLCV)對調到
+  top:'6px'/'28px'；新增`maBox`(top:'50px')顯示`MA_ROW_PERIODS = (5,10,20,120,
+  240)`各天期數值+方向(用`price_df["MA{n}"].diff()`跟前一天比較，>0紅色↑、<0
+  近黑色↓、==0灰色=，NaN代表資料不足直接跳過不顯示；配色沿用K棒/成交量既有的
+  紅漲黑跌慣例，不是SAR用的綠/紅慣例)。新增`ma_customdata`跟現有`customdata`
+  同構，`plotly_hover`/`plotly_unhover`一併更新`maBox`內容，維持跟`infoBox`
+  一致的hover互動行為。`margin.t`從80調到104，多留一列22px高度給第三列，避免
+  跟legend重疊。JS注入框字級13px/12px各自調到16px/15px，配合Qt端的字級放大。
+- `desktop/main_window.py`：新增`_AutoHeightTabWidget(QTabWidget)`，覆寫
+  `sizeHint()`/`minimumSizeHint()`只回報「目前分頁」的高度＋在`currentChanged`
+  時呼叫`updateGeometry()`通知外層layout重新查詢——這是解決「QTabWidget包在
+  QScrollArea(setWidgetResizable=True)裡，捲軸範圍抓不到正確內容高度」這個Qt
+  已知限制的標準workaround，跟過去QSplitter不轉發sizeHint變化是同一類問題。
+  「個股清單」分頁的`chart_view`+`summary_view`收進`detail_inner_tabs`的
+  「圖表」tab、`analysis_view`收進「個股分析」tab；「大盤」分頁同樣手法，
+  `market_chart_view`收進`market_inner_tabs`的「圖表」tab、`market_analysis_
+  view`收進「大盤分析」tab。移除原本按鈕展開/收合「個股分析」的機制
+  (`analysis_btn`/`analysis_collapse_btn`/`_on_analysis_toggled()`整組拿掉)，
+  改成內層tab的`currentChanged`訊號觸發`_refresh_analysis_view()`/
+  `_set_market_analysis_html()`(沿用`_on_tab_changed()`/`showEvent()`已經
+  驗證過的「tab真正顯示、layout寬度正確後才計算高度」模式，避免重演「個位數px」
+  bug)；`_rerender_chart()`/`_refresh_market_tab()`裡原本判斷「按鈕是否勾選」
+  的地方改成判斷「目前是否停留在分析tab」。
+  - 這次改版順帶讓使用者先前回報、重現不出來、已明確要求擱置的「個股清單裡點
+    『個股分析』會立刻收合」bug所在的互動路徑（checkable按鈕+toggled訊號）直接
+    消失，不是重新去查那個bug，是移除機制的自然結果。
+- `desktop/main.py`：`QApplication`建立後加`font.setPointSize(font.pointSize()
+  + 2); app.setFont(font)`，桌面版所有widget原本都沒有自己`setFont()`過，
+  全部cascade自QApplication預設字型，改這裡就讓所有Qt原生元件統一放大。
+- 驗證：PySide6實際視窗+debug script(沿用先前除錯scroll bug用過的手法)量測
+  `scrollbar.maximum()`——大盤分頁「圖表」tab為86、切到「大盤分析」tab變成1658
+  (對應`market_analysis_view.height()=2392`)、切回「圖表」tab縮小回86；個股
+  清單分頁查2330「圖表」tab為0、切到「個股分析」tab變成2365(對應
+  `analysis_view.height()=2988`)，證實`_AutoHeightTabWidget`正確運作，外層
+  捲軸範圍會隨「目前分頁」的實際內容高度增減，不會殘留切換前的捲動範圍。截圖
+  確認排版：①股票標題在第一列、日期/OHLCV第二列、MA5/10/20/120/240＋方向箭頭
+  第三列，三列跟legend沒有重疊；②字級明顯放大；③兩個分頁的內層tab切換正常。
+  `pytest tests/ -q`766個測試全數通過(這次沒有測試依賴被移除的`analysis_btn`/
+  `analysis_collapse_btn`，不用額外更新既有測試)。
+
+## 桌面版第二輪排版修正＋候選清單擴充＋新增產業輪動分頁(2026-08-02)
+
+上一輪排版改版上線後，使用者實際使用時發現三列固定資訊框跟legend/K線圖重疊(懷疑
+漏了`<br>`)，加上幾個延伸的排版/易讀性要求，另外提出3個新功能需求。這次一併處理，
+範圍限定**只做桌面版**，`dashboard/app.py`這次沒動。
+
+- **顏色**：`src/presentation/chart_data.py`的`build_candlestick_figure()`跟
+  `desktop/chart_render.py`的`fmtRow()`/`fmtMa()`，黑K棒/成交量長條(收黑)/MA下跌
+  方向箭頭的顏色統一從`#1a1a1a`(黑)改成`#27ae60`(跟MACD負值OSC柱同一種綠)——使用者
+  確認套用範圍要包含這三處，維持「跌=同一色」的一致慣例；SAR的紅/綠是另一套獨立
+  慣例(語意是多頭/空頭，不是漲跌)，不受影響。「黑K」這個規則/命名術語(candles.py)
+  維持不變，只是圖表上這個概念改用綠色呈現。
+- **總結分析移到最前面**：`_build_analysis_html()`原本是「header→逐條規則清單→
+  總結分析」，改成「header→總結分析→逐條規則清單」，使用者不用捲到最下面才看到
+  歸納重點。
+- **修正三列資訊框重疊**：診斷出根本原因——上一輪把`makeFixedBox()`字級從13px
+  調到16px(配合字級放大)，但三個box的top間距(6/28/50px，22px一列)沒跟著放大，
+  16px字級實際渲染高度約25px超過22px間距，box彼此就會重疊(這就是使用者感覺
+  「沒有做`<br>`」的原因，不是缺換行，是格子間距不夠)。改成30px一列(6/36/66px)，
+  `margin.t`從104調到140，讓legend有足夠空間落在三列box下方。
+- **chart_view/market_chart_view/summary_view不再侷限小框**：原本`chart_view`/
+  `market_chart_view`靠`setMinimumHeight()`+`stretch=1`「猜」一個夠用的高度，
+  `QWebEngineView`的`sizeHint()`不會反映實際載入的Plotly圖表高度，容易比實際內容
+  矮，圖表被壓縮(這也是三列資訊框跑版的另一部分成因)。改成讀
+  `fig.layout.height`後直接`setFixedHeight()`，不用猜；`summary_view`拿掉
+  `setMaximumHeight(220)`固定上限，改用跟`analysis_view`同一套「依內容動態算高度」
+  的`setFixedHeight(document().size().height()+...)`做法，交給最外層QScrollArea
+  捲動，不在小框內部另外捲動一次。
+- **Hover在成交量/MACD/KD子圖也顯示軸數值**：`desktop/chart_render.py`原本
+  `getPriceAtCursorY()`/`priceAxisBox`只支援價格子圖(row1)，廣義化成
+  `getAxisValueAtCursorY()`/`axisValueBox`，用Python端組好的`row_axes`清單
+  (每個子圖對應的Plotly yaxis名稱/軸標籤/小數位數，跟`chart_data.py`的
+  `macd_row`/`kd_row`算法一致)取代寫死的`gd._fullLayout.yaxis`，滑鼠移到任何
+  一個子圖都會顯示該圖的軸標籤+對應數值(價格2位小數/成交量整數千分位/MACD 2位/
+  KD 1位)。
+- **候選清單新欄位**：`load_stock_universe_for_date()`新增`close`/`sar_value`/
+  `sar_status`/`sar_distance_pct`四個欄位(LEFT JOIN `daily_indicators`表，還沒
+  回補的股票這幾欄是None不影響整列被排除)。`sar_distance_pct`公式`(sar_value -
+  close) / close * 100`沿用`ref-project/tw_stock_analyzer/src/core/
+  stock_scanner.py`既有的「SAR距離%」定義，不是重新發明的指標；數值越接近0代表
+  股價越接近SAR翻轉點。桌面版`candidates_table`從8欄擴充到12欄，成交量顯示改用
+  「張」(`int(volume)//1000`，沿用ref-project`int(vol // 1000)`的既有寫法)，
+  DataFrame裡的`volume`欄位本身維持「股」不變，只在顯示層轉換。
+- **市場/產業別篩選**：`load_stock_universe_for_date()`新增`market`參數
+  ("TWSE"/"TPEx"/None)；新增`chart_data.list_industries()`查`stocks`表所有
+  相異產業分類。桌面版「選股」分頁在候選清單日期跟篩選條件之間新增一列「市場：
+  全部/上市/上櫃」+「產業別：全部/實際分類」下拉，比照既有篩選標準的做法(改完
+  要按「套用篩選」才生效，不即時連動)。
+- **新增「產業輪動」分頁**：新增`chart_data.load_industry_rotation()`，某一天
+  依`stocks.industry`分組，算每個產業的成交量加總/平均漲跌幅(簡單平均，這個
+  專案目前沒有市值資料，不能用市值加權)/股票數，依成交量加總由大到小排序，用來
+  看資金比較集中往哪個產業移動。⚠️ 已知資料品質限制(這次先不處理，只在
+  docstring註明)：`stocks.industry`裡有ETF/ETN/存託憑證/創新板股票等約8種非個股
+  分類，以及少數同義產業因TWSE/TPEx命名差異拆成兩個分類(例如「數位雲端」vs
+  「數位雲端類」)，會讓「加總」的產業邊界不夠精確，先如實呈現原始分組，不用
+  不成熟的規則硬湊。新增`chart_data.list_price_dates()`(不受`daily_candidates`
+  限制，只要有股價資料就能選)供這個分頁的日期選單使用。桌面版新增第4個分頁
+  `TAB_INDUSTRY_ROTATION`，沿用既有lazy-refresh-on-switch模式。
+- 驗證：PySide6實際視窗+debug script截圖確認①K棒/成交量/MA下跌箭頭都是綠色；
+  ②總結分析在最上面；③三列固定框跟legend/K線圖不再重疊(`chart_view.height()=
+  860`，明確設定不再是猜的)；④候選清單能看到收盤價/SAR值/SAR狀態/SAR距離%/
+  成交量(張)，例如7729仲恩生醫SAR距離%=-13.32%核對公式(69.52-80.20)/80.20*100
+  正確；⑤市場/產業別篩選下拉正確顯示；⑥「產業輪動」分頁46個產業分類正確依
+  成交量排序(電子工業最高1,621,604張)。`pytest tests/ -q`766個測試全數通過
+  (2個既有測試因為顏色/函式改名而更新斷言：`test_chart_data.py`的成交量顏色
+  測試、`test_chart_render.py`的`getPriceAtCursorY`改名測試)。
+
+## 上一輪排版修正的追加bug：legend仍被三列資訊框蓋住＋控制項搬進圖表tab＋產業別複選(2026-08-02)
+
+使用者用截圖回報上一輪margin.t=140的修正沒有真正解決重疊——用實際debug script截圖
+比對才找到真正原因：**不是垂直間距不夠，是水平寬度重疊**。第3列MA資訊框(maBox)因為
+同時顯示MA5/10/20/120/240五個數值+方向，文字內容很長，寬度延伸到跟Plotly原生legend
+第一排最左邊幾個項目(剛好就是MA5/MA10/MA20，因為trace加入順序跟legend項目順序一致)
+在同一個水平位置——maBox的不透明白底(`rgba(255,255,255,0.88)`)蓋在legend那幾個項目
+的正上方，不是「兩排文字疊在一起看不清楚」，是「maBox整塊直接蓋住legend那幾個項目」。
+
+- **根本修正**：`desktop/chart_render.py`的`render_chart_html()`裡，既然maBox已經用
+  文字顯示MA5/10/20/120/240的數值+方向，Plotly原生legend裡這幾條均線的項目資訊完全
+  重複，不是「不小心被蓋住」而是「這塊區域本來就被maBox佔用，底下的legend項目沒有
+  存在的必要」——直接把這5條均線的`trace.showlegend`設成`False`(MA60不在
+  `MA_ROW_PERIODS`裡，維持顯示)，legend項目數變少，剩下的項目(MA60+SAR+切線/軌道線+
+  支撐壓力+MACD/KD共約12項)能完整擠進一排，不會再跟三列固定框衝突。⚠️ 這個改動只
+  發生在`chart_render.py`(桌面版專用)，不動`src/presentation/chart_data.py`共用的
+  `build_candlestick_figure()`，Streamlit版沒有maBox這個機制，legend項目不受影響。
+  同時maBox裡每個「MA5」「MA10」…標籤改用跟圖上那條均線一樣的顏色(`MA_COLORS`)，
+  取代被關掉的legend項目原本提供的「顏色→均線」對照功能，不是單純拿掉沒有補償。
+- **顯示均線/切線/支撐壓力/MACD/KD/SAR這些checkbox搬進「圖表」內層tab**：使用者
+  截圖指出這些checkbox只影響圖表顯示，之前放在`detail_inner_tabs`外面，切到「個股
+  分析」tab時仍佔用畫面空間、卻完全用不到。改成收進`chart_tab_layout`內部，跟
+  `chart_view`/`summary_view`同一個tab，「個股分析」tab不再顯示這排checkbox。
+- **產業別篩選改成複選**：使用者要求比照Excel欄位篩選的打勾複選方式。新增
+  `_CheckableComboBox(QComboBox)`：`setModel(QStandardItemModel)`+每個項目
+  `Qt.ItemIsUserCheckable`，覆寫`hidePopup()`為no-op攔截QComboBox內建「點了任一
+  項目就收合選單」的預設行為，讓使用者能連續勾選多個項目才收合；第一項固定「全部」
+  跟其他具體項目互斥(勾一個會自動取消另一邊)，沒有勾選任何項目時自動退回「全部」。
+  `checked_items()`回傳目前勾選的具體項目清單(勾「全部」或都沒勾時回傳空list代表
+  不限制)。`_reload_candidates()`改用`df["industry"].isin(selected_industries)`
+  取代原本的字串相等比對。
+- 驗證：PySide6實際視窗+debug script截圖——修正後的圖表legend確認只剩一排、完整
+  顯示(不再跟三列固定框重疊)，maBox裡MA5(藍)/MA10(橙)/MA20(紫)/MA120(灰)/MA240
+  (金)文字顏色正確對應圖上該條均線的顏色；「個股分析」tab確認不再顯示均線/切線等
+  checkbox；產業別複選勾兩項(ETF、上櫃ETF)後`checked_items()`正確回傳兩項、下拉
+  顯示文字變成「已選2項：ETF、上櫃ETF」，套用篩選後候選清單正確只顯示這兩個產業的
+  股票。`pytest tests/ -q`766個測試全數通過。
+
+## 候選清單預設篩選+數值欄位靠右對齊(2026-08-02)
+
+使用者要求兩個小調整：①候選清單預設就打勾「SAR多頭翻轉1天內」+「朱家泓技術分析」
+兩個條件(`sar_flip_direction_combo`預設本來就是「多頭」、`sar_flip_days_spin`預設
+本來就是1、`zhu_rule_checkbox`本來就預設勾選，唯獨`sar_flip_checkbox`本身沒有
+`setChecked(True)`，補上即可)；②candidates_table/industry_table的數值欄位(收盤價/
+進場價/停損價/漲跌幅/成交量/SAR值/SAR距離%、成交量合計/平均漲跌幅/股票數)改成靠右
+對齊，但不要緊貼儲存格右側格線——`QTableWidgetItem.setTextAlignment(Qt.AlignRight
+| Qt.AlignVCenter)`+表格的`QTableWidget::item { padding-right: 10px; }`
+stylesheet，兩者搭配才會是「靠右但留白」不是「貼齊格線」。
+
+- 驗證：debug script讀`sar_flip_checkbox.isChecked()`/`zhu_rule_checkbox.
+  isChecked()`都是`True`，套用後候選清單只剩6檔(符合SAR多頭翻轉1天內+朱家泓規則
+  雙重篩選)；截圖確認數值欄位靠右對齊、跟右邊格線有間距。`pytest tests/ -q`766個
+  測試全數通過。驗證用的截圖已依照使用者要求刪除，不留在scratchpad裡。
+
+## 桌面版預設視窗大小依螢幕解析度動態調整(2026-08-02)
+
+使用者反映桌面版預設打開的高度太高，超過可視範圍(這次字級調大兩級後版面自然高度
+變高，加重了這個問題)。`desktop/main.py`原本`window.resize(1440, 960)`是寫死的
+固定大小，沒有考慮實際螢幕解析度——在這台開發機上實測`QApplication.primaryScreen().
+availableGeometry()`(已排除工作列等系統保留區域)只有1536x824，824<960，視窗開起來
+確實會有一部分被切在螢幕外，證實這是真的bug不是假設。
+
+- `desktop/main.py`的`main()`改成用`screen.availableGeometry()`動態算視窗大小：
+  寬高分別取「理想值(1440x960)」跟「可視範圍90%」兩者的較小值，畫面夠大的螢幕
+  維持原本1440x960不會過度放大，畫面較小的螢幕會自動縮小到塞得進可視範圍；縮放後
+  用`window.move(available.center() - window.rect().center())`置中顯示，不是貼齊
+  左上角。`primaryScreen()`理論上不會回傳None，但還是保留一個回退分支(找不到螢幕
+  資訊時退回原本寫死的1440x960)，不讓這裡的例外情況直接讓程式crash。
+- 驗證：debug script印出這台機器的實際計算結果——可視範圍1536x824→視窗算出
+  1382x741、置中於(77,41)，`available.contains(window.geometry())`回傳`True`，
+  確認視窗完全落在可視範圍內，不會被切到螢幕外。`pytest tests/ -q`766個測試
+  全數通過。
+
+## 移植ref-project的庫存清單／觀察清單功能，DB分開放(2026-08-02)
+
+使用者要求參考`ref-project/tw_stock_analyzer`的「庫存清單」(使用者實際持有的股票，
+記錄成本價/持股數，算浮動損益)跟「觀察清單」(想追蹤但還沒買的股票，支援多個群組，
+使用者確認要比照ref-project)這兩個功能移植過來，並要求DB要分開放，不要混進
+`data/tw_stock.db`。
+
+調查ref-project(`ui/widgets/inventory_list.py`/`watchlist.py`/`database/
+storage.py`)後確認：它的「現價/均線/SAR」資料來自自己的`scan_cache`快取表，透過
+`ATTACH DATABASE`把獨立的`inventory.db`掛進主連線一次查完，庫存/觀察清單各自有
+per-股票的背景yfinance更新worker(因為它沒有像本專案這樣完整的每日排程)。
+
+**這次移植時簡化的部分**：本專案已經有`stock_prices`+`daily_indicators`(每天由
+`scripts/daily_pipeline.py`自動更新)，庫存/觀察清單要顯示的「現價/SAR」資料本來
+就已經是最新的，**不需要另外做背景yfinance更新worker或快取表**。另外本專案的
+主DB連線可能是本機sqlite、也可能是Turso(遠端)，SQLite的`ATTACH DATABASE`對Turso
+無效，所以**不比照ref-project用ATTACH**，改成庫存/觀察清單DB永遠是獨立的本機
+sqlite檔案(`data/portfolio.db`，由`PORTFOLIO_DB_PATH`環境變數控制，`desktop/
+main.py`用`os.environ.setdefault()`設定預設值，不支援Turso)，查詢時開兩條連線
+各自查，在Python/pandas端用stock_id合併，跟`load_industry_rotation()`等函式
+已經在用的「多次查詢+pandas合併」風格一致，不是新模式。
+
+- **`src/data/portfolio_schema.sql`**(新)：`inventory_stocks`(stock_id為主鍵，
+  cost_price/shares/note)、`watchlist_groups`(id/group_name)、`watchlist_stocks`
+  (複合主鍵group_id+stock_id)。刻意不存name欄位——本專案的`stocks.name`是唯一
+  權威來源，查詢時JOIN主DB取得，避免兩份資料不同步。
+- **`src/data/portfolio_storage.py`**(新)：比照`storage.py`風格的CRUD函式
+  (`ensure_portfolio_schema`/`init_portfolio_db`/庫存的add-update-delete-clear-
+  list/觀察清單群組的add-rename-delete-list/觀察清單股票的add-update-delete-
+  clear-list/`add_stocks_to_watchlist`批次加入)。`delete_watchlist_group()`
+  先手動刪`watchlist_stocks`裡對應的列再刪group——SQLite預設不強制開啟`PRAGMA
+  foreign_keys`，不能完全依賴schema裡宣告的REFERENCES自動連動刪除。
+- **`src/data/connection.py`**新增`get_default_portfolio_connection()`：讀
+  `PORTFOLIO_DB_PATH`環境變數，未設定時預設`data/portfolio.db`，永遠是本機
+  sqlite(不支援Turso)。
+- **`src/presentation/portfolio_data.py`**(新)：`_load_price_and_sar_snapshot()`
+  查每檔股票「各自最新一天」的名稱/收盤價/漲跌幅/SAR資料(不是同一個target_date，
+  因為庫存/觀察清單的股票不見得同一天都有資料，用`MAX(date)`子查詢)；
+  `load_inventory()`/`load_watchlist()`合併portfolio DB的持股資料跟這份快照，
+  算市值/帳面損益/報酬率/今日資產變動，成本價或持股數缺值時衍生欄位是None不crash。
+- **`desktop/main_window.py`**：新增`self.portfolio_conn`(獨立連線，失敗不影響
+  其他分頁)、`_StockEditDialog(QDialog)`(庫存/觀察清單共用的新增/編輯表單，股票
+  代號欄位失焦時即時查名稱確認)、`TAB_INVENTORY`/`TAB_WATCHLIST`常數、
+  `_build_inventory_tab()`/`_build_watchlist_tab()`(共用`_build_portfolio_table()`/
+  `_populate_portfolio_table()`/`_portfolio_summary_text()`，只有表頭文字
+  「成本價」vs「參考成本價」不同)。庫存清單有「加入觀察清單」批次動作(選取列→
+  跳出勾選群組的簡單對話框→呼叫`add_stocks_to_watchlist()`)，比照ref-project
+  只做這個單向操作，不做「觀察清單轉庫存」。觀察清單多一列群組管理(新增/重新
+  命名/刪除，用`QInputDialog.getText()`+`QMessageBox.question()`二次確認刪除，
+  這是本專案桌面版第一個「使用者可以刪除自己資料」的功能，之前候選清單/圖表都是
+  唯讀衍生資料沒有這類確認)，首次啟動自動建立「預設觀察清單」群組。兩個分頁都用
+  既有的lazy-refresh-on-switch模式。
+- 新增`tests/test_portfolio_storage.py`(25個測試中的17個，CRUD/群組刪除連動/
+  批次加入不覆蓋既有值)、`tests/test_portfolio_data.py`(8個，市值/損益/報酬率
+  計算、缺值時衍生欄位是None、股票不在主DB時現價是None不crash)。
+- 驗證：PySide6實際視窗+debug script(用暫存的獨立portfolio DB，不動使用者真正的
+  `data/portfolio.db`)——新增2檔庫存(2330成本800/1000股、2454成本1300/200股)後
+  表格正確顯示現價/市值/損益/報酬率，摘要列正確加總；新增「半導體」觀察群組、
+  加入2330(無成本價)後市值/損益等衍生欄位正確顯示"-"；刪除「半導體」群組後
+  `list_watchlist_stock_ids()`回傳空list(確認連動刪除)、「預設觀察清單」群組
+  不受影響。截圖確認排版正常(數值靠右對齊、群組管理按鈕齊全)。`pytest tests/
+  -q`791個測試全數通過(766個既有+25個新增)。驗證用的截圖/暫存DB已依規範刪除。
+
+## 庫存清單支援分批買入(多筆明細)＋依股票彙總檢視(2026-08-02)
+
+使用者反映實際狀況是分批買入(同一檔股票不同時間、不同價格買好幾次)，上一輪
+`inventory_stocks`用`stock_id`當主鍵，同一檔股票只能存一筆，再次新增會直接覆蓋
+掉舊資料。使用者確認要支援「各批次分開記錄」，並比照預覽選項提供**明細檢視**
+(每批各自一列，含買入日期)＋**彙總檢視**(依股票算加權平均成本)兩種畫面可切換。
+`data/portfolio.db`當時還沒被建立過，直接改schema不需要處理既有資料migration。
+
+- **`src/data/portfolio_schema.sql`**：`inventory_stocks`主鍵從`stock_id`改成
+  自動遞增的`id`，`stock_id`變成一般欄位(加索引)，新增`buy_date`欄位("YYYY-MM-
+  DD"，選填)。`watchlist_groups`/`watchlist_stocks`不動——觀察清單是「追蹤中、
+  還沒買」的概念，同一檔股票在同一群組出現多筆沒有意義。
+- **`src/data/portfolio_storage.py`**：庫存清單CRUD全部改成以批次(lot) id為
+  單位操作：`add_inventory_stock()`改成永遠新增一筆新批次(不再是ON CONFLICT
+  覆蓋)、回傳新批次id；`update_inventory_stock()`/`delete_inventory_stock()`
+  改成依`lot_id`(不是`stock_id`)操作指定那一批；`list_inventory_stock_ids()`
+  改成`SELECT DISTINCT`；新增`get_inventory_lot(conn, lot_id)`取代原本的
+  `get_inventory_stock(conn, stock_id)`。
+- **`src/presentation/portfolio_data.py`**：`_merge_holdings_with_snapshot()`
+  加`extra_columns`參數(明細檢視要多帶`id`/`buy_date`，觀察清單/彙總不用)。
+  新增`load_inventory_lots()`(取代`load_inventory()`，每筆批次各自算市值/損益/
+  報酬率，不是整檔股票的加總)、`load_inventory_summary()`(依`stock_id`分組，
+  只用「cost_price和shares都有填」的批次算加權平均成本`sum(cost_price*shares)
+  /sum(shares)`，避免只填一半資料的批次把平均拉偏；`lot_count`記錄這檔股票有
+  幾筆批次)。
+- **`desktop/main_window.py`**：`_StockEditDialog`新增「買入日期」欄位
+  (`show_buy_date`參數控制要不要顯示，觀察清單的呼叫端不傳，因為觀察清單不是
+  真的持股不需要買入日期；格式不符只提示不阻擋，跟股票代號解析不到時的處理
+  原則一致)，編輯模式唯讀股票代號的理由從「是主鍵」改成「批次的股票代號不該
+  事後亂改，換股票應該是刪除重建」。庫存清單分頁新增「檢視方式：明細／彙總」
+  下拉(`self.inventory_view_combo`)，用`QStackedWidget`放兩個獨立的
+  `QTableWidget`(欄位結構不同，不能共用同一個表格動態換欄位)：明細表格第一欄
+  用`Qt.ItemDataRole.UserRole`存這筆的lot id，供編輯/刪除選取列時精準指定是
+  哪一批；彙總表格是唯讀衍生資料，切到這個檢視時「編輯選取」/「刪除選取」按鈕
+  自動停用(`setEnabled(False)`)並用tooltip提示要切到明細檢視。摘要列(總成本/
+  總市值/總損益/今日資產變動)不管目前顯示哪種檢視，一律從明細資料算，確保兩種
+  檢視看到的總計數字一致。
+- 更新`tests/test_portfolio_storage.py`既有的庫存清單測試改用lot_id操作，新增
+  「同一檔股票分兩批不會互相覆蓋」「編輯/刪除只影響指定那一批」的測試；更新
+  `tests/test_portfolio_data.py`既有測試改呼叫`load_inventory_lots()`，新增
+  `load_inventory_summary()`的加權平均成本計算測試(含部分批次缺成本價/股數時
+  只用有填完整的批次算平均)。
+- 驗證：PySide6實際視窗+debug script(暫存portfolio DB，不動使用者真正的
+  `data/portfolio.db`)——2330分兩批新增(800元/1000股/2026-07-01、850元/500股/
+  2026-07-20)，明細檢視顯示2列各自的買入日期/成本/損益；彙總檢視顯示1列，
+  平均成本816.67(=(800×1000+850×500)/1500)、總持股數1500、批次數2，且「編輯
+  選取」「刪除選取」按鈕正確停用；明細檢視編輯第一批成本價後，直接查DB確認
+  第二批的cost_price仍是850.0不受影響；刪除第二批後明細列數從3降為2，只剩
+  2330改過的第一批+2454。`pytest tests/ -q`794個測試全數通過。截圖/暫存DB
+  驗證後已刪除。
+
+## 庫存買入日期自動轉格式(2026-08-02)
+
+使用者反映「買入日期」欄位打`20260802`這種8碼數字、跳到下一格時希望自動轉成
+`2026-08-02`，不用自己手動加分隔符號。新增`_normalize_date_text()`(desktop/
+main_window.py模組層級函式，跟`_format_month_day()`放在一起)：去掉輸入文字裡
+所有非數字字元，剩下恰好8碼數字就照"YYYYMMDD"解析回"YYYY-MM-DD"，這樣不管原本
+打的是"20260802"、"2026/08/02"、"2026.08.02"哪種分隔符號(或完全沒有分隔符號)
+都能正確轉換；不是8碼、或8碼但不是合法日期(例如月份13)時原樣放回，不阻擋輸入，
+跟這個專案對使用者輸入格式一貫的「盡量幫忙轉、轉不了就放過」寬鬆原則一致。
+
+`_StockEditDialog`的`buy_date_input`欄位(`QLineEdit`)接上`editingFinished`訊號
+呼叫`_normalize_buy_date()`，在使用者跳到下一格(Tab/點別的地方失焦)時觸發；
+`_on_accept()`送出前也保險呼叫一次(防呆按Enter直接送出、沒有真正經過焦點轉移
+事件的情況)。
+
+驗證：用`QTest.keyClicks()`模擬使用者在對話框裡實際打字、`setFocus()`切到別的
+欄位模擬真正的焦點轉移(觸發editingFinished)——輸入"20260802"跟"2026/08/02"
+兩種格式，失焦後都正確變成"2026-08-02"。`pytest tests/ -q`794個測試全數通過
+(這是desktop/main_window.py的Qt widget邏輯，跟現有main_window.py其他函式一樣
+沒有寫成pytest測試，用PySide6實際互動的debug script驗證)。
