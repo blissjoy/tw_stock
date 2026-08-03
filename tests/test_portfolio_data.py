@@ -45,13 +45,65 @@ def test_load_inventory_lots_empty_when_no_holdings():
 
     assert df.empty
     assert list(df.columns) == [
-        "stock_id", "name", "id", "buy_date", "cost_price", "shares", "note",
-        "close", "pct_change", "market_value", "profit", "return_pct", "today_change_value",
+        "stock_id", "name", "id", "buy_date", "cost_price", "shares", "fee", "note",
+        "close", "pct_change", "market_value", "sell_fee", "profit", "return_pct", "today_change_value",
         "sar_value", "sar_status", "sar_distance_pct",
     ]
 
 
-def test_load_inventory_lots_computes_market_value_profit_and_return_pct():
+def test_estimate_buy_fee_matches_users_real_hon_hai_holding():
+    """反推校準的基準案例：使用者實際持有的鴻海庫存分3批買入(9,975/12,475/
+    27,060元)，券商app顯示合計手續費21元——逐筆估算後加總應該精確吻合，這是
+    BROKER_COMMISSION_DISCOUNT(3折)這個常數的校準依據，不能只是「差不多」。
+    """
+    assert portfolio_data.estimate_buy_fee(199.5, 50) == 4
+    assert portfolio_data.estimate_buy_fee(249.5, 50) == 5
+    assert portfolio_data.estimate_buy_fee(246.0, 110) == 12
+
+
+def test_estimate_buy_fee_returns_none_when_cost_price_or_shares_missing():
+    assert portfolio_data.estimate_buy_fee(None, 100) is None
+    assert portfolio_data.estimate_buy_fee(100.0, None) is None
+
+
+def test_estimate_buy_fee_applies_minimum_fee_floor():
+    """交易金額很小時，估算出來的手續費不能低於最低手續費門檻(多數數位券商
+    約1元)。"""
+    assert portfolio_data.estimate_buy_fee(1.0, 1) == portfolio_data.MIN_COMMISSION_FEE
+
+
+def test_estimate_sell_cost_combines_commission_and_transaction_tax():
+    """使用者糾正：「21元」是券商app顯示的『以目前現價賣出』預估手續費，不是買入
+    手續費加總——賣出手續費用跟買進同一個折扣(3折)，但另外要加計只課賣方、不能
+    打折的0.3%證券交易稅，這兩筆都是「如果現在賣出」才會發生的成本。這裡用使用者
+    實際持有的鴻海庫存範例(現價250.5×總股數210=市值52,605)驗證精確金額，不能只是
+    「差不多」：手續費=round(52605×0.001425×0.3)=22，證交稅=round(52605×0.003)=158，
+    合計180。
+    """
+    assert portfolio_data.estimate_sell_cost(52605.0) == 180
+
+
+def test_estimate_sell_cost_returns_none_when_market_value_missing():
+    assert portfolio_data.estimate_sell_cost(None) is None
+    assert portfolio_data.estimate_sell_cost(float("nan")) is None
+
+
+def test_estimate_sell_cost_returns_zero_for_non_positive_market_value():
+    assert portfolio_data.estimate_sell_cost(0) == 0
+
+
+def test_estimate_sell_cost_applies_minimum_commission_floor():
+    """交易金額很小時，賣出手續費(不含證交稅那部分)一樣不能低於最低手續費門檻。"""
+    tiny_value = 1.0
+    tax = round(tiny_value * portfolio_data.TWSE_TRANSACTION_TAX_RATE)
+    assert portfolio_data.estimate_sell_cost(tiny_value) == portfolio_data.MIN_COMMISSION_FEE + tax
+
+
+def test_load_inventory_lots_auto_estimates_fee_when_not_stored():
+    """使用者新增庫存時不用自己填手續費，系統依成本價×股數自動估算並計入損益——
+    這是2026-08-02第二次改版的核心需求：手續費「已經是券商app內含」，畫面上
+    不需要使用者手動輸入，但預估損益一定要納入。
+    """
     main_conn = _main_conn()
     portfolio_conn = _portfolio_conn()
     _seed_stock(
@@ -65,18 +117,48 @@ def test_load_inventory_lots_computes_market_value_profit_and_return_pct():
 
     assert len(df) == 1
     row = df.iloc[0]
+    expected_fee = portfolio_data.estimate_buy_fee(850.0, 1000)
+    assert row["fee"] == expected_fee
     assert row["stock_id"] == "2330"
     assert row["name"] == "台積電"
     assert row["buy_date"] == "2026-07-01"
     assert row["close"] == 910.0
     assert math.isclose(row["pct_change"], (910.0 - 900.0) / 900.0 * 100)
     assert row["market_value"] == 910.0 * 1000
-    assert row["profit"] == (910.0 - 850.0) * 1000
-    assert math.isclose(row["return_pct"], (910.0 - 850.0) / 850.0 * 100)
+    expected_sell_fee = portfolio_data.estimate_sell_cost(910.0 * 1000)
+    assert row["sell_fee"] == expected_sell_fee
+    total_cost = 850.0 * 1000 + expected_fee
+    net_proceeds = 910.0 * 1000 - expected_sell_fee
+    assert row["profit"] == net_proceeds - total_cost
+    assert math.isclose(row["return_pct"], (net_proceeds - total_cost) / total_cost * 100)
     assert row["today_change_value"] == (910.0 - 900.0) * 1000
     assert row["sar_value"] == 880.0
     assert row["sar_status"] == "多頭"
     assert math.isclose(row["sar_distance_pct"], (880.0 - 910.0) / 910.0 * 100)
+
+
+def test_load_inventory_lots_profit_and_return_pct_deduct_fee():
+    """使用者反映帳面損益/報酬率要扣除手續費才會跟證券app一致——買進手續費是
+    一筆固定金額，成本基礎是cost_price*shares+fee，不是單純cost_price*shares；
+    另外還要扣掉「如果現在賣出」才會發生的賣出手續費+證交稅(estimate_sell_
+    cost())，帳面損益才是「現在賣掉能拿到多少淨額」的正確模擬。這裡明確傳入
+    fee(模擬已經存好的舊資料)，確認不會被自動估算覆蓋掉既有的值。
+    """
+    main_conn = _main_conn()
+    portfolio_conn = _portfolio_conn()
+    _seed_stock(main_conn, "2330", "台積電", [{"date": "2026-07-31", "close": 910.0}])
+    portfolio_storage.add_inventory_stock(portfolio_conn, "2330", cost_price=850.0, shares=1000, fee=21.0, note="")
+
+    df = portfolio_data.load_inventory_lots(main_conn, portfolio_conn)
+
+    row = df.iloc[0]
+    assert row["fee"] == 21.0
+    expected_sell_fee = portfolio_data.estimate_sell_cost(910.0 * 1000)
+    assert row["sell_fee"] == expected_sell_fee
+    total_cost = 850.0 * 1000 + 21.0
+    net_proceeds = 910.0 * 1000 - expected_sell_fee
+    assert row["profit"] == net_proceeds - total_cost
+    assert math.isclose(row["return_pct"], (net_proceeds - total_cost) / total_cost * 100)
 
 
 def test_load_inventory_lots_derived_fields_are_none_when_cost_price_or_shares_missing():
@@ -90,6 +172,7 @@ def test_load_inventory_lots_derived_fields_are_none_when_cost_price_or_shares_m
     row = df.iloc[0]
     assert row["close"] == 910.0
     assert pd.isna(row["market_value"])
+    assert pd.isna(row["sell_fee"])
     assert pd.isna(row["profit"])
     assert pd.isna(row["return_pct"])
     assert pd.isna(row["today_change_value"])
@@ -119,8 +202,8 @@ def test_load_inventory_summary_empty_when_no_holdings():
 
     assert df.empty
     assert list(df.columns) == [
-        "stock_id", "name", "cost_price", "shares", "lot_count",
-        "close", "pct_change", "market_value", "profit", "return_pct", "today_change_value",
+        "stock_id", "name", "cost_price", "shares", "fee", "lot_count",
+        "close", "pct_change", "market_value", "sell_fee", "profit", "return_pct", "today_change_value",
         "sar_value", "sar_status", "sar_distance_pct",
     ]
 
@@ -143,6 +226,30 @@ def test_load_inventory_summary_computes_weighted_average_cost_price():
     assert math.isclose(row["cost_price"], (800.0 * 1000 + 850.0 * 500) / 1500)
     assert row["lot_count"] == 2
     assert row["market_value"] == 910.0 * 1500
+
+
+def test_load_inventory_summary_sums_fee_across_lots_and_deducts_from_profit():
+    """彙總損益要包含所有批次的買進手續費加總——avg_cost_price*total_shares+
+    total_fee在數學上等於sum(cost_price_i*shares_i+fee_i)，加權平均不會失真；
+    另外也要扣掉「以彙總後的總市值現在賣出」的賣出手續費+證交稅，是對整個部位
+    算一次(不是逐批分別估算再加總)，因為賣出是針對「這檔股票目前的總持股」
+    這個整體部位模擬的。"""
+    main_conn = _main_conn()
+    portfolio_conn = _portfolio_conn()
+    _seed_stock(main_conn, "2330", "台積電", [{"date": "2026-07-31", "close": 910.0}])
+    portfolio_storage.add_inventory_stock(portfolio_conn, "2330", cost_price=800.0, shares=1000, fee=20.0, note="第一批")
+    portfolio_storage.add_inventory_stock(portfolio_conn, "2330", cost_price=850.0, shares=500, fee=15.0, note="第二批")
+
+    df = portfolio_data.load_inventory_summary(main_conn, portfolio_conn)
+
+    row = df.iloc[0]
+    assert row["fee"] == 35.0
+    expected_sell_fee = portfolio_data.estimate_sell_cost(910.0 * 1500)
+    assert row["sell_fee"] == expected_sell_fee
+    total_cost = 800.0 * 1000 + 850.0 * 500 + 20.0 + 15.0
+    net_proceeds = 910.0 * 1500 - expected_sell_fee
+    assert row["profit"] == net_proceeds - total_cost
+    assert math.isclose(row["return_pct"], (net_proceeds - total_cost) / total_cost * 100)
 
 
 def test_load_inventory_summary_ignores_lots_missing_cost_price_or_shares_in_weighted_average():

@@ -22,7 +22,24 @@ def ensure_portfolio_schema(conn: sqlite3.Connection) -> None:
     """對已開啟的本機sqlite連線套用portfolio_schema.sql建表，可重複呼叫
     (CREATE TABLE IF NOT EXISTS)。"""
     conn.executescript(PORTFOLIO_SCHEMA_PATH.read_text(encoding="utf-8"))
+    _migrate_portfolio_schema(conn)
     conn.commit()
+
+
+def _migrate_portfolio_schema(conn: sqlite3.Connection) -> None:
+    """補齊「表已經存在、但缺少後來才新增的欄位」的情況——CREATE TABLE IF NOT
+    EXISTS只在表完全不存在時才會建表，對已經存在的表(使用者已經用過桌面版、
+    實際存過庫存資料)不會自動補上schema.sql後來新增的欄位，導致SELECT該欄位時
+    直接丟sqlite3.OperationalError("no such column")。這裡用PRAGMA table_info()
+    檢查欄位是否存在，不存在才ALTER TABLE ADD COLUMN，可重複呼叫不會重複執行。
+
+    2026-08-02：fee欄位是在inventory_stocks表已經有真實使用者資料後才新增的，
+    第一個踩到這個問題，之後portfolio_schema.sql如果再新增欄位，都要在這裡
+    比照補一行。
+    """
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory_stocks)").fetchall()}
+    if "fee" not in existing_columns:
+        conn.execute("ALTER TABLE inventory_stocks ADD COLUMN fee REAL")
 
 
 def init_portfolio_db(db_path: str | Path, check_same_thread: bool = True) -> sqlite3.Connection:
@@ -39,17 +56,18 @@ def init_portfolio_db(db_path: str | Path, check_same_thread: bool = True) -> sq
 
 def add_inventory_stock(
     conn: sqlite3.Connection, stock_id: str, buy_date: str | None = None,
-    cost_price: float | None = None, shares: int | None = None, note: str = "",
+    cost_price: float | None = None, shares: int | None = None, fee: float | None = None, note: str = "",
 ) -> int:
     """新增一筆庫存批次(lot)——2026-08-02改版：使用者反映實際狀況是分批買入，同一檔
     股票可以呼叫這個函式好幾次，各自是獨立的一筆紀錄(不會互相覆蓋)，回傳新批次的id。
+    fee：買進手續費，使用者直接填券商app顯示的實際金額(見schema.sql的說明)。
     """
     cur = conn.execute(
         """
-        INSERT INTO inventory_stocks (stock_id, buy_date, cost_price, shares, note, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO inventory_stocks (stock_id, buy_date, cost_price, shares, fee, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (stock_id, buy_date, cost_price, shares, note, datetime.now().isoformat()),
+        (stock_id, buy_date, cost_price, shares, fee, note, datetime.now().isoformat()),
     )
     conn.commit()
     return cur.lastrowid
@@ -57,14 +75,14 @@ def add_inventory_stock(
 
 def update_inventory_stock(
     conn: sqlite3.Connection, lot_id: int, buy_date: str | None = None,
-    cost_price: float | None = None, shares: int | None = None, note: str = "",
+    cost_price: float | None = None, shares: int | None = None, fee: float | None = None, note: str = "",
 ) -> None:
     """依批次id更新指定那一筆庫存紀錄(不是依stock_id——同一檔股票可能有多筆批次，
     要精準指定改哪一筆)。stock_id本身不可改(是這筆批次的內容，不是可變欄位，UI
     的編輯對話框對這個欄位一律唯讀)。"""
     conn.execute(
-        "UPDATE inventory_stocks SET buy_date = ?, cost_price = ?, shares = ?, note = ? WHERE id = ?",
-        (buy_date, cost_price, shares, note, lot_id),
+        "UPDATE inventory_stocks SET buy_date = ?, cost_price = ?, shares = ?, fee = ?, note = ? WHERE id = ?",
+        (buy_date, cost_price, shares, fee, note, lot_id),
     )
     conn.commit()
 
@@ -88,14 +106,17 @@ def list_inventory_stock_ids(conn: sqlite3.Connection) -> list[str]:
 
 
 def list_inventory_rows(conn: sqlite3.Connection) -> list[dict]:
-    """一次查出所有庫存批次的id/stock_id/buy_date/cost_price/shares/note(每筆
-    批次各自一列)，供src/presentation/portfolio_data.py組明細檢視的DataFrame用，
-    避免逐檔各自查一次(N+1查詢)。"""
+    """一次查出所有庫存批次的id/stock_id/buy_date/cost_price/shares/fee/note
+    (每筆批次各自一列)，供src/presentation/portfolio_data.py組明細檢視的
+    DataFrame用，避免逐檔各自查一次(N+1查詢)。"""
     cur = conn.execute(
-        "SELECT id, stock_id, buy_date, cost_price, shares, note FROM inventory_stocks ORDER BY stock_id, buy_date",
+        "SELECT id, stock_id, buy_date, cost_price, shares, fee, note FROM inventory_stocks ORDER BY stock_id, buy_date",
     )
     return [
-        {"id": r[0], "stock_id": r[1], "buy_date": r[2], "cost_price": r[3], "shares": r[4], "note": r[5]}
+        {
+            "id": r[0], "stock_id": r[1], "buy_date": r[2], "cost_price": r[3],
+            "shares": r[4], "fee": r[5], "note": r[6],
+        }
         for r in cur.fetchall()
     ]
 
@@ -103,12 +124,15 @@ def list_inventory_rows(conn: sqlite3.Connection) -> list[dict]:
 def get_inventory_lot(conn: sqlite3.Connection, lot_id: int) -> dict | None:
     """回傳單一庫存批次的內容，供編輯對話框帶入既有值使用。"""
     row = conn.execute(
-        "SELECT id, stock_id, buy_date, cost_price, shares, note FROM inventory_stocks WHERE id = ?",
+        "SELECT id, stock_id, buy_date, cost_price, shares, fee, note FROM inventory_stocks WHERE id = ?",
         (lot_id,),
     ).fetchone()
     if row is None:
         return None
-    return {"id": row[0], "stock_id": row[1], "buy_date": row[2], "cost_price": row[3], "shares": row[4], "note": row[5]}
+    return {
+        "id": row[0], "stock_id": row[1], "buy_date": row[2], "cost_price": row[3],
+        "shares": row[4], "fee": row[5], "note": row[6],
+    }
 
 
 # ----------------------------------------------------------------------

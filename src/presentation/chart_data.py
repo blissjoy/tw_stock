@@ -882,6 +882,23 @@ def build_candlestick_figure(
             name="kd-hover-value",
         ))
 
+    # ⚠️ 2026-08-02修正「K線圖斷點」bug：使用者回報MA60/MA120/MA240這幾條線在特定日期
+    # (查證是農曆春節這種連續多天的休市假期，rangebreaks把整段假期從x軸壓縮掉的位置)
+    # 會出現一段線段完全消失的視覺斷點，MA5/10/20跟K棒本身則不受影響。查證方式：直接把
+    # 這裡產生的Figure分別用純Plotly(不透過desktop/chart_render.py的自訂JS)畫成HTML用
+    # headless瀏覽器截圖，同樣看得到斷點，排除是desktop那層JS造成的；而底層DataFrame
+    # (chart_data.load_price_history()算出的MA60/120/240欄位)在整段期間完全沒有NaN，
+    # 排除是資料本身的問題。純粹是Plotly.js的已知限制：Scatter線段trace預設
+    # connectgaps=False，rangebreaks壓縮掉大段日期後，斜率越平緩(長天期均線)的線段
+    # 越容易被Plotly.js的線段簡化/斷點判斷誤判成「資料缺口」而不畫連接線，MA5/10/20
+    # 波動較大反而不會觸發這個誤判——跟rangebreaks本身是否正確(有沒有正確涵蓋假日)無關，
+    # 這裡的holiday清單(trading_calendar.py)已經查證過是正確的。修法是對所有線段類
+    # (mode="lines")trace明確設定connectgaps=True，強制跨越rangebreak的視覺缺口把線
+    # 畫連續——K棒(candlestick)/長條圖(volume/OSC)/SAR(markers-only)不支援也不需要
+    # 這個屬性，用selector限定type="scatter"精準只套用到有問題的線段類trace，不會
+    # 意外影響到其他trace。
+    fig.update_traces(connectgaps=True, selector=dict(type="scatter"))
+
     # 標題(股票代號+名稱)跟上方橫式legend(均線/切線/MACD/KD項目)搶同一塊頂端空間，原本
     # 兩者都用Plotly預設位置、margin也不夠高，會疊在一起看不清楚——改成title釘在最上緣
     # (yanchor="top", y=1)、legend的底部貼齊繪圖區頂部往上長(yanchor="bottom", y=1.01)，

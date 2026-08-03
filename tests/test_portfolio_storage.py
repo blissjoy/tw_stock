@@ -19,14 +19,14 @@ def _fresh_conn():
 def test_add_inventory_stock_then_list_and_get():
     conn = _fresh_conn()
     lot_id = portfolio_storage.add_inventory_stock(
-        conn, "2330", buy_date="2026-07-01", cost_price=800.0, shares=1000, note="核心持股",
+        conn, "2330", buy_date="2026-07-01", cost_price=800.0, shares=1000, fee=21.0, note="核心持股",
     )
 
     assert portfolio_storage.list_inventory_stock_ids(conn) == ["2330"]
     lot = portfolio_storage.get_inventory_lot(conn, lot_id)
     assert lot == {
         "id": lot_id, "stock_id": "2330", "buy_date": "2026-07-01",
-        "cost_price": 800.0, "shares": 1000, "note": "核心持股",
+        "cost_price": 800.0, "shares": 1000, "fee": 21.0, "note": "核心持股",
     }
 
 

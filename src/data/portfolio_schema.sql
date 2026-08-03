@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS inventory_stocks (
     buy_date    TEXT,                  -- 買入日期("YYYY-MM-DD")，選填
     cost_price  REAL,                  -- 這批的成本價，選填
     shares      INTEGER,               -- 這批的股數，選填
+    fee         REAL,                  -- 買進手續費，選填——2026-08-02新增，使用者
+                                        -- 直接填券商app顯示的實際金額，不是系統用
+                                        -- 固定費率換算(牌告費率+折數+最低手續費的
+                                        -- 組合太多種，直接填實際數字最準確)。
     note        TEXT,                  -- 自訂備註
     created_at  TEXT NOT NULL          -- 建立時間(ISO8601字串)
 );
