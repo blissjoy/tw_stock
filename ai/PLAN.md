@@ -4783,3 +4783,40 @@ holidays_between()`抓的是TWSE年度預先公告的假日曆，抓不到臨時
 互相取代、官方假日曆抓取失敗時仍能退回只用資料缺口反推的清單。`pytest
 tests/ -q`831個測試全數通過。用真實DB重新截圖確認07-10這個位置的斷點消失，
 K棒/成交量/均線在該位置都正確連續無空隙。
+
+## 「個股分析」的「原文與頁碼」改成可點擊連結，開新視窗閱讀筆記(2026-08-04)
+
+使用者問「原文與頁碼」部分能不能真的連結到對應的書籍筆記，用開新視窗的方式
+閱讀md檔。查證後這是可行的：規則庫(`ai/zhu-rules/`)每條規則的「原文與頁碼」
+欄位裡都會提到對應筆記檔名(例如"P03-C5-不同K線組合的意義.md")，這份檔案
+實際存在`ai/ebook-summary/`，只是先前只當純文字顯示，沒有做成連結。
+
+- `src/rule_docs.py`新增`find_ebook_summary_file(filename)`(依檔名在
+  `EBOOK_SUMMARY_DIRS`—`ai/ebook-summary/`跟`ai/ebook-summary-chen/`兩個
+  資料夾依序找，理論上zhu-rules只會指向前者，但兩個都找比較保險)、
+  `resolve_reference_files(reference)`(從「原文與頁碼」整段文字裡抓出所有
+  引用的.md檔名並還原成路徑，找不到對應實體檔案的檔名不會出現在結果裡)。
+  檔名比對規則`MD_FILENAME_PATTERN`：有些「原文與頁碼」是一段文字裡用反引號
+  跟中文連接詞引用好幾份筆記(不是單純「檔名開頭+括號說明」的簡單格式)，
+  用正規表示式從整段文字裡逐一抓出所有符合檔名慣例的片段，不是只抓開頭。
+- `desktop/main_window.py`新增`_format_reference_html()`把「原文與頁碼」裡
+  找得到實體檔案的.md檔名包成`<a href="ruledoc:///...">`連結(自訂scheme，
+  不是真的網址)；`_on_reference_link_clicked()`接住點擊、解析出檔名、呼叫
+  `_open_rule_reference_window()`開一個新的非模態`QDialog`，把該份筆記用
+  `markdown`套件轉成HTML顯示。開過的視窗存進`self._reference_windows`列表
+  避免PySide6沒有其他參照時被GC提前關閉，視窗自己關閉時再從列表移除。
+  - ⚠️ 實作時踩到一個坑：`setOpenLinks()`/`anchorClicked`其實是
+    `QTextBrowser`(繼承自`QTextEdit`、多了連結導覽功能)才有的API，單純
+    `QTextEdit`沒有——第一版直接對`self.analysis_view`(`QTextEdit`)呼叫
+    `setOpenLinks(False)`，一開視窗就`AttributeError`。改成把`self.
+    analysis_view`/`self.market_analysis_view`這兩個顯示「個股分析」/
+    「大盤分析」的元件從`QTextEdit`換成`QTextBrowser`，其餘用法(setHtml/
+    setReadOnly/document()等)完全相容，不影響既有程式碼。
+- 新增依賴`markdown`(純Python、無C擴充套件)，補進`requirements.txt`。
+- 新增6個測試(`tests/test_rule_docs.py`)：單一檔名/多檔名(反引號+連接詞
+  格式)/重複檔名去重/找不到檔案時跳過/第一個資料夾沒有時退回第二個資料夾，
+  以及一個對真實`ai/ebook-summary/`目錄的端到端驗證(用R-CANDLE-27這條真實
+  規則)。`pytest tests/ -q`837個測試全數通過。用真實桌面版模擬點擊連結，
+  確認：連結HTML正確產生、開出新視窗、視窗標題是檔案名稱、內容正確用
+  markdown渲染成有標題階層/粗體/項目清單的HTML(不是純文字)。驗證用截圖已
+  依慣例刪除。

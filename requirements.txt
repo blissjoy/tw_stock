@@ -19,3 +19,8 @@ PySide6>=6.6.0
 # 仿照ref-project/tw_stock_analyzer長期實測驗證過的yf.download(tickers_array)批次做法，
 # 原本約需1小時的TPEx更新縮短到數十秒內。本機已驗證1.4.1可正常運作。
 yfinance>=1.4.1
+
+# 「個股分析」面板「原文與頁碼」連結開新視窗閱讀ai/ebook-summary/筆記檔案時，把.md轉成
+# HTML顯示用(desktop/main_window.py的_open_rule_reference_window())。純Python、無C
+# 擴充套件，本機已驗證3.10.3可正常運作。
+markdown>=3.7

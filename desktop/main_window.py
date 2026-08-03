@@ -14,9 +14,11 @@ import html
 import re
 import sqlite3
 import tempfile
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
+import markdown
 import pandas as pd
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
@@ -46,6 +48,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
@@ -61,6 +64,7 @@ from src.data.yfinance_client import TAIEX_STOCK_ID
 from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
+from src import rule_docs
 from src.presentation import chart_data, pipeline_status, portfolio_data, stock_detail_data
 from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
@@ -553,6 +557,10 @@ class MainWindow(QMainWindow):
         # 「切換」不會發訊號，導致大盤分頁沒有經過_on_tab_changed()、一直是空白，要手動
         # 切到別的分頁再切回來才會有內容。這個旗標確保只在視窗第一次顯示時補打一次。
         self._startup_tab_refreshed = False
+        # 「原文與頁碼」連結開的筆記閱讀視窗(見_open_rule_reference_window())——
+        # PySide6沒有其他地方持有參照的QDialog會被提前GC回收(症狀是視窗一開就馬上
+        # 自動關閉)，這個list負責讓視窗活著直到使用者自己關閉，視窗關閉時再從list移除。
+        self._reference_windows: list[QDialog] = []
 
         self._build_ui()
         self._refresh_date_list()
@@ -807,10 +815,20 @@ class MainWindow(QMainWindow):
         # 2026-08-02改版：「個股分析」不再是按鈕展開/收合的內嵌面板，改成跟「圖表」平行的
         # 內層tab(見下面self.detail_inner_tabs)——使用者切到這個tab才需要顯示，不用像
         # 之前那樣另外維護一個顯示/隱藏的checkable按鈕狀態。
-        self.analysis_view = QTextEdit()
+        # 用QTextBrowser(QTextEdit的子類別，多了連結導覽功能)取代單純的QTextEdit——
+        # 「原文與頁碼」裡的.md檔名會被_build_analysis_html()包成ruledoc:///連結(見該
+        # 函式說明)，anchorClicked訊號跟setOpenLinks()是QTextBrowser才有的API(單純
+        # QTextEdit沒有，2026-08-04第一版誤用QTextEdit直接呼叫setOpenLinks()會
+        # AttributeError)，除了連結功能外其餘用法(setReadOnly/setHtml/document()等)
+        # 跟QTextEdit完全相容，不影響既有程式碼。setOpenLinks(False)讓它不要自己嘗試
+        # 把這個非標準scheme當網址開啟，改由_on_reference_link_clicked()接手判斷、
+        # 開新視窗顯示筆記內容。
+        self.analysis_view = QTextBrowser()
         self.analysis_view.setReadOnly(True)
         self.analysis_view.setFrameShape(QFrame.Shape.NoFrame)
         self.analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.analysis_view.setOpenLinks(False)
+        self.analysis_view.anchorClicked.connect(self._on_reference_link_clicked)
 
         # ⚠️ 2026-08-02修正：原本靠setMinimumHeight(450)+stretch=1「猜」一個夠用的高度，
         # QWebEngineView的sizeHint()不會反映實際載入的Plotly圖表高度，_AutoHeightTabWidget
@@ -1607,10 +1625,13 @@ class MainWindow(QMainWindow):
         # 的K線圖直接銜接，不是分頁裡另外圈出來的一塊。高度計算(_set_market_analysis_
         # html()裡的setFixedHeight)維持不變——那是為了讓QTextEdit本身能顯示完整內容
         # 不被截斷，不是「限縮」，是精準算出剛好的高度，跟這裡拿掉外框是两件事。
-        self.market_analysis_view = QTextEdit()
+        self.market_analysis_view = QTextBrowser()  # 見self.analysis_view建構處的說明
         self.market_analysis_view.setReadOnly(True)
         self.market_analysis_view.setFrameShape(QFrame.Shape.NoFrame)
         self.market_analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 跟self.analysis_view同一套「原文與頁碼」連結點擊處理，見該處的說明。
+        self.market_analysis_view.setOpenLinks(False)
+        self.market_analysis_view.anchorClicked.connect(self._on_reference_link_clicked)
 
         # 「資料更新至」：使用者反映大盤分頁看不出目前顯示的股價資料多新——這個時間戳
         # 原本只有「選股」分頁的status_label有顯示(股價更新至/候選清單算至/下次更新
@@ -2056,10 +2077,84 @@ class MainWindow(QMainWindow):
                 # 跟上面的「目前狀態：」分開標籤，不是延續文字。
                 block += f"分析：{html.escape(m['description'])}<br>"
             if m.get("reference"):
-                block += f"<i>原文與頁碼：{html.escape(m['reference'])}</i>"
+                block += f"<i>原文與頁碼：{self._format_reference_html(m['reference'])}</i>"
             block += "</p><hr>"
             blocks.append(block)
         return "".join(blocks)
+
+    @staticmethod
+    def _format_reference_html(reference: str) -> str:
+        """把「原文與頁碼」文字裡引用的.md檔名轉成可點擊連結，點擊後開新視窗直接
+        閱讀該份筆記(見_on_reference_link_clicked())，不用手動去ai/ebook-summary/
+        資料夾找檔案。2026-08-04新增。
+
+        用`ruledoc:///`這個非標準scheme當連結(不是真的網址)，配合建構時對
+        analysis_view/market_analysis_view呼叫的`setOpenLinks(False)`，QTextEdit
+        不會自己嘗試把它當成外部連結開啟，而是觸發`anchorClicked`訊號交給
+        `_on_reference_link_clicked()`處理。找不到對應實體檔案的檔名(理論上不該
+        發生，通常是規則庫文字本身筆誤)維持原樣文字，不會被包成連結——連到不存在
+        的檔案比留著純文字更容易誤導使用者。
+        """
+        resolved_names = {name for name, _ in rule_docs.resolve_reference_files(reference)}
+        if not resolved_names:
+            return html.escape(reference)
+        parts: list[str] = []
+        last_end = 0
+        for match in rule_docs.MD_FILENAME_PATTERN.finditer(reference):
+            filename = match.group(0)
+            parts.append(html.escape(reference[last_end:match.start()]))
+            if filename in resolved_names:
+                href = f"ruledoc:///{urllib.parse.quote(filename)}"
+                parts.append(f'<a href="{href}">{html.escape(filename)}</a>')
+            else:
+                parts.append(html.escape(filename))
+            last_end = match.end()
+        parts.append(html.escape(reference[last_end:]))
+        return "".join(parts)
+
+    def _on_reference_link_clicked(self, url: QUrl) -> None:
+        """「原文與頁碼」連結的點擊處理：只接受_format_reference_html()產生的
+        `ruledoc:///`連結，解析出檔名後開新視窗顯示筆記內容(見
+        _open_rule_reference_window())。"""
+        if url.scheme() != "ruledoc":
+            return
+        filename = urllib.parse.unquote(url.path().lstrip("/"))
+        path = rule_docs.find_ebook_summary_file(filename)
+        if path is None:
+            QMessageBox.warning(self, "找不到筆記檔案", f"找不到「{filename}」，可能是規則庫連結有誤。")
+            return
+        self._open_rule_reference_window(path)
+
+    def _open_rule_reference_window(self, path: Path) -> None:
+        """開一個新的非模態視窗，把`path`這份ai/ebook-summary/筆記檔案轉成HTML顯示。
+        2026-08-04新增，使用者要求「原文與頁碼」的引用真的能點開來讀，不用自己去
+        資料夾找檔案。
+
+        每次點擊都開一個新視窗(不是重用同一個)，方便使用者同時對照好幾份筆記；
+        用self._reference_windows留著參照，避免PySide6沒有其他地方持有參照時視窗
+        被提前GC回收(症狀是視窗一開就馬上自動關閉)。視窗關閉時从list移除，不會
+        無限累積記憶體。
+        """
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "讀取失敗", f"無法讀取「{path.name}」：{exc}")
+            return
+        body_html = markdown.markdown(content, extensions=["tables", "fenced_code"])
+
+        window = QDialog(self)
+        window.setWindowTitle(path.stem)
+        window.resize(900, 800)
+        window.setModal(False)
+        layout = QVBoxLayout(window)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setHtml(body_html)
+        layout.addWidget(view)
+
+        self._reference_windows.append(window)
+        window.finished.connect(lambda _: self._reference_windows.remove(window))
+        window.show()
 
     def _refresh_analysis_view(self) -> None:
         """填入「個股分析」面板內容：目前這檔股票符合規則庫中哪些訊號(依信心分數高到低)，
