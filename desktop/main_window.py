@@ -82,6 +82,12 @@ TAB_WATCHLIST = 5
 # 的market參數值；"全部"不在這裡，get()查不到就是None(不限制)。
 _MARKET_FILTER_VALUES = {"上市": "TWSE", "上櫃": "TPEx"}
 
+# 候選清單「訊號(信心%)」欄位最多顯示幾條規則，超過的話最後一行改顯示「(...+n more)」——
+# 2026-08-03新增，使用者反映有些股票同時符合十幾條規則時，儲存格會被撐得很長。信心分數
+# 加總排序(見chart_data.load_stock_universe_for_date())仍然吃全部規則，不受這裡的顯示
+# 上限影響，只是「顯示」被截斷，排序依據的資料沒有跟著縮水。
+CANDIDATE_SIGNAL_MAX_LINES = 5
+
 # 觀察清單表格共用的欄位結構(見_populate_portfolio_table())：
 # 股票代號/名稱/現價/漲跌幅(%)/成本價/持股數/市值/帳面損益/報酬率(%)/SAR狀態/SAR距離%/備註
 _PORTFOLIO_NUMERIC_COLUMNS = {2, 3, 4, 5, 6, 7, 8, 10}
@@ -133,6 +139,23 @@ def _normalize_date_text(text: str) -> str:
         return datetime.strptime(digits_only, "%Y%m%d").strftime("%Y-%m-%d")
     except ValueError:
         return text
+
+
+def _truncate_signal_lines(signal_name: str | None, max_lines: int = CANDIDATE_SIGNAL_MAX_LINES) -> str:
+    """候選清單「訊號(信心%)」欄位的顯示文字：signal_name本身用"\\n"分隔多條規則(見
+    chart_data.load_stock_universe_for_date())，超過max_lines條時只顯示前max_lines條，
+    最後多一行"(...+n more)"，n是省略掉的規則數——2026-08-03新增，避免同時符合十幾條
+    規則的股票把儲存格撐得很長。只影響顯示，完整內容仍然透過tooltip看得到，排序依據的
+    信心分數加總(chart_data.py的_confidence_sum)吃的是原始signal_name、不受這裡截斷
+    影響。
+    """
+    if not signal_name:
+        return "-"
+    lines = signal_name.split("\n")
+    if len(lines) <= max_lines:
+        return signal_name
+    hidden = len(lines) - max_lines
+    return "\n".join(lines[:max_lines]) + f"\n(...+{hidden} more)"
 
 
 class _NumericTableWidgetItem(QTableWidgetItem):
@@ -1816,12 +1839,19 @@ class MainWindow(QMainWindow):
             sar_value_text = f"{row['sar_value']:.2f}" if pd.notna(row["sar_value"]) else "-"
             sar_status_text = row["sar_status"] if pd.notna(row["sar_status"]) else "-"
             sar_distance_text = f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-"
+            signal_full = row["signal_name"] if pd.notna(row["signal_name"]) else None
+            signal_display = _truncate_signal_lines(signal_full)
             values = [
-                row["stock_id"], row["name"], industry_text, row["signal_name"], close_text,
+                row["stock_id"], row["name"], industry_text, signal_display, close_text,
                 entry_price_text, stop_loss_text, pct_text, volume_text,
                 sar_value_text, sar_status_text, sar_distance_text,
             ]
-            for col_idx, value in enumerate(values):
+            # 訊號欄位(index 3)的tooltip用完整規則清單，不是被截斷成CANDIDATE_SIGNAL_MAX_LINES
+            # 行的顯示文字——排序依據(信心分數加總)吃的也是完整清單，滑鼠移過去應該看得到
+            # 被省略掉的規則實際是哪幾條，不是只看到跟儲存格一樣的截斷內容。
+            tooltips = list(values)
+            tooltips[3] = signal_full or "-"
+            for col_idx, (value, tooltip_value) in enumerate(zip(values, tooltips)):
                 item_cls = _NumericTableWidgetItem if col_idx in _NUMERIC_COLUMNS else QTableWidgetItem
                 item = item_cls(str(value))
                 if col_idx in _NUMERIC_COLUMNS:
@@ -1832,7 +1862,7 @@ class MainWindow(QMainWindow):
                 # 部分欄位內容常常比欄寬長、會被截斷看不到完整內容(尤其訊號欄位同時符合多條
                 # 規則時)；設定tooltip讓滑鼠移過去任一儲存格都能懸浮顯示完整文字，不用特別
                 # 放寬欄寬。
-                item.setToolTip(str(value))
+                item.setToolTip(str(tooltip_value))
                 self.candidates_table.setItem(row_idx, col_idx, item)
         self.candidates_table.setSortingEnabled(True)
         self.candidates_table.resizeRowsToContents()  # 讓多行的訊號欄位撐開列高，完整顯示

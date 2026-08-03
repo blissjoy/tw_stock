@@ -289,6 +289,74 @@ def test_load_stock_universe_for_date_sorts_by_total_confidence_descending():
     assert list(df["stock_id"]) == ["1101", "3008", "2330"]  # 179 > 88 > 87
 
 
+def test_load_stock_universe_for_date_breaks_confidence_ties_by_sar_distance_pct():
+    """2026-08-03新增：信心分數加總同分時，改用SAR距離%由大到小當第2順位——1101的
+    SAR距離%(+4%)比3008(-5%)大，即使兩者信心分數同樣是87分，1101應該排在前面。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "3008", "name": "大立光", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "1101", "date": "2026-07-23", "open": 48.0, "high": 51.0, "low": 47.0, "close": 50.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "3008", "date": "2026-07-23", "open": 1950.0, "high": 2050.0, "low": 1940.0, "close": 2000.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-23", "stock_id": "1101", "signal_name": "R-CLASSIC-24突破大量黑K買進（87%）",
+         "entry_price": 50.0, "stop_loss": 45.0, "note": None, "created_at": "2026-07-23T18:00:00"},
+        {"date": "2026-07-23", "stock_id": "3008", "signal_name": "R-SCREEN-15緩漲軌道突破做多（87%）",
+         "entry_price": 2000.0, "stop_loss": 1900.0, "note": None, "created_at": "2026-07-23T18:00:01"},
+    ])
+    upsert_daily_indicators(conn, [
+        {"stock_id": "1101", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
+         "ma120": None, "ma240": None, "sar_value": 52.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "updated_at": "2026-07-23T18:00:00"},  # (52-50)/50*100 = +4%
+        {"stock_id": "3008", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
+         "ma120": None, "ma240": None, "sar_value": 1900.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "updated_at": "2026-07-23T18:00:00"},  # (1900-2000)/2000*100 = -5%
+    ])
+
+    df, _, _ = load_stock_universe_for_date(conn)
+
+    assert list(df["stock_id"]) == ["1101", "3008"]
+
+
+def test_load_stock_universe_for_date_breaks_remaining_ties_by_volume():
+    """信心分數加總跟SAR距離%都同分時，改用成交量由大到小當第3順位——1101成交量
+    (5000張)比3008(2000張)大，兩者應該排在前面。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "3008", "name": "大立光", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "1101", "date": "2026-07-23", "open": 48.0, "high": 51.0, "low": 47.0, "close": 50.0,
+         "volume": 5_000_000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "3008", "date": "2026-07-23", "open": 1950.0, "high": 2050.0, "low": 1940.0, "close": 2000.0,
+         "volume": 2_000_000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-23", "stock_id": "1101", "signal_name": "R-CLASSIC-24突破大量黑K買進（87%）",
+         "entry_price": 50.0, "stop_loss": 45.0, "note": None, "created_at": "2026-07-23T18:00:00"},
+        {"date": "2026-07-23", "stock_id": "3008", "signal_name": "R-SCREEN-15緩漲軌道突破做多（87%）",
+         "entry_price": 2000.0, "stop_loss": 1900.0, "note": None, "created_at": "2026-07-23T18:00:01"},
+    ])
+    upsert_daily_indicators(conn, [
+        {"stock_id": "1101", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
+         "ma120": None, "ma240": None, "sar_value": 52.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "updated_at": "2026-07-23T18:00:00"},  # (52-50)/50*100 = +4%
+        {"stock_id": "3008", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
+         "ma120": None, "ma240": None, "sar_value": 2080.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "updated_at": "2026-07-23T18:00:00"},  # (2080-2000)/2000*100 = +4%，跟1101同分
+    ])
+
+    df, _, _ = load_stock_universe_for_date(conn)
+
+    assert list(df["stock_id"]) == ["1101", "3008"]
+
+
 def test_load_stock_universe_for_date_computes_pct_change_and_volume_from_stock_prices():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])

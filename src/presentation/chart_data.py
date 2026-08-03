@@ -569,9 +569,15 @@ def load_stock_universe_for_date(
             "pct_change", "volume", "sar_value", "sar_status", "sar_distance_pct", "_confidence_sum",
         ],
     )
-    # 預設排序：信心分數加總由高到低；同分時退回股票代號排序，確保結果穩定、可重現。
+    # 預設排序：信心分數加總→SAR距離%→成交量，皆由高到低；同分時再退回股票代號排序，
+    # 確保結果穩定、可重現。2026-08-03改版：使用者要求排序依據除了信心分數加總，還要
+    # 比照SAR距離%(數值越大代表趨勢/翻轉訊號越明確)、成交量(越大代表越有流動性/關注度)
+    # 依序當第2/3順位——sort_values()的na_position="last"讓還沒回補SAR/查無成交量的
+    # 股票統一排到最後，不會因為NaN在比較時的不確定行為而插進中間。
     universe_df = universe_df.sort_values(
-        ["_confidence_sum", "stock_id"], ascending=[False, True]
+        ["_confidence_sum", "sar_distance_pct", "volume", "stock_id"],
+        ascending=[False, False, False, True],
+        na_position="last",
     ).drop(columns="_confidence_sum").reset_index(drop=True)
     return universe_df, target_date, is_intraday
 
