@@ -257,33 +257,42 @@ def test_institutional_periods_uses_20_day_not_30_day():
     assert "30日" not in stock_detail_data.INSTITUTIONAL_PERIODS
 
 
-def test_load_institutional_momentum_analysis_compares_recent_vs_prior_window():
-    """10個交易日只有外資有紀錄：前5天(day1~5)每天買超100、近5天(day6~10)每天買超
-    200——5日這個天期的近5天合計應該是1000、前5天合計應該是500，兩者都是買超，
-    近期更多，判定為「買超力道增強」。資料只有10天，湊不滿20日/40日各自要求的
-    40天/80天，這兩個天期不應該出現在結果裡。"""
+def test_load_institutional_momentum_analysis_splits_foreign_trust_and_combined_excludes_dealer():
+    """10個交易日，外資／投信／自營商都有紀錄：外資前5天(day1~5)每天買超100、
+    近5天(day6~10)每天買超200(力道增強)；投信前5天每天買超50、近5天每天買超30
+    (力道減弱)；自營商每天買超1000(刻意設一個很大的數字)。2026-08-03第二次
+    改版：使用者要求外資/投信要分開看、自營商不計入這裡的比較——驗證①外資／
+    投信的5日近期/前期合計各自正確、②"外資+投信"合計等於兩者相加(1150/750，
+    不含自營商的每天1000)、③結果裡沒有"自營商"這個分類。"""
     conn = _main_conn()
     _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
     _seed_institutional(conn, "2330", {
-        "2026-07-01": {"Foreign_Investor": (150, 50)},
-        "2026-07-02": {"Foreign_Investor": (150, 50)},
-        "2026-07-03": {"Foreign_Investor": (150, 50)},
-        "2026-07-04": {"Foreign_Investor": (150, 50)},
-        "2026-07-05": {"Foreign_Investor": (150, 50)},
-        "2026-07-06": {"Foreign_Investor": (250, 50)},
-        "2026-07-07": {"Foreign_Investor": (250, 50)},
-        "2026-07-08": {"Foreign_Investor": (250, 50)},
-        "2026-07-09": {"Foreign_Investor": (250, 50)},
-        "2026-07-10": {"Foreign_Investor": (250, 50)},
+        "2026-07-01": {"Foreign_Investor": (150, 50), "Investment_Trust": (100, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-02": {"Foreign_Investor": (150, 50), "Investment_Trust": (100, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-03": {"Foreign_Investor": (150, 50), "Investment_Trust": (100, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-04": {"Foreign_Investor": (150, 50), "Investment_Trust": (100, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-05": {"Foreign_Investor": (150, 50), "Investment_Trust": (100, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-06": {"Foreign_Investor": (250, 50), "Investment_Trust": (80, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-07": {"Foreign_Investor": (250, 50), "Investment_Trust": (80, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-08": {"Foreign_Investor": (250, 50), "Investment_Trust": (80, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-09": {"Foreign_Investor": (250, 50), "Investment_Trust": (80, 50), "Dealer_self": (2000, 1000)},
+        "2026-07-10": {"Foreign_Investor": (250, 50), "Investment_Trust": (80, 50), "Dealer_self": (2000, 1000)},
     })
 
     result = stock_detail_data.load_institutional_momentum_analysis(conn, "2330")
 
-    assert result["5日"]["current"] == 1000
-    assert result["5日"]["prior"] == 500
-    assert result["5日"]["trend"] == "買超力道增強"
-    assert "20日" not in result
-    assert "40日" not in result
+    assert result["外資"]["5日"]["current"] == 1000
+    assert result["外資"]["5日"]["prior"] == 500
+    assert result["外資"]["5日"]["trend"] == "買超力道增強"
+    assert result["投信"]["5日"]["current"] == 150
+    assert result["投信"]["5日"]["prior"] == 250
+    assert result["投信"]["5日"]["trend"] == "買超力道減弱"
+    assert result["外資+投信"]["5日"]["current"] == 1150
+    assert result["外資+投信"]["5日"]["prior"] == 750
+    assert result["外資+投信"]["5日"]["trend"] == "買超力道增強"
+    assert "自營商" not in result
+    assert "20日" not in result["外資"]
+    assert "40日" not in result["外資"]
 
 
 def test_load_institutional_momentum_analysis_returns_none_when_insufficient_data():

@@ -199,32 +199,51 @@ def _classify_institutional_momentum(current: int, prior: int) -> str:
     return "買賣力道持平"
 
 
-def load_institutional_momentum_analysis(conn, stock_id: str) -> dict[str, dict] | None:
-    """回傳三大法人在近5日/20日/40日這三個天期的「近N天合計」vs「前N天合計」比較
-    結果——{天期標籤: {"current": 近N天合計股數, "prior": 前N天合計股數,
-    "trend": 力道變化文字}}，查無資料回傳None。
+MOMENTUM_GROUPS = ("外資", "投信", "外資+投信")
+
+
+def load_institutional_momentum_analysis(conn, stock_id: str) -> dict[str, dict[str, dict]] | None:
+    """回傳外資／投信各自、以及外資+投信合計，在近5日/20日/40日這三個天期的
+    「近N天合計」vs「前N天合計」比較結果——{分類: {天期標籤: {"current":
+    近N天合計股數, "prior": 前N天合計股數, "trend": 力道變化文字}}}，某分類
+    在所有天期都算不出來就不會出現在結果裡，查無資料回傳None。
 
     2026-08-03新增：使用者要求在法人買賣總覽的分析文字裡，加上「累積近5日/20日/
-    40日是變多還是變少，代表法人持續買進還是賣出」這段判讀。要湊滿一個公平的
-    「近N天」vs「前N天」比較，需要2N天完整資料，天數不足2N天的天期就不計算
-    (不強行用不足N天的區間硬湊，避免比較基準不一致而誤導)。
+    40日是變多還是變少，代表法人持續買進還是賣出」這段判讀。2026-08-03第二次
+    改版：使用者要求拆成外資／投信各自分析、再看兩者加總，自營商不計入這裡的
+    比較——理由跟_build_institutional_flow_analysis_html()既有的「自營商連續
+    買賣超」段落引用的陳家豐書中提醒一致(自營商操作週期短、常忽買忽賣，不適合
+    用來判斷趨勢性力道)，所以這裡的「外資+投信」合計是外資淨額加投信淨額，
+    不是沿用_INVESTOR_GROUP_MAP彙總出的「三大法人」(那個含自營商)。
+
+    要湊滿一個公平的「近N天」vs「前N天」比較，需要2N天完整資料，天數不足2N天
+    的天期就不計算(不強行用不足N天的區間硬湊，避免比較基準不一致而誤導)。
     """
     max_days = max(_MOMENTUM_PERIODS) * 2
     dates, net_by_date = _fetch_institutional_by_date(conn, stock_id, max_days)
     if not dates:
         return None
-    group = "三大法人"
-    result: dict[str, dict] = {}
-    for n in _MOMENTUM_PERIODS:
-        if len(dates) < n * 2:
-            continue
-        current = sum(net_by_date[d].get(group, 0) for d in dates[:n])
-        prior = sum(net_by_date[d].get(group, 0) for d in dates[n:n * 2])
-        result[f"{n}日"] = {
-            "current": current,
-            "prior": prior,
-            "trend": _classify_institutional_momentum(current, prior),
-        }
+
+    def net(date: str, group: str) -> int:
+        if group == "外資+投信":
+            return net_by_date[date].get("外資", 0) + net_by_date[date].get("投信", 0)
+        return net_by_date[date].get(group, 0)
+
+    result: dict[str, dict[str, dict]] = {}
+    for group in MOMENTUM_GROUPS:
+        group_result: dict[str, dict] = {}
+        for n in _MOMENTUM_PERIODS:
+            if len(dates) < n * 2:
+                continue
+            current = sum(net(d, group) for d in dates[:n])
+            prior = sum(net(d, group) for d in dates[n:n * 2])
+            group_result[f"{n}日"] = {
+                "current": current,
+                "prior": prior,
+                "trend": _classify_institutional_momentum(current, prior),
+            }
+        if group_result:
+            result[group] = group_result
     return result or None
 
 

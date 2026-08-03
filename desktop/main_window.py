@@ -2283,10 +2283,12 @@ class MainWindow(QMainWindow):
 
         momentum是stock_detail_data.load_institutional_momentum_analysis()的
         「近N天合計 vs 前N天合計」比較結果，2026-08-03新增：使用者要求另外呈現
-        累積近5日/20日/40日的買賣力道是變多還是變少。這段不是書中理論，是使用者
-        直接指定的量化比較邏輯，跟上面「連續同方向天數」的判讀角度不同(那個看
-        方向持續多久，這個看力道有沒有比上一個同長度區間更強)，文字裡不掛書名，
-        避免誤植成書中規則。
+        累積近5日/20日/40日的買賣力道是變多還是變少，且要求拆成外資／投信各自
+        分析、再看兩者加總，自營商不計入(理由跟上面「自營商連續買賣超」段落
+        引用的陳家豐書中提醒一致：自營商操作週期短、不適合判斷趨勢性力道)。
+        這段不是書中理論，是使用者直接指定的量化比較邏輯，跟上面「連續同方向
+        天數」的判讀角度不同(那個看方向持續多久，這個看力道有沒有比上一個
+        同長度區間更強)，文字裡不掛書名，避免誤植成書中規則。
         """
         if flow is None and momentum is None:
             return ""
@@ -2345,23 +2347,32 @@ class MainWindow(QMainWindow):
                 lines.append(f"<p>近期法人買賣方向尚未達連續{INSTITUTIONAL_STREAK_THRESHOLD}天門檻，暫無明顯訊號。</p>")
 
         if momentum:
-            lines.append('<p style="margin-top:6px;"><b>📐 三大法人買賣力道變化（近期比前期）</b></p>')
             trend_colors = {
                 "買超力道增強": "#c0392b",
                 "由賣轉買": "#c0392b",
                 "賣壓加重": "#27ae60",
                 "由買轉賣": "#27ae60",
             }
-            for label, info in momentum.items():
-                current_lots = info["current"] / 1000
-                prior_lots = info["prior"] / 1000
-                trend = info["trend"]
-                color = trend_colors.get(trend, "#999999")
-                lines.append(
-                    f'<p style="color:{color};">近{label}合計買賣超{current_lots:+,.0f}張，'
-                    f"較前{label}（{prior_lots:+,.0f}張）{trend}"
-                    f'——{"持續買進" if trend in ("買超力道增強", "由賣轉買") else ("持續賣出" if trend in ("賣壓加重", "由買轉賣") else "力道趨緩，方向未明確轉變")}。</p>'
-                )
+            group_titles = {
+                "外資": "📐 外資買賣力道變化（近期比前期）",
+                "投信": "📐 投信買賣力道變化（近期比前期）",
+                "外資+投信": "📐 外資＋投信合計買賣力道變化（近期比前期，不含自營商）",
+            }
+            for group in stock_detail_data.MOMENTUM_GROUPS:
+                periods = momentum.get(group)
+                if not periods:
+                    continue
+                lines.append(f'<p style="margin-top:6px;"><b>{group_titles[group]}</b></p>')
+                for label, info in periods.items():
+                    current_lots = info["current"] / 1000
+                    prior_lots = info["prior"] / 1000
+                    trend = info["trend"]
+                    color = trend_colors.get(trend, "#999999")
+                    lines.append(
+                        f'<p style="color:{color};">近{label}合計買賣超{current_lots:+,.0f}張，'
+                        f"較前{label}（{prior_lots:+,.0f}張）{trend}"
+                        f'——{"持續買進" if trend in ("買超力道增強", "由賣轉買") else ("持續賣出" if trend in ("賣壓加重", "由買轉賣") else "力道趨緩，方向未明確轉變")}。</p>'
+                    )
 
         return "".join(lines)
 
