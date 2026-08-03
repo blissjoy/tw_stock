@@ -2288,9 +2288,37 @@ class MainWindow(QMainWindow):
                 table += f"<td align='right'>{self._colored_num(cumulative[group][label] / 1000, 0, signed=True)}</td>"
             table += "</tr>"
         table += "</table>"
+        cost = stock_detail_data.load_institutional_estimated_cost(self.conn, stock_id)
+        table += self._build_institutional_cost_html(cost, periods)
         flow = stock_detail_data.load_institutional_flow_analysis(self.conn, stock_id)
         momentum = stock_detail_data.load_institutional_momentum_analysis(self.conn, stock_id)
         return table + self._build_institutional_flow_analysis_html(flow, momentum)
+
+    @staticmethod
+    def _build_institutional_cost_html(cost: dict | None, periods: list[str]) -> str:
+        """外資／投信「預估持股成本價」表格，緊接在法人買賣總覽表格下方。2026-08-03
+        新增，計算方式與「淨賣出天期標示不適用」的處理見stock_detail_data.load_
+        institutional_estimated_cost()的docstring，這裡只負責把結果組成HTML表格，
+        不含任何計算邏輯。cost是None(查無法人資料，理論上跟主表格是否為None一致，
+        這裡獨立防呆)時不顯示這個區塊。"""
+        if cost is None:
+            return ""
+        html_parts = [
+            '<p style="margin-top:10px; color:#666666;">預估持股成本價（單位：元，淨賣出天期無累積部位，標示為不適用）</p>',
+            '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0"><tr><td></td>',
+        ]
+        for label in periods:
+            html_parts.append(f"<td align='right'><b>{label}</b></td>")
+        html_parts.append("</tr>")
+        for group in stock_detail_data.ESTIMATED_COST_GROUPS:
+            html_parts.append(f"<tr><td>{group}</td>")
+            for label in periods:
+                value = cost[group][label]
+                cell = f"{value:,.2f}" if value is not None else '<span style="color:#999999;">不適用</span>'
+                html_parts.append(f"<td align='right'>{cell}</td>")
+            html_parts.append("</tr>")
+        html_parts.append("</table>")
+        return "".join(html_parts)
 
     @staticmethod
     def _build_institutional_flow_analysis_html(flow: dict | None, momentum: dict | None = None) -> str:

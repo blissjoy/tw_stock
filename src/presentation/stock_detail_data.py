@@ -154,6 +154,52 @@ def load_institutional_cumulative(conn, stock_id: str) -> dict[str, dict[str, in
     return result
 
 
+ESTIMATED_COST_GROUPS = ("外資", "投信")
+
+
+def load_institutional_estimated_cost(conn, stock_id: str) -> dict[str, dict[str, float | None]] | None:
+    """回傳外資／投信在INSTITUTIONAL_PERIODS各天期的「預估持股成本價」——用當天均價
+    (成交金額/成交量，缺均價時退回收盤價)乘以當天買賣超股數加權平均。該天期買賣超
+    合計<=0(淨賣出或淨零，沒有淨累積部位)時回傳None(不適用)，不硬算一個沒有意義
+    的數字；查無法人資料回傳最外層None。
+
+    2026-08-03新增：陳家豐書中提到分點層級的「持股成本」概念可以用「每日買賣張數
+    ×當日均價加權平均」粗略估算(見ai/ebook-summary-chen/P01-C3-好用籌碼工具哪裡找.md)，
+    這裡把同一套邏輯套用在外資/投信這個類別層級(本專案沒有分點資料，書中原文是分點
+    層級)——書中沒有給精確演算法，這是工程實作，不是嚴格的移動平均成本會計：賣出
+    當天的股數是用「當天均價」加權抵銷，不是用「原始買進價」抵銷，屬於簡化估算，
+    使用者已確認接受這個做法與「淨賣出天期標示不適用」的處理方式。
+    """
+    max_days = max(INSTITUTIONAL_PERIODS.values())
+    dates, net_by_date = _fetch_institutional_by_date(conn, stock_id, max_days)
+    if not dates:
+        return None
+    placeholders = ",".join("?" * len(dates))
+    price_rows = conn.execute(
+        f"SELECT date, close, volume, trading_money FROM stock_prices WHERE stock_id = ? AND date IN ({placeholders})",
+        (stock_id, *dates),
+    ).fetchall()
+    avg_price_by_date: dict[str, float | None] = {}
+    for date, close, volume, trading_money in price_rows:
+        avg_price_by_date[date] = trading_money / volume if trading_money is not None and volume else close
+
+    result: dict[str, dict[str, float | None]] = {g: {} for g in ESTIMATED_COST_GROUPS}
+    for label, n in INSTITUTIONAL_PERIODS.items():
+        window = dates[:n]
+        for group in ESTIMATED_COST_GROUPS:
+            numerator = 0.0
+            denominator = 0
+            for d in window:
+                price = avg_price_by_date.get(d)
+                net = net_by_date[d].get(group, 0)
+                if price is None or net == 0:
+                    continue
+                numerator += net * price
+                denominator += net
+            result[group][label] = numerator / denominator if denominator > 0 else None
+    return result
+
+
 def load_institutional_flow_analysis(conn, stock_id: str, lookback_days: int = 30) -> dict[str, dict] | None:
     """回傳各法人分類「連續買超／賣超幾天」的判讀結果(src.indicators.institutional_
     flow.classify_flow_streak())，查無資料回傳None。lookback_days只是抓資料的

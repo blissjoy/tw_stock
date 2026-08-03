@@ -151,6 +151,60 @@ def test_load_institutional_cumulative_returns_none_when_no_data():
     assert stock_detail_data.load_institutional_cumulative(conn, "9999") is None
 
 
+def test_load_institutional_estimated_cost_computes_weighted_average_by_net_and_avg_price():
+    """2天都是外資淨買超：day1均價100(net 200)、day2均價110(net 300)，加權平均成本
+    =(200*100+300*110)/(200+300)=106.0。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-30", "close": 100.0, "volume": 1000, "trading_money": 100_000},
+        {"date": "2026-07-31", "close": 110.0, "volume": 1000, "trading_money": 110_000},
+    ])
+    _seed_institutional(conn, "2330", {
+        "2026-07-30": {"Foreign_Investor": (200, 0)},
+        "2026-07-31": {"Foreign_Investor": (300, 0)},
+    })
+
+    result = stock_detail_data.load_institutional_estimated_cost(conn, "2330")
+
+    assert result["外資"]["2日"] == 106.0
+
+
+def test_load_institutional_estimated_cost_marks_unavailable_when_net_sell():
+    """該天期外資合計是淨賣出(買100賣500，net=-400)，沒有累積部位可言，應該回傳None
+    (不適用)，不是硬算出一個負分母的數字。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-31", "close": 100.0, "volume": 1000, "trading_money": 100_000},
+    ])
+    _seed_institutional(conn, "2330", {
+        "2026-07-31": {"Foreign_Investor": (100, 500)},
+    })
+
+    result = stock_detail_data.load_institutional_estimated_cost(conn, "2330")
+
+    assert result["外資"]["1日"] is None
+
+
+def test_load_institutional_estimated_cost_falls_back_to_close_when_no_trading_money():
+    """yfinance回補的舊資料trading_money可能是None，均價無從算起時退回用收盤價加權。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-31", "close": 50.0, "trading_money": None},
+    ])
+    _seed_institutional(conn, "2330", {
+        "2026-07-31": {"Foreign_Investor": (100, 0)},
+    })
+
+    result = stock_detail_data.load_institutional_estimated_cost(conn, "2330")
+
+    assert result["外資"]["1日"] == 50.0
+
+
+def test_load_institutional_estimated_cost_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_institutional_estimated_cost(conn, "9999") is None
+
+
 def _seed_margin(conn, stock_id: str, rows: list[dict]) -> None:
     upsert_margin_trading(conn, [
         {

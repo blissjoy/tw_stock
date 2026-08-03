@@ -5023,3 +5023,33 @@ K棒本身反而被壓縮在中間一小段，其餘留白都是「切線外推�
   schtasks本身有問題)；改用PowerShell工具執行`schtasks`系列指令就正常，之後
   遇到需要在這個環境跑Windows原生command-line工具(單斜線旗標)的情境，優先
   用PowerShell工具而非Bash工具。
+
+## 新增外資／投信「預估持股成本價」(2026-08-03)
+
+使用者問「就目前db的資料有辦法計算出外資/投信1日~1年的平均預估成本價嗎？」。
+查證陳家豐書中確實提到分點層級的「持股成本」概念可以用「每日買賣張數×當日
+均價加權平均」粗略估算(見`ai/ebook-summary-chen/P01-C3-好用籌碼工具哪裡找.md`
+第46/71行)，但書中只給概念、沒有精確演算法，且原文是分點(broker_chips)層級，
+本專案沒有分點資料來源。跟使用者確認把同一套概念套用在外資/投信這個類別
+層級(`institutional_investors`表已有資料)、且淨賣出天期(該天期買賣超合計
+<=0，沒有累積部位可言)要標示「不適用」而不是硬算，使用者確認採用這個做法。
+
+- `src/presentation/stock_detail_data.py`新增`ESTIMATED_COST_GROUPS =
+  ("外資", "投信")`常數與`load_institutional_estimated_cost(conn,
+  stock_id)`：對INSTITUTIONAL_PERIODS各天期，用每天均價(`trading_money/
+  volume`，缺均價退回收盤價)乘以當天買賣超股數加權平均——`sum(net×avg_
+  price)/sum(net)`，分母(該天期買賣超合計)<=0時該天期回傳None。明確在
+  docstring註記這是工程實作、簡化估算(賣出當天用「當天均價」加權抵銷，不是
+  嚴格的移動平均成本會計)，不是書中給出的精確公式。
+- `desktop/main_window.py`新增`_build_institutional_cost_html()`，緊接在
+  法人買賣總覽表格下方多一張「預估持股成本價」表格(外資/投信兩列)，不適用
+  的儲存格用灰色「不適用」文字，`_build_overview_institutional_html()`
+  呼叫`load_institutional_estimated_cost()`並串接。
+- `tests/test_stock_detail_data.py`新增4個測試：加權平均計算正確、淨賣出
+  天期正確回傳None、trading_money缺值時退回收盤價、查無資料回傳最外層
+  None。`pytest tests/ -q`854個測試全數通過。
+- 用真實DB(2330台積電)驗證：讀取`toHtml()`確認新表格正確插入，數字跟正負號
+  完全對得上——外資從3日起(對照買賣總覽表格，外資3日起買賣超轉為負值)正確
+  顯示「不適用」，投信全期間都是淨買超、顯示合理的成本價區間(2,0xx~2,4xx，
+  貼近2330實際股價範圍)。驗證用HTML/截圖已依慣例刪除，這次只刪scratchpad
+  目錄裡自己產生的檔案，不動`temp/`(吸收上一則紀錄的教訓)。
