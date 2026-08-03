@@ -1,0 +1,278 @@
+import math
+
+from src.data.storage import (
+    init_db,
+    upsert_institutional_investors,
+    upsert_margin_trading,
+    upsert_stock_prices,
+    upsert_stocks,
+)
+from src.presentation import stock_detail_data
+
+
+def _main_conn():
+    return init_db(":memory:")
+
+
+def _seed_stock(conn, stock_id: str, name: str, prices: list[dict]) -> None:
+    upsert_stocks(conn, [{"stock_id": stock_id, "name": name, "market": "TWSE", "industry": "測試業", "updated_at": "2026-08-02T00:00:00"}])
+    upsert_stock_prices(conn, [
+        {
+            "stock_id": stock_id, "date": p["date"], "open": p.get("open", p["close"]),
+            "high": p.get("high", p["close"]), "low": p.get("low", p["close"]), "close": p["close"],
+            "volume": p.get("volume", 1000), "trading_money": p.get("trading_money"),
+            "trading_turnover": None, "spread": None,
+        }
+        for p in prices
+    ])
+
+
+def test_load_quote_summary_matches_manual_calculation():
+    """用鴻海21元手續費那個驗證情境同一組真實數字反算：均價=成交金額/成交量、
+    振幅/漲跌幅都是用前一天收盤價當分母，不能只是「差不多」。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-30", "close": 2205.0, "open": 2205.0, "high": 2205.0, "low": 2205.0, "volume": 44_328_000, "trading_money": 98_479_995_000},
+        {"date": "2026-07-31", "close": 2425.0, "open": 2350.0, "high": 2425.0, "low": 2345.0, "volume": 56_896_000, "trading_money": 136_371_955_000},
+    ])
+
+    result = stock_detail_data.load_quote_summary(conn, "2330")
+
+    assert result is not None
+    assert result["date"] == "2026-07-31"
+    assert result["close"] == 2425.0
+    assert result["open"] == 2350.0
+    assert result["high"] == 2425.0
+    assert result["low"] == 2345.0
+    assert math.isclose(result["avg_price"], 136_371_955_000 / 56_896_000)
+    assert math.isclose(result["trading_money_billion"], 1363.71955)
+    assert result["prev_close"] == 2205.0
+    assert result["change"] == 220.0
+    assert math.isclose(result["change_pct"], 220.0 / 2205.0 * 100)
+    assert result["volume_lots"] == 56_896
+    assert result["prev_volume_lots"] == 44_328
+    assert math.isclose(result["amplitude_pct"], (2425.0 - 2345.0) / 2205.0 * 100)
+
+
+def test_load_quote_summary_handles_missing_trading_money():
+    """yfinance回補的舊資料trading_money可能是None，均價/成交金額(億)應該一併是
+    None，不強行算一個不可靠的數字或crash。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0, "trading_money": None}])
+
+    result = stock_detail_data.load_quote_summary(conn, "2330")
+
+    assert result["avg_price"] is None
+    assert result["trading_money_billion"] is None
+
+
+def test_load_quote_summary_first_day_has_no_prev_close():
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+
+    result = stock_detail_data.load_quote_summary(conn, "2330")
+
+    assert result["prev_close"] is None
+    assert result["change"] is None
+    assert result["change_pct"] is None
+    assert result["amplitude_pct"] is None
+
+
+def test_load_quote_summary_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_quote_summary(conn, "9999") is None
+
+
+def _seed_institutional(conn, stock_id: str, by_date: dict[str, dict[str, tuple[int, int]]]) -> None:
+    rows = []
+    for date, by_type in by_date.items():
+        for investor_type, (buy, sell) in by_type.items():
+            rows.append({"stock_id": stock_id, "date": date, "investor_type": investor_type, "buy": buy, "sell": sell})
+    upsert_institutional_investors(conn, rows)
+
+
+def test_load_institutional_daily_groups_foreign_dealer_self_into_foreign():
+    """外資自營商(Foreign_Dealer_Self)併入外資、自營商自行/避險併入自營商，三大
+    法人是全部加總——這是多數看盤網站的標準分法，不是這裡另外發明的。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+    _seed_institutional(conn, "2330", {
+        "2026-07-31": {
+            "Foreign_Investor": (1000, 200),
+            "Foreign_Dealer_Self": (50, 10),
+            "Investment_Trust": (300, 100),
+            "Dealer_self": (80, 20),
+            "Dealer_Hedging": (40, 15),
+        },
+    })
+
+    result = stock_detail_data.load_institutional_daily(conn, "2330")
+
+    assert result["外資"] == {"buy": 1050, "sell": 210, "net": 840}
+    assert result["投信"] == {"buy": 300, "sell": 100, "net": 200}
+    assert result["自營商"] == {"buy": 120, "sell": 35, "net": 85}
+    total_buy = 1050 + 300 + 120
+    total_sell = 210 + 100 + 35
+    assert result["三大法人"] == {"buy": total_buy, "sell": total_sell, "net": total_buy - total_sell}
+
+
+def test_load_institutional_daily_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_institutional_daily(conn, "9999") is None
+
+
+def test_load_institutional_cumulative_sums_over_period_window():
+    """5個交易日，只有外資有紀錄：1日/2日/3日/5日欄位應該分別是最近1/2/3/5天的
+    買賣超加總，不是全部5天都加進每一欄。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+    _seed_institutional(conn, "2330", {
+        "2026-07-25": {"Foreign_Investor": (100, 0)},
+        "2026-07-28": {"Foreign_Investor": (200, 0)},
+        "2026-07-29": {"Foreign_Investor": (300, 0)},
+        "2026-07-30": {"Foreign_Investor": (400, 0)},
+        "2026-07-31": {"Foreign_Investor": (500, 0)},
+    })
+
+    result = stock_detail_data.load_institutional_cumulative(conn, "2330")
+
+    assert result["外資"]["1日"] == 500
+    assert result["外資"]["2日"] == 500 + 400
+    assert result["外資"]["3日"] == 500 + 400 + 300
+    assert result["外資"]["5日"] == 500 + 400 + 300 + 200 + 100
+    # 資料只有5天，天數不足的天期(10日/30日/40日...)就用「目前實際有的天數」加總，
+    # 結果應該跟5日欄位一樣，不是None或0。
+    assert result["外資"]["10日"] == result["外資"]["5日"]
+    assert result["外資"]["1年"] == result["外資"]["5日"]
+
+
+def test_load_institutional_cumulative_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_institutional_cumulative(conn, "9999") is None
+
+
+def _seed_margin(conn, stock_id: str, rows: list[dict]) -> None:
+    upsert_margin_trading(conn, [
+        {
+            "stock_id": stock_id, "date": r["date"],
+            "margin_purchase_buy": r.get("m_buy", 0), "margin_purchase_sell": r.get("m_sell", 0),
+            "margin_purchase_cash_repayment": 0,
+            "margin_purchase_yesterday_balance": r.get("m_yesterday"),
+            "margin_purchase_today_balance": r.get("m_today"),
+            "margin_purchase_limit": r.get("m_limit"),
+            "short_sale_buy": r.get("s_buy", 0), "short_sale_sell": r.get("s_sell", 0),
+            "short_sale_cash_repayment": 0,
+            "short_sale_yesterday_balance": r.get("s_yesterday"),
+            "short_sale_today_balance": r.get("s_today"),
+            "short_sale_limit": r.get("s_limit"),
+            "offset_loan_and_short": r.get("offset"),
+        }
+        for r in rows
+    ])
+
+
+def test_load_margin_daily_computes_change_usage_rate_and_streak():
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+    _seed_margin(conn, "2330", [
+        {"date": "2026-07-29", "m_today": 33_373, "m_yesterday": 32_548, "m_limit": 6_483_092, "s_today": 123, "s_yesterday": 81, "s_limit": 6_483_092, "offset": 6},
+        {"date": "2026-07-30", "m_today": 32_548, "m_yesterday": 31_823, "m_limit": 6_483_092, "s_today": 98, "s_yesterday": 123, "s_limit": 6_483_092, "offset": 1},
+        {"date": "2026-07-31", "m_buy": 855, "m_sell": 662, "m_today": 31_823, "m_yesterday": 32_548, "m_limit": 6_483_092, "s_buy": 4, "s_sell": 5, "s_today": 88, "s_yesterday": 98, "s_limit": 6_483_092, "offset": 3},
+    ])
+
+    result = stock_detail_data.load_margin_daily(conn, "2330")
+
+    assert result["date"] == "2026-07-31"
+    assert result["close"] == 2425.0
+    assert result["margin"]["buy"] == 855
+    assert result["margin"]["sell"] == 662
+    assert result["margin"]["balance"] == 31_823
+    assert result["margin"]["change"] == 31_823 - 32_548
+    assert math.isclose(result["margin"]["usage_rate"], 31_823 / 6_483_092 * 100)
+    # 3筆餘額(33,373 -> 32,548 -> 31,823)只有2組差值、都是下降：連2減
+    assert result["margin"]["streak"] == "連2減"
+    assert result["short"]["balance"] == 88
+    # 3筆餘額(123 -> 98 -> 88)只有2組差值、都是下降：連2減
+    assert result["short"]["streak"] == "連2減"
+    assert result["offset_loan_and_short"] == 3
+    assert math.isclose(result["short_to_margin_ratio_pct"], 88 / 31_823 * 100)
+
+
+def test_load_margin_daily_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_margin_daily(conn, "9999") is None
+
+
+def test_load_margin_cumulative_sums_buy_sell_over_window():
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+    _seed_margin(conn, "2330", [
+        {"date": "2026-07-29", "m_buy": 900, "m_sell": 1600, "m_today": 33_373},
+        {"date": "2026-07-30", "m_buy": 600, "m_sell": 1200, "m_today": 32_548},
+        {"date": "2026-07-31", "m_buy": 855, "m_sell": 662, "m_today": 31_823},
+    ])
+
+    result = stock_detail_data.load_margin_cumulative(conn, "2330", days=3)
+
+    assert result["days"] == 3
+    assert result["margin"]["buy"] == 900 + 600 + 855
+    assert result["margin"]["sell"] == 1600 + 1200 + 662
+    assert result["margin"]["change"] == 31_823 - 33_373
+
+
+def test_load_margin_cumulative_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_margin_cumulative(conn, "9999") is None
+
+
+def test_load_institutional_flow_analysis_detects_sell_streak_per_group():
+    """外資連續3天賣超(達朱家泓淘汰法R-SCREEN-06門檻)，投信連續3天買超(達陳家豐
+    投信連續加碼3~5天門檻下限)，同時驗證兩個分類各自獨立判讀，不會互相干擾。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+    _seed_institutional(conn, "2330", {
+        "2026-07-29": {"Foreign_Investor": (100, 500), "Investment_Trust": (300, 100)},
+        "2026-07-30": {"Foreign_Investor": (100, 400), "Investment_Trust": (250, 50)},
+        "2026-07-31": {"Foreign_Investor": (100, 300), "Investment_Trust": (200, 80)},
+    })
+
+    result = stock_detail_data.load_institutional_flow_analysis(conn, "2330")
+
+    assert result["外資"]["direction"] == "sell"
+    assert result["外資"]["streak_days"] == 3
+    assert result["外資"]["is_sell_warning"] is True
+    assert result["投信"]["direction"] == "buy"
+    assert result["投信"]["streak_days"] == 3
+    assert result["投信"]["is_buy_watch"] is True
+
+
+def test_load_institutional_flow_analysis_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_institutional_flow_analysis(conn, "9999") is None
+
+
+def test_load_margin_maintenance_analysis_matches_book_liquidation_example():
+    """陳家豐書中範例：100元買進、6成融資，股價跌到72元時維持率剛好是斷頭線120%
+    (classify_margin_maintenance_state()的既有測試已經確認120%本身歸類在「警戒區」，
+    要嚴格「小於」120%才算「已跌破斷頭線」，這裡沿用同一個邊界定義，不重新定義)。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-29", "close": 100.0},
+        {"date": "2026-07-30", "close": 81.0},
+        {"date": "2026-07-31", "close": 72.0},
+    ])
+    _seed_margin(conn, "2330", [
+        {"date": "2026-07-29", "m_buy": 1000, "m_today": 1000},
+        {"date": "2026-07-30", "m_buy": 0, "m_today": 1000},
+        {"date": "2026-07-31", "m_buy": 0, "m_today": 1000},
+    ])
+
+    result = stock_detail_data.load_margin_maintenance_analysis(conn, "2330")
+
+    assert round(result["ratio"], 2) == round(72 / 60, 2)
+    assert result["state"] == "警戒區(爹不疼娘不愛)"
+
+
+def test_load_margin_maintenance_analysis_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_margin_maintenance_analysis(conn, "9999") is None

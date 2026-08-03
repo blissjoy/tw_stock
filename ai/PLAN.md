@@ -4145,3 +4145,435 @@ main_window.py模組層級函式，跟`_format_month_day()`放在一起)：去�
 兩種格式，失焦後都正確變成"2026-08-02"。`pytest tests/ -q`794個測試全數通過
 (這是desktop/main_window.py的Qt widget邏輯，跟現有main_window.py其他函式一樣
 沒有寫成pytest測試，用PySide6實際互動的debug script驗證)。
+
+## 庫存清單改成樹狀表格(彙總為主、點批次數展開明細)＋損益計入手續費(2026-08-02)
+
+使用者反映上一輪「明細／彙總」下拉切換的操作方式麻煩，希望改成：預設就是彙總
+畫面，點該股「批次數」欄位的數字才展開該股的明細——典型的master-detail樹狀
+表格互動，改用Qt原生的`QTreeWidget`取代「兩個表格+QStackedWidget+下拉選單」。
+另外使用者指出帳面損益/報酬率沒有扣除手續費，跟證券app顯示的不一樣，並提供
+實際數字：鴻海庫存扣掉手續費21元後，正確報酬率是5.85%、損益+2897。
+
+- **手續費計入成本基礎**：`src/data/portfolio_schema.sql`的`inventory_stocks`
+  新增`fee REAL`欄位(選填，使用者直接填券商app顯示的實際金額，不是系統用固定
+  費率換算——牌告費率+折數+最低手續費組合太多種，直接填實際數字最準確也最
+  簡單)。`src/data/portfolio_storage.py`的`add_inventory_stock()`/
+  `update_inventory_stock()`新增`fee`參數。`src/presentation/portfolio_data.py`
+  的`_merge_holdings_with_snapshot()`：`total_cost = cost_price*shares +
+  fee.fillna(0)`，`profit = close*shares - total_cost`，`return_pct =
+  profit/total_cost*100`；holdings_df沒有`fee`欄位時(觀察清單)視為0，不影響
+  既有行為。⚠️ 行為變化：因為手續費是固定金額不是每股金額，`return_pct`的
+  計算條件從「只要cost_price+close齊全」改成「cost_price+shares+close都
+  齊全」才會算，跟`profit`原本的條件對齊。`load_inventory_summary()`額外
+  聚合`total_fee`(所有批次加總)，`avg_cost_price*total_shares+total_fee`
+  數學上等於`sum(cost_price_i*shares_i+fee_i)`，加權平均沒有失真。用使用者
+  提供的鴻海數字反推驗證：profit=2897、return_pct=5.85%在`cost_price≈141.43`
+  `shares=350``close≈149.77``fee=21`的組合下能同時精確重現，證實公式正確。
+- **庫存清單UI改用`QTreeWidget`**：取代`inventory_view_combo`+
+  `inventory_detail_table`/`inventory_summary_table`+`inventory_table_stack`
+  整組。父列(每檔股票一列，`load_inventory_summary()`)顯示彙總後的加權平均
+  成本/總損益，預設全部收合；展開後底下是這檔股票的每一筆批次子列
+  (`load_inventory_lots()`依`stock_id`分組)，各自的成本價/手續費/損益/報酬率
+  是這一批自己的數字。父列/子列共用同一組15欄(`_INVENTORY_TREE_HEADERS`)，
+  子列把股票代號/名稱/現價/漲跌幅/SAR狀態/SAR距離%這些跟父列重複的欄位留空
+  (樹狀縮排本身已經表達從屬關係)。新增`_NumericTreeWidgetItem`(比照既有
+  `_NumericTableWidgetItem`，用`self.treeWidget().sortColumn()`取得目前
+  排序欄位)。父列item用`setData(0, UserRole, stock_id)`，子列額外用
+  `setData(0, UserRole+1, lot_id)`——`_selected_inventory_lot_ids()`只收集
+  有UserRole+1值的選取item，父列因為沒設這個值會自動被濾掉，不需要另外判斷
+  「目前是不是明細檢視」。
+- **點「批次數」欄位展開/收合**：`itemClicked`訊號比對`column ==
+  _INVENTORY_TREE_LOT_COUNT_COLUMN`且該列有子項目時`setExpanded(not
+  isExpanded())`；QTreeWidget原生展開箭頭(點第0欄前面的小三角)還是照常可以用，
+  這是額外多一個可以點的地方。
+- **重新整理時保留已展開的股票**：`_populate_inventory_tree()`重建整棵樹前，
+  先記錄`{父列.data(0,UserRole) for 父列 if 父列.isExpanded()}`，重建後對
+  這些股票代號的新父列重新`setExpanded(True)`，不然每次新增/編輯/刪除批次
+  觸發的重新整理都會把使用者剛展開看的股票收合回去。
+- `_StockEditDialog`新增「手續費」欄位(`QDoubleSpinBox`，跟成本價/持股數
+  同樣用`setSpecialValueText`處理留空)；`show_buy_date`參數改名`is_inventory`
+  (現在同時控制買入日期＋手續費兩個庫存專屬欄位)。
+- 更新`tests/test_portfolio_storage.py`/`test_portfolio_data.py`既有測試加入
+  `fee`參數，新增手續費扣除損益/報酬率、彙總時加總多批手續費的測試(共30個)。
+- 驗證：PySide6實際視窗+debug script(暫存portfolio DB)——2330分兩批新增(各自
+  帶不同手續費20/15元)，預設顯示彙總父列(收合，批次數=2)；模擬點擊「批次數」
+  欄位後正確展開成2筆子列，各自的買入日期/成本價/手續費/報酬率都是獨立數字
+  (+203.12% vs +185.28%，反映不同成本+手續費)；直接查DB編輯其中一批成本價後
+  呼叫`_refresh_inventory_tab()`，確認2330仍然是展開狀態(沒有被收合回去)、
+  另一批的手續費不受影響。截圖確認排版正常(縮排清楚呈現父子關係)。
+  `pytest tests/ -q`796個測試全數通過。截圖/暫存DB驗證後已刪除。
+
+## 修正portfolio.db schema migration crash＋手續費改成自動估算(不用手動輸入)(2026-08-02)
+
+使用者實際用桌面版時，切到「庫存清單」分頁直接crash（`sqlite3.OperationalError`：
+`inventory_stocks`表沒有`fee`欄位）。根因：`portfolio_schema.sql`新增`fee`欄位
+是在使用者已經用桌面版存過真實庫存資料(`data/portfolio.db`)之後才加的，
+`CREATE TABLE IF NOT EXISTS`只在表完全不存在時才建表，不會對已存在、有資料的
+表補上後來新增的欄位。使用者同時問「你把我keyin的庫存清掉了嗎?」——查證後
+資料完全沒有遺失，純粹是schema沒跟上，crash發生在SELECT階段，資料本身在
+`data/portfolio.db`裡原封不動(3筆鴻海批次)。
+
+- **修正**：`src/data/portfolio_storage.py`新增`_migrate_portfolio_schema()`，
+  在`ensure_portfolio_schema()`的`executescript()`之後呼叫，用`PRAGMA
+  table_info(inventory_stocks)`檢查`fee`欄位是否存在，不存在才`ALTER TABLE
+  ... ADD COLUMN fee REAL`，可重複呼叫不會重複執行。備註在docstring裡：
+  之後`portfolio_schema.sql`如果再新增欄位，都要在這裡比照補一行遷移邏輯，
+  不能只改schema.sql。用`data/portfolio.db`的備份(`.bak_before_fee_migration`，
+  驗證完成後已刪除)實測過遷移前後3筆原始資料完整保留、`fee`正確補上(值為
+  `NULL`，待自動估算)。
+
+- **手續費UX改版**：使用者指出上一輪讓使用者手動輸入手續費的設計是錯的
+  ——「手續費已經是券商app會內含了，買入後在填庫存時，手續費不重要，重點
+  在預估損益時要納入手續費」。改成系統自動估算，不再是可編輯欄位：
+  - `src/presentation/portfolio_data.py`新增`estimate_buy_fee(cost_price,
+    shares)`：`round(cost_price * shares * TWSE_MAX_COMMISSION_RATE *
+    BROKER_COMMISSION_DISCOUNT)`，`MIN_COMMISSION_FEE=1`元floor。
+    `TWSE_MAX_COMMISSION_RATE=0.001425`是政府/證交所公告的手續費「上限」
+    (牌告費率，買賣雙邊都收)，不是政府規定的固定金額——實際費率是券商在
+    這個上限之下自訂折扣("折數")，沒有統一答案。`BROKER_COMMISSION_
+    DISCOUNT=0.3`(3折)是拿使用者實際持有的鴻海庫存反推校準出來的：3筆分批
+    買入(199.5×50=9,975 / 249.5×50=12,475 / 246.0×110=27,060)，券商app
+    顯示合計手續費21元；逐筆用0.1425%×30%算、四捨五入到整數元再加總
+    (4+5+12=21)，跟使用者實際看到的數字完全吻合(不是「差不多」，是精確
+    相等)，才採用3折當預設值。
+    ⚠️ 只算「買進手續費」——庫存清單目前沒有賣出交易紀錄，真正賣出時政府
+    另外課0.3%證券交易稅(只課賣方)，等以後做「已實現損益」功能才需要納入。
+  - `_merge_holdings_with_snapshot()`：`fee`欄位不存在時(觀察清單呼叫路徑)
+    固定視為0，不影響觀察清單；`fee`欄位存在但值是`None`時(庫存清單，包含
+    這功能上線前就存在的舊資料，例如使用者已經key入的鴻海3筆)，用
+    `estimate_buy_fee()`即時補估，不用使用者手動回頭編輯舊資料；已經有
+    明確存值的批次不會被覆蓋。
+  - `desktop/main_window.py`的`_StockEditDialog`：移除原本的手續費
+    `QDoubleSpinBox`手動輸入欄位，改成唯讀的即時估算標籤(成本價/股數改變
+    時透過`valueChanged`訊號即時重算顯示，例如「4 元（依成本價×股數自動
+    估算，會計入損益）」)，`values()`回傳的`fee`一律用`estimate_buy_fee()`
+    計算(觀察清單固定回傳`None`)。
+- 更新`tests/test_portfolio_data.py`：新增
+  `test_estimate_buy_fee_matches_users_real_hon_hai_holding()`(用使用者
+  實際3筆數字驗證4/5/12的精確結果，這是`BROKER_COMMISSION_DISCOUNT`校準
+  依據的回歸測試)、`test_estimate_buy_fee_returns_none_when_cost_price_or_
+  shares_missing()`、`test_estimate_buy_fee_applies_minimum_fee_floor()`，
+  並把舊的「fee=0」假設測試改寫成
+  `test_load_inventory_lots_auto_estimates_fee_when_not_stored()`反映新的
+  自動估算行為。`pytest tests/ -q`799個測試全數通過。
+- 用使用者的真實DB(`data/tw_stock.db`+`data/portfolio.db`，不是暫存/測試
+  DB)實際跑桌面版驗證：庫存清單分頁不再crash，2317鴻海彙總列正確顯示
+  成本價=235.76、手續費=21(跟使用者原本看到的數字精確吻合)、損益=+3,074、
+  報酬率=+6.21%(收盤價是驗證當下的即時價格，跟使用者截圖當下的價格不同屬
+  正常)；新增對話框輸入199.5元/50股後，手續費估算即時顯示「4 元」，跟第
+  一批次的預期金額吻合。截圖/log/debug script驗證後已刪除，遷移備份DB也
+  已刪除。
+
+## 修正手續費模型(區分買進/賣出)＋大盤K線圖MA60/120/240斷點bug(2026-08-02)
+
+使用者用了上一輪修好的庫存清單後回報兩個問題：①「21元」被我誤解成3筆買進
+手續費加總，但使用者澄清那其實是券商app顯示的「以目前現價賣出」的預估手續費，
+不是買入手續費，帳面損益/報酬率因此還是跟使用者實際看到的數字對不上；②附了
+一張大盤K線圖截圖(temp/1785673519241.jpg)，藍框標示的地方K線圖有「斷點」，
+懷疑是圖片延伸問題。使用者授權最高權限、自行排查修復到底(使用者要去睡覺，
+不會即時回應)。
+
+**問題①：手續費模型少算了賣出端的成本**
+
+買進手續費(estimate_buy_fee())是實際已經付出的錢，計入成本基礎沒有錯；但
+「帳面損益/報酬率」本來就是拿目前現價模擬「現在賣掉這個部位」的結果(不是
+已實現損益)，因此除了買進成本，還必須扣掉「如果現在賣出」才會發生的成本：
+賣出手續費(跟買進同一個券商折扣3折，但用目前市值算)、以及只課賣方、不能
+打折的0.3%證券交易稅(政府規定)。上一輪完全沒有處理賣出端，等於少扣了這兩筆，
+損益/報酬率因此偏高。
+
+- `src/presentation/portfolio_data.py`新增`TWSE_TRANSACTION_TAX_RATE=0.003`
+  (證交稅)、`estimate_sell_cost(market_value)`(賣出手續費+證交稅，四捨五入
+  後加總，套用跟`estimate_buy_fee()`一樣的3折券商折扣＋最低手續費門檻)。
+  `_merge_holdings_with_snapshot()`改成：
+  ```python
+  total_cost = cost_price*shares + buy_fee          # 買進成本(不變)
+  sell_fee = estimate_sell_cost(market_value)        # 新增：賣出手續費+證交稅
+  net_proceeds = market_value - sell_fee              # 賣出淨得
+  profit = net_proceeds - total_cost
+  return_pct = profit / total_cost * 100
+  ```
+  新增`sell_fee`衍生欄位(`_DERIVED_COLUMNS`)，彙總列(`load_inventory_
+  summary()`)用「彙總後的總市值」算一次(不是逐批分別估算再加總，因為賣出
+  是針對整個部位一次性模擬)。
+- `desktop/main_window.py`：`_INVENTORY_TREE_HEADERS`在「市值」跟「帳面
+  損益」之間新增「預估賣出成本」欄，`_format_inventory_row()`對應補上；
+  新增/編輯批次對話框的欄位標籤改成「預估買入手續費：」(原本「預估手續費」
+  容易跟畫面上新增的「預估賣出成本」混淆，明確標示這是買進端的成本)。
+- `tests/test_portfolio_data.py`：新增`estimate_sell_cost()`相關測試(含
+  用使用者實際鴻海庫存市值52,605元反推的精確案例：手續費22+證交稅158=
+  180，不是「差不多」)，更新所有涉及profit/return_pct的既有測試把
+  `sell_fee`納入預期值計算。`pytest tests/ -q`803個測試全數通過。
+- 用使用者的真實DB驗證：2317鴻海彙總列——市值52,605、預估賣出成本180、
+  帳面損益+2,894(+5.84%)，跟使用者原本回報的「+2897、+5.85%」只差幾塊錢
+  (現價每天在變、驗證當下的現價本來就不會跟使用者當初看到的那一刻完全
+  一樣，這是預期內的正常現象，不是誤差)，證實公式修正方向正確。
+
+**問題②：大盤K線圖MA60/120/240在特定日期斷線**
+
+查證發現：斷點都出現在農曆春節這類連續多天休市的位置(2026年是2/12~2/22)，
+只有MA60/MA120/MA240(長天期均線)斷線，MA5/10/20跟K棒本身完全正常。逐項排查：
+①`chart_data.load_price_history()`算出的MA60/120/240欄位在整段期間完全沒有
+NaN(用`pandas`直接查證)；②`trading_calendar.holidays_between()`實際打
+TWSE假日API查證，2026年春節9天假期都有正確涵蓋在回傳的假日清單裡，rangebreaks
+設定沒有問題；③把同一個Figure改用純Plotly(不透過`desktop/chart_render.py`
+的自訂JS)畫成HTML、用headless瀏覽器(playwright)截圖，同樣看得到斷點，排除
+是desktop那層自訂JS造成的。三項都排除後，確認是**Plotly.js的已知限制**：
+Scatter線段trace預設`connectgaps=False`，rangebreaks壓縮掉大段日期後，
+斜率越平緩(長天期均線)的線段越容易被Plotly.js的線段簡化/斷點判斷誤判成
+「資料缺口」而不畫連接線，MA5/10/20波動較大反而不會觸發這個誤判。
+
+- 修法：`src/presentation/chart_data.py`的`build_candlestick_figure()`
+  在回傳前加一行`fig.update_traces(connectgaps=True, selector=dict(
+  type="scatter"))`，只對線段類(mode="lines")trace生效，K棒/長條圖/SAR
+  (markers-only)不受影響。用playwright截圖驗證：加上這行後MA60/120/240
+  在同一個位置完全連續，跟MA5/10/20一致；再用真實桌面版(PySide6+
+  QWebEngineView)截圖確認同樣修好，不是只有測試環境的假象。
+- 影響範圍：`build_candlestick_figure()`是K線圖唯一的產生函式，桌面版
+  「大盤」「個股清單」跟Streamlit版共用同一套，這個修正對所有畫K線圖的
+  地方都生效，不用逐一修。
+
+驗證用的debug script/截圖已依慣例刪除。
+
+## 新增「個股清單」第3個內層tab「個股明細」：交易資訊/法人買賣/主力進出/資券變化/大戶籌碼(2026-08-03)
+
+使用者提供5張參考截圖(temp/個股詳情-1~5.jpg，某看盤網站的個股詳情頁)，要求在「個股
+清單」分頁新增第3個內層tab「個股明細」，仿照排版；「目前有資料就放，還沒做的就先用
+框架，資料先留空」。
+
+- **查證資料來源可用性**：`institutional_investors`(三大法人買賣超)、
+  `margin_trading`(融資融券)這兩張表`scripts/daily_pipeline.py`每天實際有在寫入
+  真實資料(本機DB分別有530萬/100萬筆)，可以做出真數字；`broker_chips`(分點券商，
+  對應「主力進出」)schema已建好但0筆資料(抓取器要FinMind付費方案才能接上)；「大戶
+  籌碼」(外資/大戶籌碼/董監持股比例)完全沒有對應的表。因此「交易資訊」「法人買賣
+  總覽」「資券變化總覽」三區塊接真實資料，「主力進出」「大戶籌碼」兩區塊只建框架、
+  顯示「⚠️尚未串接資料來源」，不是造假資料湊版面。
+- **新增`src/presentation/stock_detail_data.py`**(跟chart_data.py/portfolio_data.py
+  同一套「純函式、不依賴UI框架」分工)：
+  - `load_quote_summary()`：成交/開盤/最高/最低/均價/成交金額(億)/昨收/漲跌/漲跌幅/
+    總量/昨量/振幅，全部從`stock_prices`算，均價=成交金額/成交量、振幅=(高-低)/
+    昨收——用參考截圖裡台積電2026/07/31的真實數字反算驗證過(2,425/+9.98%/3.63%
+    振幅全部精確吻合，不是「差不多」)。
+  - `load_institutional_daily()`/`load_institutional_cumulative()`：三大法人5類
+    細項(Foreign_Investor/Foreign_Dealer_Self/Investment_Trust/Dealer_self/
+    Dealer_Hedging)合併成外資/投信/自營商/三大法人4類(外資自營商併入外資、自營商
+    自行/避險併入自營商，是多數看盤網站的標準分法)。累計版本算1日/2日/3日/5日/
+    10日/1個月/3個月/6個月/1年各天期的買賣超加總(1個月起算約略天數換算，不是真的
+    日曆月)——使用者的參考截圖上有手繪箭頭註記「增加一欄：1日<<即當日」，這裡直接
+    做進最終欄位，不用先重現「沒有1日欄」的舊版再改。
+  - `load_margin_daily()`/`load_margin_cumulative()`：融資/融券買進/賣出/現價/
+    增減/餘額/使用率/連增連減/資券互抵/券資比，連增連減用`_balance_streak()`
+    往回比對餘額連續增減天數算出「連N增/減」文字。
+  - 15個測試(`tests/test_stock_detail_data.py`)，含用真實鴻海/台積電數字反算驗證
+    的案例。
+- **`desktop/main_window.py`**：`_build_stock_overview_tab()`在`detail_inner_
+  tabs`新增第3個分頁「個股明細」；法人買賣/資券變化各自一組「當日／累計」
+  可勾選按鈕(QButtonGroup)，checked狀態明確加藍底白字樣式(預設Fusion風格checked/
+  unchecked視覺差異太小，使用者不容易一眼看出目前選了哪個)，切換時呼叫
+  `_refresh_stock_overview_view()`整個重新產生HTML。內容用QTextEdit+HTML表格
+  呈現(跟既有「個股分析」`_set_analysis_html()`同一套「依內容動態算高度」作法)，
+  數字用`_colored_num()`統一套用紅漲綠跌配色(跟K棒/MACD既有配色一致)。
+  - ⚠️ 過程中寫壞一個地方後自己抓到：資券表格逐列組字串時，`if/else`三元運算式
+    夾在多行字串常數中間，Python會把「三元運算式的false分支」跟「後面下一行的
+    字串常數」用adjacent string literal規則接在一起，導致usage_rate為None時該列
+    HTML會斷成不完整的兩截(不是SyntaxError，是靜默組出錯誤HTML)——改成先把該
+    儲存格算成獨立變數再插入f-string，不要讓三元運算式卡在多行隱式字串串接中間。
+  - 單位換算：法人買賣超原始單位是「股」(T86資料)，除以1000換算成畫面上的「張」；
+    融資融券原始資料本來就是「張」(MI_MARGN)，不用換算。
+- `pytest tests/ -q`815個測試全數通過。用真實DB(2330台積電)實際跑桌面版，抓取
+  QTextEdit元件本身(不是視窗截圖，避免視窗高度裁切看不到底部)確認5個區塊、當日/
+  累計兩種切換都正確渲染，數字跟手算結果一致，框架區塊(主力進出/大戶籌碼)正確
+  顯示「尚未串接資料來源」提示，無版面重疊/截斷問題。驗證用的debug script/截圖
+  已依慣例刪除。
+
+## 個股明細5個區塊改成可展開/收合＋調整法人買賣/主力進出排版(2026-08-03)
+
+使用者看過上一版「個股明細」後，比對參考截圖進一步要求：①每個區塊(交易資訊/
+法人買賣/主力進出/資券變化/大戶籌碼)要能各自展開/收合、預設打開；②法人買賣
+總覽拿掉「當日／累計」切換，固定顯示累計表格，欄位改成「當日、2日、3日、5日
+...」(原本的「1日」欄位改標籤成「當日」，語意不變)；③主力進出的排版要照參考
+截圖(temp/個股詳情-3.jpg)——4張指標卡片(主力買賣超/主力買超/主力賣超/買賣超
+佔成交量)＋買超/賣超雙欄券商表格，不是原本那種單列陽春表格。
+
+- **新增`_CollapsibleBox`元件**(`desktop/main_window.py`)：標題列是可點擊的
+  QPushButton(顯示▼/▶+標題文字)，點擊切換內容widget的`setVisible()`，預設
+  展開。用`setVisible()`而不是清空內容或改高度限制，Qt layout系統會自動因應
+  子widget可見狀態重新流動版面，外層QScrollArea本來就是`setWidgetResizable(
+  True)`，不需要額外同步高度邏輯。
+- **`_build_stock_overview_tab()`大改版**：原本5個區塊擠在同一個QTextEdit裡
+  用`<hr>`分隔，改成5個`_CollapsibleBox`，各自包一個獨立的QTextEdit(`self.
+  _stock_overview_views[標題]`)。資券變化總覽的「當日／累計」切換按鈕移進它
+  自己的`_CollapsibleBox.content_layout`裡；法人買賣總覽的切換按鈕整組拿掉。
+- **`_refresh_stock_overview_view()`重構**：從組一大串HTML字串改成5個獨立
+  builder方法(`_build_overview_quote_html`/`_build_overview_institutional_
+  html`/`_build_overview_dealer_html`/`_build_overview_margin_html`/`_build_
+  overview_chip_html`)，各自只回傳該區塊的HTML片段，逐一設進對應的QTextEdit
+  (`_set_overview_block_html()`)，不再需要單一大函式硬串接。
+- **法人買賣總覽**：`_build_overview_institutional_html()`固定呼叫
+  `stock_detail_data.load_institutional_cumulative()`(拿掉呼叫`load_
+  institutional_daily()`的當日分支)，表格欄位標籤把`INSTITUTIONAL_PERIODS`
+  的第一個key `"1日"`顯示成「當日」——只在UI呈現層改標籤，`stock_detail_
+  data.py`的資料語意/測試都不用動(「當日」本來就等於「1日」，只是換個更
+  直覺的顯示文字)。
+- **主力進出**：`_build_overview_dealer_html()`改成兩段：①4欄的指標卡片
+  (`<table>`每個`<td>`裡放灰色小字標籤+18pt粗體大數字，模擬截圖裡的卡片
+  觀感)；②買超/賣超雙欄券商表格(買超券商/買進/賣出/買超張數 | 賣超券商/
+  買進/賣出/賣超張數，8欄並排)。因為`broker_chips`表還是0筆，所有數值仍然
+  顯示"-"，只是版面骨架照參考截圖排好，之後真的接上券商分點資料時只要填
+  數字進這個既有排版即可，不用重新設計。
+- `pytest tests/ -q`815個測試全數通過(這次是純UI排版調整，沒有動
+  `stock_detail_data.py`的查詢邏輯，既有15個測試不受影響)。用真實DB(2330
+  台積電)實際跑桌面版：抓取「個股明細」內層tab整個content widget(不是視窗，
+  避免視窗高度裁切)截圖，確認5個區塊預設全部展開、標題列正確顯示▼；模擬
+  點擊收合「主力進出」「大戶籌碼」兩個區塊的標題列，確認內容正確隱藏、
+  箭頭變成▶，其餘3個區塊不受影響仍是展開狀態；法人買賣總覽表格確認欄位
+  順序是「當日/2日/3日/5日/10日/1個月/3個月/6個月/1年」且數字跟前一版
+  累計檢視完全一致；主力進出卡片+雙欄券商表格版面正確渲染、無重疊。驗證用
+  debug script/截圖已依慣例刪除。
+
+## 新增法人/資券資料缺口自動偵測＋回補腳本，補上8天缺口(2026-08-03)
+
+使用者問「有沒有已經可以接好的API可以下載法人/資券的」，查證後發現`src/data/
+twse_client.py`的T86(法人)/MI_MARGN(資券)官方端點本來就已經接好(免費、不需
+token)，`scripts/daily_pipeline.py`每天都在用；查DB實際覆蓋範圍才發現法人/
+資券其實已經回補到2023-01-03了(跟stock_prices幾乎同步)，不是原本以為的大型
+多年回補工程——真正缺的只有8個交易日(2026-07-10、以及07-23~07-31這段連續
+空窗)，根因是TWSE的T86/MI_MARGN端點偶爾會在某天回傳空結果(即使當天收盤價
+已經是`is_intraday=0`的正式定案數字)，`daily_pipeline.py`只抓「今天」、沒有
+回頭補漏的機制，缺口一旦出現就會一直留著。
+
+使用者選擇「自動偵測任何缺口」(不是寫死這8天)的做法，新增`scripts/
+backfill_institutional_margin_gaps.py`：
+
+- `find_gap_dates()`：比對`stock_prices`有資料、但`institutional_investors`
+  或`margin_trading`缺資料的日期，由新到舊排序——每次執行都重新掃描DB目前
+  實際缺什麼，不依賴額外的「上次補到哪」狀態檔，這個操作本來就是idempotent
+  的，中斷後直接重跑即可，不需要resume邏輯。之後如果`daily_pipeline.py`
+  又漏抓，重跑這支就會自動抓到新的缺口。
+- 對每個缺口日期，只重新抓「真的缺的那個」(缺法人才打T86、缺資券才打
+  MI_MARGN，不會兩個都重抓浪費請求)，沿用`twse_client.py`既有的重試/
+  User-Agent設定，請求間隔預設1.0秒(比`backfill_history.py`已驗證安全的
+  0.6秒更保守，這支是背景無人看顧執行，寧可慢一點)。
+- 進度每5分鐘寫一次`ai/BACKFILL_GAPS_LOG.md`(使用者要求)，含已處理天數/
+  補上法人幾天/補上資券幾天/仍查無資料幾天(TWSE當天真的沒公布，不是程式
+  出錯)/錯誤幾天，第一輪迴圈就會先寫一次，不用等滿5分鐘才看得到內容。
+- 背景實際執行：8天缺口全部處理完(法人補上7天、資券補上7天，
+  2026-07-10這天TWSE兩個端點都查無資料，判定為真實缺乏公布而非程式錯誤，
+  0個例外)。跑完後複查DB：`institutional_investors`覆蓋天數從856變成863、
+  跟`stock_prices`完全一致；`margin_trading`從855變成862(比863少1，正好
+  對應07-10這天無法補上)。
+
+之後如果想讓這個補漏動作變成每天`daily_pipeline.py`跑完自動檢查、不用使用者
+再想起這件事，是可以做的後續加強，這次沒有做(使用者只確認了「自動偵測缺口」
+這個做法，沒有要求整合進每日排程，維持範圍在使用者實際要求的部分)。
+
+## 法人買賣總覽天期欄位改版(2026-08-03)
+
+使用者要求把「個股明細」法人買賣總覽表格的天期欄位改成「1日2日3日5日10日30日
+40日3個月6個月1年」——比對前一版多了「30日」「40日」兩個新天期、拿掉「1個月」
+(原本是20交易日)、原本顯示「1日」欄位那個特別轉標成「當日」的邏輯也一併拿掉
+(這次使用者要的就是字面上的「1日」)。
+
+- `src/presentation/stock_detail_data.py`的`INSTITUTIONAL_PERIODS`改成
+  `{"1日":1, "2日":2, "3日":3, "5日":5, "10日":10, "30日":30, "40日":40,
+  "3個月":60, "6個月":120, "1年":240}`——純資料層常數調整，`load_
+  institutional_cumulative()`本身邏輯完全不用改(天期組合是從這個dict動態
+  讀出來的，不是寫死的欄位清單)。
+- `desktop/main_window.py`的`_build_overview_institutional_html()`移除
+  `"當日" if label == "1日" else label`那段特殊轉標籤邏輯，直接用
+  `INSTITUTIONAL_PERIODS`裡的標籤文字當表頭。
+- `tests/test_stock_detail_data.py`原本的測試沒有斷言"1個月"這個key(只測
+  1日/2日/3日/5日/10日/1年)，天期組合改版不影響既有測試通過與否，只更新了
+  一行過時的註解(原本提到"1個月"當作「天數不足才用實際天數加總」的舉例，
+  改成"30日/40日")。
+- `pytest tests/ -q`815個測試全數通過。用真實DB(2330台積電)實際跑桌面版，
+  確認法人買賣總覽表頭欄位順序正確是「1日/2日/3日/5日/10日/30日/40日/
+  3個月/6個月/1年」，數字跟未改版前的累計檢視完全一致(只是欄位重新排列，
+  沒有動計算邏輯)；順便確認資券變化總覽已經反映上一輪缺口回補的成果，
+  資料時間從07-22變成07-31。驗證用截圖已依慣例刪除。
+
+## 法人買賣總覽/資券變化總覽表格下方新增書中理論分析(2026-08-03)
+
+使用者問：從法人買賣總覽的累計日數/張數，能不能從朱家泓或陳佳豐(訪談時打成
+「陳佳豐」，書的作者實際是陳家豐)的書裡找到「法人連續N日買賣超」判斷停損或
+主力吸籌/出貨的理論依據？資券是否也有對應理論？
+
+查了`ai/zhu-rules/`跟`ai/ebook-summary-chen/`，發現：
+
+- **朱家泓《抓住飆股輕鬆賺》淘汰法選股排除規則第8項**(R-SCREEN-06，筆記見
+  `ai/zhu-rules/選股策略/淘汰法選股排除規則.md`)：三大法人連續賣超要避開，
+  程式碼已經有`src/screener/screening_rules.py`的
+  `institutional_sell_streak_or_black_k_cluster()`(門檻3天)，但這個函式吃的是
+  「已經算好的連續天數」這個int，從來沒有從原始逐日買賣超資料算出這個天數的
+  函式，也完全沒有接上任何UI(RULE_STATUS.md標示「已實作未接入」)。
+- **陳家豐《看懂籌碼 股市賺大錢》第4篇「解構3大法人」**：外資(第1章)只有中小型股
+  才有參考價值、權值股受全球布局/期貨套利/指數調整干擾不宜採信；自營商(第1章)
+  操作週期短建議「首先剔除」；投信(第2章)受法規限制(單一個股持股上限10%、單日
+  買進不得超過成交量10%)必須分批布局，連續加碼3~5天且個股剛脫離下跌整理通常是
+  最佳切入點——這是全書法規數字最具體的一章。
+- **陳家豐第2篇第4章「融資維持率揭秘 勿買斷頭股」**：已有完整實作
+  `src/indicators/margin_trading.py`(166%初始→135%警戒→120%斷頭→連續N天
+  <120%超跌反彈訊號)，`tests/test_margin_trading.py`7個測試全過，但同樣完全
+  沒有接上UI(2026-07-29的實作備註就寫著「目前只是building block函式，尚未
+  接上UI/screener」)。
+- 「主力底部吸籌」「高檔換手」這類更細緻的敘事，陳家豐書中雖有案例(可成2012年
+  公司派逆勢加碼)，但明確承認沒有給出精確的天數/金額門檻，**沒有實作這部分**——
+  程式化一個書中自己都說沒有量化標準的敘事，是過度宣稱，不如老實只呈現書中真正
+  給出明確門檻的規則。
+
+**實作**：
+
+- 新增`src/indicators/institutional_flow.py`：`classify_flow_streak(net_values_
+  desc)`計算連續買超/賣超天數，`INSTITUTIONAL_STREAK_THRESHOLD=3`(朱家泓明確
+  3天＋陳家豐投信3~5天取下限，兩個來源剛好一致)。純函式，7個測試全過。
+- `src/presentation/stock_detail_data.py`新增兩個查詢函式：
+  - `load_institutional_flow_analysis()`：對外資/投信/自營商/三大法人各自呼叫
+    `classify_flow_streak()`。
+  - `load_margin_maintenance_analysis()`：串接既有的`margin_trading.py`，用
+    該股票資料庫裡的全部歷史計算加權平均成本、估算目前融資維持率/狀態/是否
+    符合超跌反彈訊號(融資成數採書中預設6成，非個股實際規定，UI會明確標註這個
+    限制)。
+- `desktop/main_window.py`的「法人買賣總覽」表格下方新增「📊 法人籌碼分析」：
+  三大法人連續賣超≥3天顯示停損警示(綠色，依朱家泓)；投信連續買超≥3天顯示
+  切入觀察(紅色，依陳家豐，附註本畫面沒有另外判斷「是否剛脫離整理區」)；投信
+  連續賣超顯示保守觀察；外資/自營商觸發時附上書中對應的可信度提醒(灰色文字，
+  外資限中小型股、自營商建議首先剔除)。「資券變化總覽」表格下方新增「📊 融資
+  維持率分析」：顯示估算維持率數值/狀態，跌破135%顯示警戒色提醒、跌破120%
+  顯示斷頭警示、符合超跌反彈訊號時顯示短線反彈提示(附「僅適合手腳靈活操作者，
+  需嚴設停利」的書中原文提醒)。
+- 新增/更新測試：`tests/test_institutional_flow.py`(7個)、
+  `tests/test_stock_detail_data.py`新增4個(法人連續買賣超判讀×2、融資維持率
+  分析×2，含比對書中72元跌破斷頭線範例的精確驗證)。`pytest tests/ -q`826個
+  測試全數通過。
+- 用真實DB(2330台積電)實際跑桌面版驗證：法人買賣總覽正確顯示「投信已連續買超
+  6天」「自營商連續買超7天」兩則分析(外資/三大法人當時的連續天數都不足3天，
+  正確地沒有顯示訊號，不是漏掉)；資券變化總覽正確顯示「估算融資維持率201.5%
+  （狀態：正常）」。截圖確認排版/顏色/換行正常，無重疊。驗證用截圖已依慣例
+  刪除。
+
+## 大盤分頁新增「資料更新至」時間戳(2026-08-03)
+
+使用者反映「大盤那頁怎麼沒有顯示資料更新時間」。查證後發現：`status_label`
+(顯示「股價更新至/候選清單算至/下次更新時間」)其實一直都有在維護、正確更新，
+但整組toolbar(`refresh_btn`/`fetch_btn`/`candidate_search_input`/
+`status_label`)實際上是`_build_screener_tab()`(「選股」分頁)內容的一部分，
+只在切到「選股」分頁時才看得到——大盤分頁(`_build_market_tab()`)從來沒有
+放過任何時間戳顯示，不是顯示邏輯壞掉，是這個分頁本來就沒有這塊UI。
+
+沒有選擇把整組toolbar搬到QTabWidget外面變成全域共用(牽涉範圍較大：
+refresh_btn/fetch_btn的點擊處理已經有「依目前分頁決定要重新整理哪個畫面」的
+邏輯，搬動位置風險較高，且候選清單搜尋框本來就是「選股」分頁專屬功能，硬搬
+到全域反而語意不清)。改成在`_build_market_tab()`加一個獨立的
+`self.market_update_label`(灰色小字，跟個股明細「交易資訊」區塊的「資料時間：」
+同一種視覺風格)，只顯示股價更新時間(大盤分頁沒有候選清單/排程時間這些概念，
+不需要跟status_label一樣顯示三行)，在`_refresh_market_tab()`裡用
+`chart_data.get_latest_update_time()`更新。
+
+同時把`_poll_pipeline_status()`裡原本內嵌的時間格式化closure(`_fmt`)抽成
+`_format_update_timestamp()`static method，讓`status_label`跟新增的
+`market_update_label`共用同一套格式邏輯("YYYY-MM-DD HH:MM"，缺值顯示
+「尚無資料」)，不要兩處各自維護一份格式規則、之後改一邊忘記改另一邊。
+
+`pytest tests/ -q`826個測試全數通過(這是純UI顯示調整，沒有動任何查詢/計算
+邏輯，測試數量不變)。用真實DB實際跑桌面版確認大盤分頁正確顯示「資料更新至：
+2026-08-01 13:27」。驗證用截圖已依慣例刪除。

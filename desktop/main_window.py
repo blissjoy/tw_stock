@@ -21,6 +21,8 @@ import pandas as pd
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -41,11 +43,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
     QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -55,9 +58,10 @@ from desktop.chart_render import render_chart_html
 from src.data import portfolio_storage, storage
 from src.data.connection import get_default_connection, get_default_portfolio_connection
 from src.data.yfinance_client import TAIEX_STOCK_ID
+from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
-from src.presentation import chart_data, pipeline_status, portfolio_data
+from src.presentation import chart_data, pipeline_status, portfolio_data, stock_detail_data
 from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
 TAIEX_DISPLAY_NAME = "台股加權指數"
@@ -74,9 +78,24 @@ TAB_WATCHLIST = 5
 # 的market參數值；"全部"不在這裡，get()查不到就是None(不限制)。
 _MARKET_FILTER_VALUES = {"上市": "TWSE", "上櫃": "TPEx"}
 
-# 庫存清單／觀察清單表格共用的欄位結構(見_populate_portfolio_table())：
+# 觀察清單表格共用的欄位結構(見_populate_portfolio_table())：
 # 股票代號/名稱/現價/漲跌幅(%)/成本價/持股數/市值/帳面損益/報酬率(%)/SAR狀態/SAR距離%/備註
 _PORTFOLIO_NUMERIC_COLUMNS = {2, 3, 4, 5, 6, 7, 8, 10}
+
+# 庫存清單改用QTreeWidget(彙總父列+可展開的批次明細子列，見_populate_inventory_
+# tree())的欄位結構——父列/子列共用同一組欄，欄位語意見_build_inventory_tab()。
+_INVENTORY_TREE_HEADERS = [
+    "股票代號", "名稱", "買入日期", "現價", "漲跌幅(%)", "成本價", "持股數",
+    "手續費", "市值", "預估賣出成本", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "批次數", "備註",
+]
+_INVENTORY_TREE_NUMERIC_COLUMNS = {
+    _INVENTORY_TREE_HEADERS.index(h)
+    for h in [
+        "現價", "漲跌幅(%)", "成本價", "持股數", "手續費", "市值", "預估賣出成本",
+        "帳面損益", "報酬率(%)", "SAR距離%", "批次數",
+    ]
+}
+_INVENTORY_TREE_LOT_COUNT_COLUMN = _INVENTORY_TREE_HEADERS.index("批次數")
 
 
 def _format_month_day(date_str: str) -> str:
@@ -140,6 +159,23 @@ class _NumericTableWidgetItem(QTableWidgetItem):
             return None
 
 
+class _NumericTreeWidgetItem(QTreeWidgetItem):
+    """QTreeWidgetItem版的_NumericTableWidgetItem——2026-08-02新增，庫存清單改用
+    QTreeWidget(彙總父列+可展開的批次明細子列)後，數值欄位排序需要同樣依實際數值
+    (不是字串)排序，QTreeWidgetItem沒有現成的「目前排序欄位」參數，改用
+    self.treeWidget().sortColumn()取得。"""
+
+    def __lt__(self, other: object) -> bool:
+        column = self.treeWidget().sortColumn() if self.treeWidget() else 0
+        self_value = _NumericTableWidgetItem._parse(self.text(column))
+        other_value = _NumericTableWidgetItem._parse(other.text(column)) if isinstance(other, QTreeWidgetItem) else None
+        if self_value is None:
+            return other_value is not None
+        if other_value is None:
+            return False
+        return self_value < other_value
+
+
 class _AutoHeightTabWidget(QTabWidget):
     """QTabWidget預設的sizeHint()/minimumSizeHint()不會只反映『目前顯示中』那一頁的
     高度，包在QScrollArea(setWidgetResizable=True)裡時，捲軸範圍抓不到正確的內容高度
@@ -166,6 +202,50 @@ class _AutoHeightTabWidget(QTabWidget):
         extra = self.tabBar().sizeHint().height() + 8
         page_height = getattr(current, method_name)().height()
         return QSize(base.width(), page_height + extra)
+
+
+class _CollapsibleBox(QWidget):
+    """可展開/收合的區塊容器：標題列是一個按鈕(顯示▼/▶+標題文字)，點擊切換內容
+    widget的顯示/隱藏，預設展開。2026-08-03新增，供「個股明細」tab的5個區塊
+    (交易資訊/法人買賣/主力進出/資券變化/大戶籌碼)各自獨立收合使用——使用者要求
+    每個block都能展開收合，預設打開。
+
+    用setVisible()切換內容widget，不是清空內容或改高度限制——Qt layout系統會
+    自動因應子widget的visible狀態重新流動版面，外層QScrollArea(_build_stock_
+    detail_tab()的detail_scroll)本來就是setWidgetResizable(True)，捲軸範圍會
+    自動反映內容增減，不需要另外同步高度。
+    """
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._expanded = True
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 8)
+        outer_layout.setSpacing(0)
+
+        self._toggle_btn = QPushButton(self._header_text())
+        self._toggle_btn.setStyleSheet(
+            "QPushButton { text-align: left; font-weight: bold; padding: 6px 10px; "
+            "background-color: #f0f0f0; border: 1px solid #d5d5d5; }"
+            "QPushButton:hover { background-color: #e6e6e6; }"
+        )
+        self._toggle_btn.clicked.connect(self._on_toggle)
+        outer_layout.addWidget(self._toggle_btn)
+
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(10, 8, 10, 8)
+        outer_layout.addWidget(self.content)
+
+    def _header_text(self) -> str:
+        return f"{'▼' if self._expanded else '▶'}  {self._title}"
+
+    def _on_toggle(self) -> None:
+        self._expanded = not self._expanded
+        self.content.setVisible(self._expanded)
+        self._toggle_btn.setText(self._header_text())
 
 
 class _CheckableComboBox(QComboBox):
@@ -244,7 +324,7 @@ class _CheckableComboBox(QComboBox):
 
 class _StockEditDialog(QDialog):
     """庫存清單／觀察清單共用的新增/編輯對話框：股票代號＋(買入日期)＋成本價＋
-    持股數＋備註。2026-08-02新增(移植ref-project的inventory_list.py/
+    持股數＋(手續費)＋備註。2026-08-02新增(移植ref-project的inventory_list.py/
     watchlist.py，兩者的編輯dialog欄位結構幾乎相同，這裡合併成一個共用class)。
 
     股票代號欄位離開焦點時用chart_data.resolve_stock_id()即時查名稱顯示在旁邊，
@@ -255,19 +335,19 @@ class _StockEditDialog(QDialog):
     ⚠️ 2026-08-02改版：使用者反映庫存實際上是分批買入，同一檔股票可能有好幾筆
     各自獨立的批次紀錄——「編輯」模式現在是編輯「某一筆批次」(用lot id識別，不是
     股票代號)，股票代號欄位唯讀的原因也從「是主鍵」改成「批次的股票代號不該事後
-    亂改，要換股票應該是刪除重建，不是編輯」。show_buy_date控制要不要顯示「買入
-    日期」欄位——觀察清單不是真的持股，不需要記錄買入日期，只有庫存清單的呼叫端
-    會傳show_buy_date=True。
+    亂改，要換股票應該是刪除重建，不是編輯」。is_inventory控制要不要顯示「買入
+    日期」「手續費」這兩個庫存專屬欄位——觀察清單不是真的持股，不需要記錄買入
+    日期/手續費，只有庫存清單的呼叫端會傳is_inventory=True。
     """
 
     def __init__(
-        self, conn, title: str, initial: dict | None = None, parent=None, show_buy_date: bool = False,
+        self, conn, title: str, initial: dict | None = None, parent=None, is_inventory: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self._conn = conn
         self._result_stock_id: str = ""
-        self._show_buy_date = show_buy_date
+        self._is_inventory = is_inventory
         initial = initial or {}
 
         layout = QFormLayout(self)
@@ -285,7 +365,7 @@ class _StockEditDialog(QDialog):
         layout.addRow("股票代號：", id_row)
 
         self.buy_date_input = QLineEdit(initial.get("buy_date") or "")
-        if show_buy_date:
+        if is_inventory:
             self.buy_date_input.setPlaceholderText("YYYY-MM-DD，可留空，也可以直接打8碼數字如20260802")
             # 離開這個欄位(Tab跳下一格/點別的地方)時自動把"20260802"這類8碼數字
             # 轉成"2026-08-02"，不用使用者自己手動加分隔符號，見_normalize_date_
@@ -295,7 +375,7 @@ class _StockEditDialog(QDialog):
 
         # QDoubleSpinBox/QSpinBox沒有原生的「留空」狀態，用setSpecialValueText()
         # 讓數值等於最小值(0)時顯示提示文字取代"0.00"，values()裡把0視為None——
-        # 成本價/持股數為0沒有實際意義，這個簡化不會誤傷真實情境。
+        # 成本價/持股數/手續費為0沒有實際意義，這個簡化不會誤傷真實情境。
         self.cost_price_input = QDoubleSpinBox()
         self.cost_price_input.setRange(0, 9_999_999)
         self.cost_price_input.setDecimals(2)
@@ -309,6 +389,18 @@ class _StockEditDialog(QDialog):
         self.shares_input.setValue(int(initial.get("shares") or 0))
         layout.addRow("持股數：", self.shares_input)
 
+        self.fee_estimate_label = QLabel("")
+        if is_inventory:
+            # 手續費：2026-08-02改版，使用者反映庫存/證券app本來就內含這筆費用，
+            # 新增庫存時不應該還要自己查來填——改成系統依成本價×股數自動估算
+            # (見src/presentation/portfolio_data.py的estimate_buy_fee())，這裡
+            # 只顯示估算結果，不是可編輯欄位；成本價/股數改變時即時重算顯示。
+            # 會計入帳面損益/報酬率的成本基礎(見_merge_holdings_with_snapshot())。
+            self.fee_estimate_label.setStyleSheet("color: #666666;")
+            self.cost_price_input.valueChanged.connect(self._update_fee_estimate)
+            self.shares_input.valueChanged.connect(self._update_fee_estimate)
+            layout.addRow("預估買入手續費：", self.fee_estimate_label)
+
         self.note_input = QLineEdit(initial.get("note") or "")
         layout.addRow("備註：", self.note_input)
 
@@ -318,6 +410,8 @@ class _StockEditDialog(QDialog):
         layout.addRow(buttons)
 
         self._update_name_label()
+        if is_inventory:
+            self._update_fee_estimate()
 
     def _update_name_label(self) -> None:
         query = self.stock_id_input.text().strip()
@@ -330,6 +424,18 @@ class _StockEditDialog(QDialog):
         else:
             self.name_label.setText("")
 
+    def _update_fee_estimate(self) -> None:
+        """這裡只估算買進手續費(計入成本基礎，見estimate_buy_fee())——「如果現在
+        賣出」要另外付的手續費+證交稅(estimate_sell_cost())會隨現價每天變動，不是
+        買入當下就能決定的固定數字，不在這個新增/編輯批次的對話框估算，而是列表
+        畫面「預估賣出成本」欄位即時算給使用者看(見_merge_holdings_with_
+        snapshot())。"""
+        fee = portfolio_data.estimate_buy_fee(self.cost_price_input.value() or None, self.shares_input.value() or None)
+        if fee is None:
+            self.fee_estimate_label.setText("（填成本價與持股數後自動估算）")
+        else:
+            self.fee_estimate_label.setText(f"{fee:,} 元（依成本價×股數自動估算，計入成本基礎）")
+
     def _normalize_buy_date(self) -> None:
         self.buy_date_input.setText(_normalize_date_text(self.buy_date_input.text()))
 
@@ -341,10 +447,10 @@ class _StockEditDialog(QDialog):
         # 保險起見在送出前再轉一次格式——正常情況下editingFinished在跳到「確定」
         # 按鈕時就已經觸發過，這裡是防呆(例如某些平台上按Enter直接送出、沒有真正
         # 經過焦點轉移事件的情況)。
-        if self._show_buy_date:
+        if self._is_inventory:
             self._normalize_buy_date()
         buy_date = self.buy_date_input.text().strip()
-        if self._show_buy_date and buy_date:
+        if self._is_inventory and buy_date:
             try:
                 datetime.strptime(buy_date, "%Y-%m-%d")
             except ValueError:
@@ -359,12 +465,18 @@ class _StockEditDialog(QDialog):
         self.accept()
 
     def values(self) -> dict:
-        """呼叫端在dialog.exec()回傳Accepted後呼叫，取得使用者輸入的結果。"""
+        """呼叫端在dialog.exec()回傳Accepted後呼叫，取得使用者輸入的結果。fee是
+        系統自動估算的結果(見_update_fee_estimate()/portfolio_data.estimate_
+        buy_fee())，不是使用者輸入，觀察清單(is_inventory=False)不需要這個概念，
+        固定回傳None。"""
+        cost_price = self.cost_price_input.value() or None
+        shares = self.shares_input.value() or None
         return {
             "stock_id": self._result_stock_id,
             "buy_date": self.buy_date_input.text().strip() or None,
-            "cost_price": self.cost_price_input.value() or None,
-            "shares": self.shares_input.value() or None,
+            "cost_price": cost_price,
+            "shares": shares,
+            "fee": portfolio_data.estimate_buy_fee(cost_price, shares) if self._is_inventory else None,
             "note": self.note_input.text().strip(),
         }
 
@@ -780,8 +892,93 @@ class MainWindow(QMainWindow):
         analysis_tab_layout.addWidget(self.analysis_view)
         self.detail_inner_tabs.addTab(analysis_tab, "個股分析")
 
+        self._build_stock_overview_tab()
+
         self.detail_inner_tabs.currentChanged.connect(self._on_detail_inner_tab_changed)
         bottom_layout.addWidget(self.detail_inner_tabs)
+
+    # 「個股明細」5個區塊的標題，同時是_build_stock_overview_tab()建立_CollapsibleBox
+    # 的順序、也是_refresh_stock_overview_view()對應each區塊QTextEdit屬性名稱的依據
+    # (見_STOCK_OVERVIEW_BLOCK_ATTRS)。
+    _STOCK_OVERVIEW_BLOCKS = ["交易資訊", "法人買賣總覽", "主力進出", "資券變化總覽", "大戶籌碼"]
+
+    def _build_stock_overview_tab(self) -> None:
+        """「個股明細」內層tab(detail_inner_tabs第3個分頁，index==2)：交易資訊/法人
+        買賣總覽/主力進出/資券變化總覽/大戶籌碼，仿使用者提供的參考截圖(temp/個股
+        詳情-*.jpg)排版。2026-08-02新增，2026-08-03改版。
+
+        目前只有「交易資訊」「法人買賣總覽」「資券變化總覽」三個區塊有真實資料來源
+        (stock_prices/institutional_investors/margin_trading，見src/presentation/
+        stock_detail_data.py的模組docstring)；「主力進出」需要券商分點籌碼(FinMind
+        付費方案才能接上)、「大戶籌碼」需要股權分散/大戶持股資料(目前schema完全沒有
+        對應的表)，這兩個區塊先建好框架、顯示「尚未串接資料來源」，不是造假資料湊。
+
+        ⚠️ 2026-08-03改版：
+        ①每個區塊改用_CollapsibleBox包起來，可各自獨立展開/收合(預設展開)——原本
+          5個區塊擠在同一個QTextEdit裡，使用者反映想要能個別收合。
+        ②法人買賣總覽拿掉「當日／累計」切換，固定顯示累計表格(欄位改成「1日、2日、
+          3日、5日、10日、30日、40日、3個月、6個月、1年」)——使用者要求拿掉當日
+          檢視，一律用累計表格；天期組合2026-08-03當天又改過一次(見
+          stock_detail_data.py的INSTITUTIONAL_PERIODS)，這裡直接讀那份定義，
+          不會漏改。
+        ③資券變化總覽維持「當日／累計」切換(使用者這次沒有要求改，維持原樣)。
+        ④主力進出改成仿照參考截圖的「4張指標卡片＋買超/賣超雙欄券商表格」排版，
+          雖然目前沒有真實資料，框架本身要先做到位。
+        """
+        overview_tab = QWidget()
+        overview_layout = QVBoxLayout(overview_tab)
+
+        # 預設的checkable QPushButton在Fusion風格下checked/unchecked視覺差異很小，
+        # 使用者不容易一眼看出目前是哪個檢視——明確加style讓checked狀態變成藍底白字，
+        # 跟表格裡漲跌用的紅/綠是不同語意(這裡純粹是「目前選取」的UI狀態，不代表
+        # 漲跌方向)，用藍色避免混淆。資券變化總覽的「當日／累計」切換仍然保留(見
+        # class docstring③)，法人買賣總覽已經拿掉切換，不再需要這組按鈕。
+        toggle_btn_style = (
+            "QPushButton { padding: 3px 14px; }"
+            "QPushButton:checked { background-color: #2980b9; color: white; font-weight: bold; }"
+        )
+
+        self._stock_overview_boxes: dict[str, _CollapsibleBox] = {}
+        self._stock_overview_views: dict[str, QTextEdit] = {}
+        for title in self._STOCK_OVERVIEW_BLOCKS:
+            box = _CollapsibleBox(title, overview_tab)
+            if title == "資券變化總覽":
+                toggle_row = QHBoxLayout()
+                toggle_row.addWidget(QLabel("檢視："))
+                self._margin_cumulative = False
+                margin_group = QButtonGroup(box)
+                margin_daily_btn = QPushButton("當日")
+                margin_daily_btn.setCheckable(True)
+                margin_daily_btn.setChecked(True)
+                margin_cumulative_btn = QPushButton("累計")
+                margin_cumulative_btn.setCheckable(True)
+                for btn in (margin_daily_btn, margin_cumulative_btn):
+                    btn.setStyleSheet(toggle_btn_style)
+                margin_group.addButton(margin_daily_btn)
+                margin_group.addButton(margin_cumulative_btn)
+                margin_daily_btn.clicked.connect(lambda: self._on_margin_view_toggle(False))
+                margin_cumulative_btn.clicked.connect(lambda: self._on_margin_view_toggle(True))
+                toggle_row.addWidget(margin_daily_btn)
+                toggle_row.addWidget(margin_cumulative_btn)
+                toggle_row.addStretch()
+                box.content_layout.addLayout(toggle_row)
+
+            view = QTextEdit()
+            view.setReadOnly(True)
+            view.setFrameShape(QFrame.Shape.NoFrame)
+            view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            box.content_layout.addWidget(view)
+
+            overview_layout.addWidget(box)
+            self._stock_overview_boxes[title] = box
+            self._stock_overview_views[title] = view
+
+        overview_layout.addStretch()
+        self.detail_inner_tabs.addTab(overview_tab, "個股明細")
+
+    def _on_margin_view_toggle(self, cumulative: bool) -> None:
+        self._margin_cumulative = cumulative
+        self._refresh_stock_overview_view()
 
     def _build_industry_rotation_tab(self) -> None:
         """「產業輪動」分頁：某一天各產業別的成交量加總/平均漲跌幅/股票數，用來看資金
@@ -890,9 +1087,12 @@ class MainWindow(QMainWindow):
     def _portfolio_summary_text(df: pd.DataFrame, cost_label: str, value_label: str, profit_label: str) -> str:
         """算庫存清單／觀察清單頂部的摘要文字：總成本/總市值/累積損益(含%)/今日資產
         變動——只加總「有算出值」的列(pandas sum預設skipna=True)，成本價/持股數
-        都沒填的列本來就不計入任何一個加總數字，不是遺漏。
+        都沒填的列本來就不計入任何一個加總數字，不是遺漏。2026-08-02：總成本加上
+        手續費加總(觀察清單沒有fee欄位時.get()拿到None、sum()視為0，不影響既有
+        行為)，才會跟每一列profit/return_pct已經計入手續費的算法基準一致。
         """
-        total_cost = (df["cost_price"] * df["shares"]).sum()
+        total_fee = df["fee"].sum() if "fee" in df.columns else 0
+        total_cost = (df["cost_price"] * df["shares"]).sum() + total_fee
         total_value = df["market_value"].sum()
         total_profit = df["profit"].sum()
         total_change = df["today_change_value"].sum()
@@ -904,17 +1104,17 @@ class MainWindow(QMainWindow):
         )
 
     def _build_inventory_tab(self) -> None:
-        """「庫存清單」分頁：使用者實際持有的股票，記錄成本價/持股數，算浮動損益。
-        現價/SAR資料直接查主DB既有的stock_prices/daily_indicators(daily_pipeline.py
-        每天自動更新)，不像ref-project那樣需要另外做背景yfinance更新worker——本專案
-        的股價/技術指標資料本來就已經是最新的，不需要per-股票手動觸發更新。
+        """「庫存清單」分頁：使用者實際持有的股票，記錄成本價/持股數/手續費，算
+        浮動損益。現價/SAR資料直接查主DB既有的stock_prices/daily_indicators
+        (daily_pipeline.py每天自動更新)，不像ref-project那樣需要另外做背景
+        yfinance更新worker——本專案的股價/技術指標資料本來就已經是最新的，不需要
+        per-股票手動觸發更新。
 
-        ⚠️ 2026-08-02改版：使用者反映實際狀況是分批買入，同一檔股票要能存好幾筆各自
-        獨立的批次(lot)。新增「檢視方式：明細／彙總」切換(self.inventory_view_combo)，
-        用QStackedWidget放兩個獨立的QTableWidget(明細/彙總欄位結構不同，不能共用
-        同一個表格動態換欄位)：明細檢視每筆批次各自一列、可以編輯/刪除特定那一批；
-        彙總檢視依股票分組算加權平均成本，是唯讀的衍生資料，「編輯選取」/「刪除
-        選取」按鈕在這個檢視下會停用。
+        ⚠️ 2026-08-02第三次改版：使用者反映上一輪「明細／彙總」下拉切換的操作
+        方式麻煩，改成用`QTreeWidget`(樹狀表格)：每檔股票一個父列(彙總後的加權
+        平均成本/總損益)，預設全部收合；點父列的「批次數」欄位或原生展開箭頭，
+        才會展開底下每一筆批次(lot)各自的明細子列。這是QTreeWidget的原生用途
+        (master-detail)，不用再自己維護「兩個表格+QStackedWidget+下拉選單」。
         """
         inventory_scroll = QScrollArea()
         inventory_scroll.setWidgetResizable(True)
@@ -924,51 +1124,43 @@ class MainWindow(QMainWindow):
         inventory_scroll.setWidget(inventory_content)
         inventory_layout = QVBoxLayout(inventory_content)
 
-        view_bar = QHBoxLayout()
-        view_bar.addWidget(QLabel("檢視方式："))
-        self.inventory_view_combo = QComboBox()
-        self.inventory_view_combo.addItems(["明細（每批各自一列）", "彙總（依股票算加權平均成本）"])
-        self.inventory_view_combo.currentIndexChanged.connect(self._on_inventory_view_changed)
-        view_bar.addWidget(self.inventory_view_combo)
-        view_bar.addStretch()
-        inventory_layout.addLayout(view_bar)
-
         self.inventory_summary_label = QLabel("")
         inventory_layout.addWidget(self.inventory_summary_label)
 
         toolbar = QHBoxLayout()
         add_btn = QPushButton("新增")
         add_btn.clicked.connect(self._on_inventory_add)
-        self.inventory_edit_btn = QPushButton("編輯選取")
-        self.inventory_edit_btn.clicked.connect(self._on_inventory_edit_selected)
-        self.inventory_delete_btn = QPushButton("刪除選取")
-        self.inventory_delete_btn.clicked.connect(self._on_inventory_delete_selected)
+        edit_btn = QPushButton("編輯選取")
+        edit_btn.clicked.connect(self._on_inventory_edit_selected)
+        delete_btn = QPushButton("刪除選取")
+        delete_btn.clicked.connect(self._on_inventory_delete_selected)
         watchlist_btn = QPushButton("加入觀察清單")
         watchlist_btn.clicked.connect(self._on_inventory_add_to_watchlist)
         refresh_btn = QPushButton("🔄 重新整理")
         refresh_btn.clicked.connect(self._refresh_inventory_tab)
-        for btn in (add_btn, self.inventory_edit_btn, self.inventory_delete_btn, watchlist_btn, refresh_btn):
+        for btn in (add_btn, edit_btn, delete_btn, watchlist_btn, refresh_btn):
             toolbar.addWidget(btn)
         toolbar.addStretch()
         inventory_layout.addLayout(toolbar)
 
-        self.inventory_detail_table = self._build_portfolio_table(
-            ["股票代號", "名稱", "買入日期", "現價", "漲跌幅(%)", "成本價", "持股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "備註"],
-            stretch_column="備註",
-        )
-        self.inventory_summary_table = self._build_portfolio_table(
-            ["股票代號", "名稱", "現價", "漲跌幅(%)", "平均成本價", "總持股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "批次數"],
-            stretch_column="名稱",
-        )
-        self.inventory_table_stack = QStackedWidget()
-        self.inventory_table_stack.addWidget(self.inventory_detail_table)
-        self.inventory_table_stack.addWidget(self.inventory_summary_table)
-        inventory_layout.addWidget(self.inventory_table_stack, stretch=1)
+        self.inventory_tree = QTreeWidget()
+        self.inventory_tree.setColumnCount(len(_INVENTORY_TREE_HEADERS))
+        self.inventory_tree.setHeaderLabels(_INVENTORY_TREE_HEADERS)
+        self.inventory_tree.setStyleSheet("QTreeWidget::item { padding-right: 10px; }")
+        header = self.inventory_tree.header()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(_INVENTORY_TREE_HEADERS.index("備註"), QHeaderView.ResizeMode.Stretch)
+        self.inventory_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.inventory_tree.setAllColumnsShowFocus(True)  # 整列反白選取，不是只有第0欄
+        self.inventory_tree.setSortingEnabled(True)
+        # 點「批次數」欄位的數字展開/收合該股票明細——原生展開箭頭(點第0欄前面的
+        # 小三角)還是照常可以用，這是額外多一個可以點的地方，不是取代原生行為。
+        self.inventory_tree.itemClicked.connect(self._on_inventory_tree_item_clicked)
+        inventory_layout.addWidget(self.inventory_tree, stretch=1)
 
     def _build_portfolio_table(self, headers: list[str], stretch_column: str | None = None) -> QTableWidget:
-        """庫存清單／觀察清單表格的共用建構邏輯，只有表頭文字(跟要拉開間距的欄位)
-        不同(見_build_inventory_tab()/_build_watchlist_tab())。stretch_column
-        未指定時預設拉開最後一欄。"""
+        """觀察清單表格的建構邏輯(庫存清單改用QTreeWidget，見_build_inventory_
+        tab())。stretch_column未指定時預設拉開最後一欄。"""
         table = QTableWidget()
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
@@ -982,98 +1174,104 @@ class MainWindow(QMainWindow):
         table.setSortingEnabled(True)
         return table
 
-    def _on_inventory_view_changed(self) -> None:
-        is_detail = self.inventory_view_combo.currentIndex() == 0
-        self.inventory_table_stack.setCurrentIndex(0 if is_detail else 1)
-        self.inventory_edit_btn.setEnabled(is_detail)
-        self.inventory_delete_btn.setEnabled(is_detail)
-        tooltip = "" if is_detail else "請切換到明細檢視才能編輯/刪除特定批次"
-        self.inventory_edit_btn.setToolTip(tooltip)
-        self.inventory_delete_btn.setToolTip(tooltip)
-        self._refresh_inventory_tab()
-
-    def _populate_inventory_detail_table(self, df: pd.DataFrame) -> None:
-        """明細檢視填值：每一列對應一筆批次(lot)，第一欄(股票代號)的item額外用
-        UserRole存這筆的lot id，供編輯/刪除選取列時精準指定是哪一批(不能用股票
-        代號——同一檔股票可能有好幾筆批次)。"""
-        table = self.inventory_detail_table
-        numeric_columns = {3, 4, 5, 6, 7, 8, 9, 11}
-        table.setSortingEnabled(False)
-        table.setRowCount(len(df))
-        for row_idx, row in df.reset_index(drop=True).iterrows():
-            values = [
-                row["stock_id"],
-                row["name"] if pd.notna(row["name"]) else "-",
-                row["buy_date"] if pd.notna(row["buy_date"]) and row["buy_date"] else "-",
-                f"{row['close']:.2f}" if pd.notna(row["close"]) else "-",
-                f"{row['pct_change']:+.2f}" if pd.notna(row["pct_change"]) else "-",
-                f"{row['cost_price']:.2f}" if pd.notna(row["cost_price"]) else "-",
-                f"{int(row['shares']):,}" if pd.notna(row["shares"]) else "-",
-                f"{row['market_value']:,.0f}" if pd.notna(row["market_value"]) else "-",
-                f"{row['profit']:+,.0f}" if pd.notna(row["profit"]) else "-",
-                f"{row['return_pct']:+.2f}" if pd.notna(row["return_pct"]) else "-",
-                row["sar_status"] if pd.notna(row["sar_status"]) else "-",
-                f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-",
-                row["note"] if pd.notna(row["note"]) and row["note"] else "",
-            ]
-            for col_idx, value in enumerate(values):
-                item_cls = _NumericTableWidgetItem if col_idx in numeric_columns else QTableWidgetItem
-                item = item_cls(str(value))
-                if col_idx in numeric_columns:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if col_idx == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
-                table.setItem(row_idx, col_idx, item)
-        table.setSortingEnabled(True)
-        table.resizeRowsToContents()
-
-    def _populate_inventory_summary_table(self, df: pd.DataFrame) -> None:
-        """彙總檢視填值：每一列對應一檔股票(所有批次加權平均後的結果)，沒有單一
-        lot id可以對應，這個表不支援編輯/刪除選取列(見_on_inventory_view_changed()
-        停用按鈕的邏輯)。"""
-        table = self.inventory_summary_table
-        numeric_columns = {2, 3, 4, 5, 6, 7, 8, 10, 11}
-        table.setSortingEnabled(False)
-        table.setRowCount(len(df))
-        for row_idx, row in df.reset_index(drop=True).iterrows():
-            values = [
-                row["stock_id"],
-                row["name"] if pd.notna(row["name"]) else "-",
-                f"{row['close']:.2f}" if pd.notna(row["close"]) else "-",
-                f"{row['pct_change']:+.2f}" if pd.notna(row["pct_change"]) else "-",
-                f"{row['cost_price']:.2f}" if pd.notna(row["cost_price"]) else "-",
-                f"{int(row['shares']):,}" if pd.notna(row["shares"]) else "-",
-                f"{row['market_value']:,.0f}" if pd.notna(row["market_value"]) else "-",
-                f"{row['profit']:+,.0f}" if pd.notna(row["profit"]) else "-",
-                f"{row['return_pct']:+.2f}" if pd.notna(row["return_pct"]) else "-",
-                row["sar_status"] if pd.notna(row["sar_status"]) else "-",
-                f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-",
-                str(int(row["lot_count"])),
-            ]
-            for col_idx, value in enumerate(values):
-                item_cls = _NumericTableWidgetItem if col_idx in numeric_columns else QTableWidgetItem
-                item = item_cls(str(value))
-                if col_idx in numeric_columns:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                table.setItem(row_idx, col_idx, item)
-        table.setSortingEnabled(True)
-        table.resizeRowsToContents()
+    def _on_inventory_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        if column == _INVENTORY_TREE_LOT_COUNT_COLUMN and item.childCount() > 0:
+            item.setExpanded(not item.isExpanded())
 
     @staticmethod
-    def _selected_inventory_lot_ids(table: QTableWidget) -> list[int]:
-        rows = table.selectionModel().selectedRows()
-        return [table.item(r.row(), 0).data(Qt.ItemDataRole.UserRole) for r in rows]
+    def _format_inventory_row(row: pd.Series, is_lot: bool) -> list[str]:
+        """組出一列(父列或子列)要顯示的文字，父列/子列共用同一組欄位結構(見
+        _INVENTORY_TREE_HEADERS)，只是彼此留空的欄位不同——父列沒有單一的買入
+        日期/備註，子列則不重複顯示股票代號/名稱/現價/漲跌幅/SAR(樹狀縮排本身
+        已經表達了從屬關係，不需要每個子列重複一次)。
+        """
+        def fmt(key: str, spec: str = "{:.2f}") -> str:
+            value = row.get(key)
+            return spec.format(value) if pd.notna(value) else "-"
+
+        return [
+            "" if is_lot else row["stock_id"],
+            "" if is_lot else (row["name"] if pd.notna(row["name"]) else "-"),
+            (row["buy_date"] if pd.notna(row["buy_date"]) and row["buy_date"] else "-") if is_lot else "",
+            "" if is_lot else fmt("close"),
+            "" if is_lot else fmt("pct_change", "{:+.2f}"),
+            fmt("cost_price"),
+            fmt("shares", "{:,.0f}"),
+            fmt("fee", "{:,.0f}"),
+            fmt("market_value", "{:,.0f}"),
+            fmt("sell_fee", "{:,.0f}"),
+            fmt("profit", "{:+,.0f}"),
+            fmt("return_pct", "{:+.2f}"),
+            "" if is_lot else (row["sar_status"] if pd.notna(row["sar_status"]) else "-"),
+            "" if is_lot else fmt("sar_distance_pct", "{:+.2f}"),
+            str(int(row["lot_count"])) if (not is_lot and "lot_count" in row and pd.notna(row.get("lot_count"))) else "",
+            (row["note"] if pd.notna(row["note"]) and row["note"] else "") if is_lot else "",
+        ]
+
+    def _populate_inventory_tree(self, summary_df: pd.DataFrame, lots_df: pd.DataFrame) -> None:
+        """重建整棵樹：每檔股票一個父列(彙總數字，來自summary_df)，底下掛著這檔
+        股票的每一筆批次子列(來自lots_df依stock_id分組)。重建前記錄目前已展開的
+        股票代號，重建後對這些股票的新父列重新setExpanded(True)——不然每次新增/
+        編輯/刪除批次觸發的重新整理，都會把使用者剛展開看的股票收合回去，體驗
+        很差。
+        """
+        tree = self.inventory_tree
+        expanded_stock_ids = {
+            tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
+            for i in range(tree.topLevelItemCount())
+            if tree.topLevelItem(i).isExpanded()
+        }
+        tree.setSortingEnabled(False)
+        tree.clear()
+
+        lots_by_stock = dict(tuple(lots_df.groupby("stock_id"))) if not lots_df.empty else {}
+        for _, row in summary_df.reset_index(drop=True).iterrows():
+            parent_item = _NumericTreeWidgetItem()
+            for col_idx, value in enumerate(self._format_inventory_row(row, is_lot=False)):
+                parent_item.setText(col_idx, value)
+                if col_idx in _INVENTORY_TREE_NUMERIC_COLUMNS:
+                    parent_item.setTextAlignment(col_idx, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            parent_item.setData(0, Qt.ItemDataRole.UserRole, row["stock_id"])
+            tree.addTopLevelItem(parent_item)
+
+            for _, lot_row in lots_by_stock.get(row["stock_id"], pd.DataFrame()).iterrows():
+                child_item = _NumericTreeWidgetItem()
+                for col_idx, value in enumerate(self._format_inventory_row(lot_row, is_lot=True)):
+                    child_item.setText(col_idx, value)
+                    if col_idx in _INVENTORY_TREE_NUMERIC_COLUMNS:
+                        child_item.setTextAlignment(col_idx, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                child_item.setData(0, Qt.ItemDataRole.UserRole, row["stock_id"])
+                child_item.setData(0, Qt.ItemDataRole.UserRole + 1, int(lot_row["id"]))
+                parent_item.addChild(child_item)
+
+            if row["stock_id"] in expanded_stock_ids:
+                parent_item.setExpanded(True)
+
+        tree.setSortingEnabled(True)
+
+    def _selected_inventory_lot_ids(self) -> list[int]:
+        """只收集「有UserRole+1(lot id)資料」的選取item——父列(股票彙總列)沒有
+        設這個role的值，data()查不到會回傳None，自然被濾掉，不會被誤當成
+        可編輯/刪除的批次。"""
+        return [
+            lot_id
+            for item in self.inventory_tree.selectedItems()
+            if (lot_id := item.data(0, Qt.ItemDataRole.UserRole + 1)) is not None
+        ]
+
+    def _selected_inventory_stock_ids(self) -> list[str]:
+        """取選取item(父列或子列皆可)所屬的股票代號——子列的股票代號欄位本身是
+        留空的(見_format_inventory_row())，所以這裡讀UserRole(兩種item都有設
+        值)，不是讀顯示文字。"""
+        stock_ids = {item.data(0, Qt.ItemDataRole.UserRole) for item in self.inventory_tree.selectedItems()}
+        return sorted(s for s in stock_ids if s)
 
     def _refresh_inventory_tab(self) -> None:
         if self.conn is None or self.portfolio_conn is None:
             return
         lots_df = portfolio_data.load_inventory_lots(self.conn, self.portfolio_conn)
-        self._populate_inventory_detail_table(lots_df)
-        if self.inventory_view_combo.currentIndex() == 1:
-            summary_df = portfolio_data.load_inventory_summary(self.conn, self.portfolio_conn)
-            self._populate_inventory_summary_table(summary_df)
-        # 摘要列一律從明細資料算，不管目前顯示明細還是彙總檢視，確保兩種檢視看到
-        # 的總計數字一致(彙總檢視的加權平均只是換一種呈現方式，不影響加總結果)。
+        summary_df = portfolio_data.load_inventory_summary(self.conn, self.portfolio_conn)
+        self._populate_inventory_tree(summary_df, lots_df)
         self.inventory_summary_label.setText(
             self._portfolio_summary_text(lots_df, "總持股成本", "總市值", "累積總損益"),
         )
@@ -1081,40 +1279,41 @@ class MainWindow(QMainWindow):
     def _on_inventory_add(self) -> None:
         if self.portfolio_conn is None:
             return
-        dialog = _StockEditDialog(self.conn, "新增庫存批次", parent=self, show_buy_date=True)
+        dialog = _StockEditDialog(self.conn, "新增庫存批次", parent=self, is_inventory=True)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             values = dialog.values()
             portfolio_storage.add_inventory_stock(
                 self.portfolio_conn, values["stock_id"], values["buy_date"],
-                values["cost_price"], values["shares"], values["note"],
+                values["cost_price"], values["shares"], values["fee"], values["note"],
             )
             self._refresh_inventory_tab()
 
     def _on_inventory_edit_selected(self) -> None:
         if self.portfolio_conn is None:
             return
-        lot_ids = self._selected_inventory_lot_ids(self.inventory_detail_table)
+        lot_ids = self._selected_inventory_lot_ids()
         if len(lot_ids) != 1:
-            QMessageBox.information(self, "編輯庫存", "請先在明細檢視選取一筆要編輯的批次。")
+            QMessageBox.information(self, "編輯庫存", "請展開後選取一筆要編輯的批次。")
             return
         lot_id = lot_ids[0]
         existing = portfolio_storage.get_inventory_lot(self.portfolio_conn, lot_id)
         if existing is None:
             return
-        dialog = _StockEditDialog(self.conn, "編輯庫存批次", initial=existing, parent=self, show_buy_date=True)
+        dialog = _StockEditDialog(self.conn, "編輯庫存批次", initial=existing, parent=self, is_inventory=True)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             values = dialog.values()
             portfolio_storage.update_inventory_stock(
-                self.portfolio_conn, lot_id, values["buy_date"], values["cost_price"], values["shares"], values["note"],
+                self.portfolio_conn, lot_id, values["buy_date"], values["cost_price"],
+                values["shares"], values["fee"], values["note"],
             )
             self._refresh_inventory_tab()
 
     def _on_inventory_delete_selected(self) -> None:
         if self.portfolio_conn is None:
             return
-        lot_ids = self._selected_inventory_lot_ids(self.inventory_detail_table)
+        lot_ids = self._selected_inventory_lot_ids()
         if not lot_ids:
-            QMessageBox.information(self, "刪除庫存", "請先在明細檢視選取要刪除的批次。")
+            QMessageBox.information(self, "刪除庫存", "請展開後選取要刪除的批次。")
             return
         if QMessageBox.question(
             self, "刪除庫存", f"確定要刪除{len(lot_ids)}筆批次紀錄嗎？",
@@ -1125,16 +1324,13 @@ class MainWindow(QMainWindow):
         self._refresh_inventory_tab()
 
     def _on_inventory_add_to_watchlist(self) -> None:
-        """庫存清單「加入觀察清單」：選取的股票批次加進使用者勾選的一個或多個觀察
-        清單群組——單向操作(庫存→觀察清單)，比照ref-project沒有反向的「轉為庫存」
-        功能，這次也不做。不管目前是明細還是彙總檢視都能操作，取選取列所在表格
-        (self.inventory_table_stack.currentWidget())第一欄的股票代號，明細檢視下
-        若選到同一檔股票的多筆批次會自動去重。
+        """庫存清單「加入觀察清單」：選取的股票(不管是父列還是子列)加進使用者
+        勾選的一個或多個觀察清單群組——單向操作(庫存→觀察清單)，比照ref-project
+        沒有反向的「轉為庫存」功能，這次也不做。
         """
         if self.portfolio_conn is None:
             return
-        current_table = self.inventory_table_stack.currentWidget()
-        stock_ids = sorted(set(self._selected_portfolio_stock_ids(current_table)))
+        stock_ids = self._selected_inventory_stock_ids()
         if not stock_ids:
             QMessageBox.information(self, "加入觀察清單", "請先選取要加入的股票。")
             return
@@ -1413,6 +1609,17 @@ class MainWindow(QMainWindow):
         self.market_analysis_view.setFrameShape(QFrame.Shape.NoFrame)
         self.market_analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
+        # 「資料更新至」：使用者反映大盤分頁看不出目前顯示的股價資料多新——這個時間戳
+        # 原本只有「選股」分頁的status_label有顯示(股價更新至/候選清單算至/下次更新
+        # 時間)，但那個toolbar整組scope在_build_screener_tab()裡，只有切到「選股」
+        # 分頁才看得到，大盤分頁完全沒有對應顯示。這裡不去動那個共用toolbar(牽涉範圍
+        # 較大、風險較高)，改成大盤分頁自己顯示一個較簡單的版本，只顯示股價更新時間
+        # (大盤分頁本來就沒有候選清單/下次排程時間這些概念)，跟個股明細「交易資訊」
+        # 區塊的「資料時間：」同一種視覺風格(灰色小字)。
+        self.market_update_label = QLabel("")
+        self.market_update_label.setStyleSheet("color: #666666;")
+        market_layout.addWidget(self.market_update_label)
+
         self.market_inner_tabs = _AutoHeightTabWidget()
         market_chart_tab = QWidget()
         market_chart_tab_layout = QVBoxLayout(market_chart_tab)
@@ -1438,6 +1645,9 @@ class MainWindow(QMainWindow):
         """
         if self.conn is None:
             return
+        self.market_update_label.setText(
+            f"資料更新至：{self._format_update_timestamp(chart_data.get_latest_update_time(self.conn))}"
+        )
         price_df = chart_data.load_price_history(self.conn, TAIEX_STOCK_ID)
         if not price_df.empty:
             holidays, _holidays_ok = chart_data.load_holidays_for_chart(price_df)
@@ -1659,6 +1869,8 @@ class MainWindow(QMainWindow):
             self.summary_view.setFixedHeight(30)
             if self.detail_inner_tabs.currentIndex() == 1:
                 self._set_analysis_html(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
+            elif self.detail_inner_tabs.currentIndex() == 2:
+                self._refresh_stock_overview_view()
             return
 
         holidays, holidays_ok = chart_data.load_holidays_for_chart(price_df)
@@ -1749,15 +1961,20 @@ class MainWindow(QMainWindow):
 
         if self.detail_inner_tabs.currentIndex() == 1:
             self._refresh_analysis_view()
+        elif self.detail_inner_tabs.currentIndex() == 2:
+            self._refresh_stock_overview_view()
 
     def _on_detail_inner_tab_changed(self, index: int) -> None:
-        """切到「個股分析」tab(index==1)時才重新整理內容——沿用_on_tab_changed()/
-        showEvent()已經驗證過的模式：tab還沒真正顯示、layout寬度還不正確前就呼叫
-        document().size().height()，算出來的高度會嚴重失真，不能在建構或背景重新
-        整理時就無條件計算(見_build_stock_detail_tab()/_AutoHeightTabWidget的說明)。
+        """切到「個股分析」(index==1)或「個股明細」(index==2)tab時才重新整理內容——
+        沿用_on_tab_changed()/showEvent()已經驗證過的模式：tab還沒真正顯示、layout
+        寬度還不正確前就呼叫document().size().height()，算出來的高度會嚴重失真，
+        不能在建構或背景重新整理時就無條件計算(見_build_stock_detail_tab()/
+        _AutoHeightTabWidget的說明)。
         """
         if index == 1:
             self._refresh_analysis_view()
+        elif index == 2:
+            self._refresh_stock_overview_view()
 
     def _set_analysis_html(self, html_content: str) -> None:
         """設定「個股分析」面板內容，並依實際內容量重新算出剛好的高度(setFixedHeight)，
@@ -1848,6 +2065,321 @@ class MainWindow(QMainWindow):
         stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
         stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
         self._set_analysis_html(self._build_analysis_html(self._current_stock_id, f"個股分析：{stock_label}"))
+
+    @staticmethod
+    def _colored_num(value, decimals: int = 0, signed: bool = False, suffix: str = "") -> str:
+        """數字上紅(正)下綠(負)——跟K棒/MACD既有的紅漲綠跌配色一致(見chart_data.py
+        build_candlestick_figure()的顏色說明)。value是None/NaN時回傳"-"，不是"0"，
+        區分「沒有資料」跟「剛好是0」。"""
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return "-"
+        color = "#c0392b" if value > 0 else ("#27ae60" if value < 0 else "#333333")
+        sign = "+" if signed and value > 0 else ""
+        return f'<span style="color:{color};">{sign}{value:,.{decimals}f}{suffix}</span>'
+
+    def _refresh_stock_overview_view(self) -> None:
+        """填入「個股明細」5個區塊各自的內容，跟_refresh_analysis_view()同一個模式：
+        只在使用者目前真的停留在這個tab、或剛切換過來時才呼叫(見_on_detail_inner_
+        tab_changed()/_rerender_chart())，不用每次股票查詢都無條件計算，省下法人/
+        資券的查詢成本。2026-08-03改版：原本是單一QTextEdit塞5個區塊，現在每個區塊
+        各自一個_CollapsibleBox+QTextEdit(見_build_stock_overview_tab())，分開設值。
+        """
+        if self.conn is None or not self._current_stock_id:
+            placeholder = "<p>請先從候選清單點選或查詢一檔股票。</p>"
+            for title in self._STOCK_OVERVIEW_BLOCKS:
+                self._set_overview_block_html(title, placeholder)
+            return
+        stock_id = self._current_stock_id
+        builders = {
+            "交易資訊": self._build_overview_quote_html,
+            "法人買賣總覽": self._build_overview_institutional_html,
+            "主力進出": self._build_overview_dealer_html,
+            "資券變化總覽": self._build_overview_margin_html,
+            "大戶籌碼": self._build_overview_chip_html,
+        }
+        for title, builder in builders.items():
+            self._set_overview_block_html(title, builder(stock_id))
+
+    def _set_overview_block_html(self, title: str, html_content: str) -> None:
+        """跟_set_analysis_html()同一套「依內容動態算高度」作法(理由見該處說明)，
+        套用到_STOCK_OVERVIEW_BLOCKS裡指定區塊自己的QTextEdit。"""
+        view = self._stock_overview_views[title]
+        view.setHtml(html_content)
+        doc_height = view.document().size().height()
+        frame_width = view.frameWidth() * 2
+        view.setFixedHeight(int(doc_height) + frame_width + 8)
+
+    def _build_overview_quote_html(self, stock_id: str) -> str:
+        """「交易資訊」區塊內容，對應temp/個股詳情-1.jpg。"""
+        quote = stock_detail_data.load_quote_summary(self.conn, stock_id)
+        if quote is None:
+            return "<p>查無成交資料。</p>"
+        c = self._colored_num
+        rows = [
+            ("成交", f"<b>{c(quote['close'], 2)}</b>", "昨收", f"{quote['prev_close']:,.2f}" if quote["prev_close"] is not None else "-"),
+            ("開盤", f"{quote['open']:,.2f}", "漲跌幅", c(quote["change_pct"], 2, signed=True, suffix="%")),
+            ("最高", f"{quote['high']:,.2f}", "漲跌", c(quote["change"], 2, signed=True)),
+            ("最低", f"{quote['low']:,.2f}", "總量", f"{quote['volume_lots']:,} 張"),
+            ("均價", f"{quote['avg_price']:,.2f}" if quote["avg_price"] is not None else "-", "昨量",
+             f"{quote['prev_volume_lots']:,} 張" if quote["prev_volume_lots"] is not None else "-"),
+            ("成交金額(億)", f"{quote['trading_money_billion']:,.2f}" if quote["trading_money_billion"] is not None else "-",
+             "振幅", c(quote["amplitude_pct"], 2, suffix="%") if quote["amplitude_pct"] is not None else "-"),
+        ]
+        table = f'<p style="color:#666666;">資料時間：{quote["date"]}</p><table cellspacing="0" cellpadding="4" width="100%">'
+        for label1, value1, label2, value2 in rows:
+            table += (
+                f'<tr><td width="15%" style="color:#666666;">{label1}</td><td width="35%">{value1}</td>'
+                f'<td width="15%" style="color:#666666;">{label2}</td><td width="35%">{value2}</td></tr>'
+            )
+        table += "</table>"
+        return table
+
+    def _build_overview_institutional_html(self, stock_id: str) -> str:
+        """「法人買賣總覽」區塊內容，對應temp/個股詳情-2.jpg。2026-08-03改版：拿掉
+        「當日／累計」切換，固定顯示累計表格(見_build_stock_overview_tab()的說明③)
+        ——欄位天期直接沿用INSTITUTIONAL_PERIODS的標籤(見stock_detail_data.py)，
+        不再另外把"1日"改標成"當日"(2026-08-03第二次改版：使用者確認直接顯示
+        "1日"即可)。
+        """
+        cumulative = stock_detail_data.load_institutional_cumulative(self.conn, stock_id)
+        if cumulative is None:
+            return "<p>查無法人買賣資料。</p>"
+        periods = list(stock_detail_data.INSTITUTIONAL_PERIODS.keys())
+        table = '<p style="color:#666666;">單位：張</p><table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0"><tr><td></td>'
+        for label in periods:
+            table += f"<td align='right'><b>{label}</b></td>"
+        table += "</tr>"
+        for group in stock_detail_data.INSTITUTIONAL_GROUPS:
+            table += f"<tr><td>{group}</td>"
+            for label in periods:
+                table += f"<td align='right'>{self._colored_num(cumulative[group][label] / 1000, 0, signed=True)}</td>"
+            table += "</tr>"
+        table += "</table>"
+        flow = stock_detail_data.load_institutional_flow_analysis(self.conn, stock_id)
+        return table + self._build_institutional_flow_analysis_html(flow)
+
+    @staticmethod
+    def _build_institutional_flow_analysis_html(flow: dict | None) -> str:
+        """依load_institutional_flow_analysis()的「連續買超／賣超天數」判讀結果，
+        組出法人買賣總覽表格下方的分析文字。2026-08-03新增，使用者要求依朱家泓/
+        陳家豐書中的理論基礎，把「連續N日買賣超」判讀成停損觀察或可能的進場訊號。
+
+        理論依據(見src/indicators/institutional_flow.py模組docstring完整說明)：
+        - 三大法人連續賣超≥3天 → 停損觀察，依朱家泓《抓住飆股輕鬆賺》淘汰法選股
+          排除規則第8項(R-SCREEN-06)，書中明確門檻3天。
+        - 投信連續買超≥3天 → 觀察是否為布局訊號，依陳家豐《看懂籌碼 股市賺大錢》
+          第4篇第2章「風向球 投信動向幫抬轎」(書中給3~5天，這裡採下限3天)。
+        - 外資/自營商的可信度提醒同樣出自陳家豐書中第4篇第1章：自營商操作週期短、
+          建議「首先剔除」，不用連續性判斷趨勢；外資只有中小型股才有參考價值，
+          權值股/大型股受全球布局/期貨套利/指數調整干擾，不宜直接採信。
+        這裡刻意不去猜測「主力底部吸籌」「高檔換手」這類更細緻的敘事——陳家豐書中
+        雖然有類似案例(例如可成2012年公司派逆勢加碼的故事)，但明確承認沒有給出
+        「連續幾天／多少金額才算數」的精確門檻，程式化時勉強湊一個數字出來反而是
+        過度宣稱，不在這裡呈現，只呈現書中真正給出明確天數門檻的兩條規則。
+        """
+        if flow is None:
+            return ""
+        lines = ['<p style="margin-top:10px;"><b>📊 法人籌碼分析</b></p>']
+
+        sanhua = flow["三大法人"]
+        if sanhua["is_sell_warning"]:
+            lines.append(
+                f'<p style="color:#27ae60;">⚠️ 三大法人已連續賣超{sanhua["streak_days"]}天，'
+                "達到停損觀察門檻（依朱家泓《抓住飆股輕鬆賺》淘汰法選股排除規則第8項："
+                "三大法人連續賣超應避開，建議留意停損／減碼）。</p>"
+            )
+        elif sanhua["is_buy_watch"]:
+            lines.append(
+                f'<p style="color:#c0392b;">三大法人已連續買超{sanhua["streak_days"]}天，'
+                "短線動能偏多，但書中沒有給「連續買超代表安全」的保證，僅供參考。</p>"
+            )
+
+        invtrust = flow["投信"]
+        if invtrust["is_buy_watch"]:
+            lines.append(
+                f'<p style="color:#c0392b;">📈 投信已連續買超{invtrust["streak_days"]}天'
+                "（依陳家豐《看懂籌碼 股市賺大錢》：投信受法規限制(單一個股持股上限10%、"
+                "單日買進不得超過成交量10%)須分批布局，連續加碼3~5天且個股剛脫離下跌"
+                "整理通常是切入時機——本畫面沒有另外判斷「是否剛脫離整理區」，需自行"
+                "對照K線圖）。</p>"
+            )
+        elif invtrust["is_sell_warning"]:
+            lines.append(
+                f'<p style="color:#27ae60;">投信已連續賣超{invtrust["streak_days"]}天，'
+                "留意是否轉向保守（書中提到投信若轉向防禦型持股，代表對後市看淡）。</p>"
+            )
+
+        foreign = flow["外資"]
+        if foreign["is_buy_watch"] or foreign["is_sell_warning"]:
+            direction_text = "買超" if foreign["is_buy_watch"] else "賣超"
+            lines.append(
+                f'<p style="color:#999999;">外資已連續{direction_text}{foreign["streak_days"]}天——'
+                "⚠️ 陳家豐書中提醒：外資買賣單只有在中小型股(非權值股)才有參考價值，"
+                "權值股/大型股的外資買賣受全球布局、期貨套利、指數調整干擾，不宜直接"
+                "採信本訊號判斷多空。</p>"
+            )
+
+        dealer = flow["自營商"]
+        if dealer["is_buy_watch"] or dealer["is_sell_warning"]:
+            direction_text = "買超" if dealer["is_buy_watch"] else "賣超"
+            lines.append(
+                f'<p style="color:#999999;">自營商連續{direction_text}{dealer["streak_days"]}天——'
+                "⚠️ 陳家豐書中建議「自營商首先剔除」，操作週期短、常忽買忽賣，不建議"
+                "用連續性判斷趨勢，僅供參考。</p>"
+            )
+
+        if len(lines) == 1:
+            lines.append(f"<p>近期法人買賣方向尚未達連續{INSTITUTIONAL_STREAK_THRESHOLD}天門檻，暫無明顯訊號。</p>")
+        return "".join(lines)
+
+    def _build_overview_dealer_html(self, stock_id: str) -> str:
+        """「主力進出」區塊內容，對應temp/個股詳情-3.jpg：4張指標卡片(主力買賣超/
+        主力買超/主力賣超/買賣超佔成交量)＋買超/賣超雙欄券商表格。目前沒有券商分點
+        籌碼資料來源(見stock_detail_data.py模組docstring)，先照這個版面做框架，
+        所有數值顯示"-"，不是造假資料湊。"""
+        warning = (
+            "<p style=\"color:#999999;\">⚠️ 尚未串接資料來源（需要券商分點籌碼資料，"
+            "schema已預留broker_chips表，待FinMind付費方案開通後才能接上）。</p>"
+        )
+        cards = (
+            '<table cellspacing="8" cellpadding="10" width="100%" border="1" bordercolor="#e0e0e0">'
+            "<tr>"
+            "<td width='25%' align='center'><span style='color:#666666;'>主力買賣超(張)</span><br>"
+            "<span style='font-size:18pt; font-weight:bold;'>-</span></td>"
+            "<td width='25%' align='center'><span style='color:#666666;'>主力買超(張)</span><br>"
+            "<span style='font-size:18pt; font-weight:bold;'>-</span></td>"
+            "<td width='25%' align='center'><span style='color:#666666;'>主力賣超(張)</span><br>"
+            "<span style='font-size:18pt; font-weight:bold;'>-</span></td>"
+            "<td width='25%' align='center'><span style='color:#666666;'>買賣超佔成交量</span><br>"
+            "<span style='font-size:18pt; font-weight:bold;'>-</span></td>"
+            "</tr></table>"
+        )
+        broker_table = (
+            '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0">'
+            "<tr><td><b>買超券商</b></td><td align='right'><b>買進</b></td><td align='right'><b>賣出</b></td>"
+            "<td align='right'><b>買超張數</b></td>"
+            "<td><b>賣超券商</b></td><td align='right'><b>買進</b></td><td align='right'><b>賣出</b></td>"
+            "<td align='right'><b>賣超張數</b></td></tr>"
+            "<tr><td>-</td><td align='right'>-</td><td align='right'>-</td><td align='right'>-</td>"
+            "<td>-</td><td align='right'>-</td><td align='right'>-</td><td align='right'>-</td></tr>"
+            "</table>"
+        )
+        return warning + cards + broker_table
+
+    def _build_overview_margin_html(self, stock_id: str) -> str:
+        """「資券變化總覽」區塊內容，對應temp/個股詳情-4.jpg，維持「當日／累計」
+        切換(self._margin_cumulative，見_build_stock_overview_tab())。2026-08-03
+        新增：表格下方固定加一段融資維持率分析(不受當日/累計切換影響，是「目前狀態」
+        的快照，不是某個期間的加總)，見_build_margin_maintenance_analysis_html()。
+        """
+        maintenance = stock_detail_data.load_margin_maintenance_analysis(self.conn, stock_id)
+        analysis_html = self._build_margin_maintenance_analysis_html(maintenance)
+
+        if not self._margin_cumulative:
+            margin = stock_detail_data.load_margin_daily(self.conn, stock_id)
+            if margin is None:
+                return "<p>查無資券資料。</p>" + analysis_html
+            table = (
+                f'<p style="color:#666666;">資料時間：{margin["date"]}</p>'
+                '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0">'
+                "<tr><td></td><td align='right'><b>買進</b></td><td align='right'><b>賣出</b></td>"
+                "<td align='right'><b>現價</b></td><td align='right'><b>增減</b></td>"
+                "<td align='right'><b>餘額</b></td><td align='right'><b>使用率</b></td>"
+                "<td align='right'><b>連增連減</b></td></tr>"
+            )
+            for row_label, key in (("融資", "margin"), ("融券", "short")):
+                r = margin[key]
+                usage_rate_cell = f"{r['usage_rate']:.2f}%" if r["usage_rate"] is not None else "-"
+                table += (
+                    f"<tr><td>{row_label}</td>"
+                    f"<td align='right'>{r['buy']:,}</td><td align='right'>{r['sell']:,}</td>"
+                    f"<td align='right'>{margin['close']:,.2f}</td>"
+                    f"<td align='right'>{self._colored_num(r['change'], 0, signed=True)}</td>"
+                    f"<td align='right'>{r['balance']:,}</td>"
+                    f"<td align='right'>{usage_rate_cell}</td>"
+                    f"<td align='right'>{r['streak'] or '-'}</td></tr>"
+                )
+            table += "</table>"
+            offset_text = f"{margin['offset_loan_and_short']:,}" if margin["offset_loan_and_short"] is not None else "-"
+            ratio_text = f"{margin['short_to_margin_ratio_pct']:.2f}%" if margin["short_to_margin_ratio_pct"] is not None else "-"
+            table += f"<p>資券互抵：{offset_text} 張　券資比：{ratio_text}</p>"
+            return table + analysis_html
+
+        cumulative_days = 20
+        margin_cum = stock_detail_data.load_margin_cumulative(self.conn, stock_id, days=cumulative_days)
+        if margin_cum is None:
+            return "<p>查無資券資料。</p>" + analysis_html
+        table = (
+            f'<p style="color:#666666;">最近{margin_cum["days"]}個交易日累計</p>'
+            '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0">'
+            "<tr><td></td><td align='right'><b>買進</b></td><td align='right'><b>賣出</b></td>"
+            "<td align='right'><b>餘額增減</b></td></tr>"
+        )
+        for row_label, key in (("融資", "margin"), ("融券", "short")):
+            r = margin_cum[key]
+            table += (
+                f"<tr><td>{row_label}</td><td align='right'>{r['buy']:,}</td>"
+                f"<td align='right'>{r['sell']:,}</td>"
+                f"<td align='right'>{self._colored_num(r['change'], 0, signed=True)}</td></tr>"
+            )
+        table += "</table>"
+        return table + analysis_html
+
+    @staticmethod
+    def _build_margin_maintenance_analysis_html(maintenance: dict | None) -> str:
+        """依load_margin_maintenance_analysis()的融資維持率估算結果，組出資券變化
+        總覽表格下方的分析文字。2026-08-03新增。
+
+        理論依據：陳家豐《看懂籌碼 股市賺大錢》第2篇第4章「融資維持率揭秘 勿買斷頭股」
+        (見src/indicators/margin_trading.py模組docstring完整說明)——166%(初始，
+        假設6成融資)→135%(警戒，「爹不疼娘不愛」時期，主力不會這時候進場)→120%
+        (斷頭線，券商強制賣出)→連續N天低於120%(超跌反彈訊號，書中：融資維持率過低
+        導致超跌，是搶短線反彈的好機會，但僅適合手腳靈活的投資人，需嚴設停利)。
+
+        融資成數用書中預設的6成估算(不是這檔股票實際的融資成數規定，TWSE公開資料
+        查不到逐股融資成數)，這裡明確標註出來，避免使用者誤以為是精確數字。
+        """
+        if maintenance is None or maintenance["ratio"] is None:
+            return ""
+        ratio_pct = maintenance["ratio"] * 100
+        state = maintenance["state"]
+        lines = [
+            '<p style="margin-top:10px;"><b>📊 融資維持率分析</b></p>',
+            f"<p>估算融資維持率：{ratio_pct:.1f}%（狀態：{state}；融資成數估算採書中預設"
+            "的6成，非個股實際規定，僅供參考）</p>",
+        ]
+        if state == "已跌破斷頭線":
+            lines.append(
+                '<p style="color:#27ae60;">⚠️ 估算已跌破斷頭線(120%)，代表融資部位可能面臨'
+                "券商強制賣出的斷頭賣壓（依陳家豐《看懂籌碼》第2篇第4章）。</p>"
+            )
+        elif state == "警戒區(爹不疼娘不愛)":
+            lines.append(
+                '<p style="color:#e67e22;">融資維持率落在135%以下的警戒區——書中提醒：'
+                "主力通常不會在這個階段進場，因為要面對層層融資套牢賣壓，此時股票容易"
+                "「爹不疼、娘不愛」，若後續跌破120%，可留意超跌反彈機會。</p>"
+            )
+        if maintenance["oversold_rebound_signal"]:
+            lines.append(
+                '<p style="color:#c0392b;">📈 已連續多日低於120%斷頭線，符合書中「超跌'
+                "反彈」訊號條件——僅適合手腳靈活、能嚴設停利的短線操作，不是長線買進"
+                "依據。</p>"
+            )
+        return "".join(lines)
+
+    def _build_overview_chip_html(self, stock_id: str) -> str:
+        """「大戶籌碼」區塊內容，對應temp/個股詳情-5.jpg。目前資料庫schema沒有股權
+        分散/大戶持股資料表，先做表格框架，數值顯示"-"。"""
+        warning = (
+            "<p style=\"color:#999999;\">⚠️ 尚未串接資料來源（需要股權分散/大戶持股統計資料，"
+            "目前資料庫schema還沒有對應的表）。</p>"
+        )
+        table = (
+            '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0">'
+            "<tr><td>年度/日期</td><td>外資籌碼</td><td>大戶籌碼</td><td>董監持股</td><td>股價</td></tr>"
+            "<tr><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr></table>"
+        )
+        return warning + table
 
     def _set_market_analysis_html(self, html_content: str) -> None:
         """設定「大盤分析」面板內容並依實際內容量重新算出剛好的高度，跟_set_analysis_html()
@@ -1978,19 +2510,23 @@ class MainWindow(QMainWindow):
         # 讓使用者誤判「候選清單是不是也跟著更新了」。「下次更新時間」是Windows工作排程器
         # 下一個固定時段(見pipeline_status.SCHEDULED_TIMES)，只代表排程「預期何時會嘗試」，
         # 不保證那天一定是交易日(是否為交易日由run_daily_pipeline()執行當下自己判斷)。
-        def _fmt(ts: str | None) -> str:
-            if not ts:
-                return "尚無資料"
-            try:
-                return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
-            except ValueError:
-                return ts
-
         if self.conn is None:
             self.status_label.setText(f"狀態：尚無資料\n下次更新時間：{next_run_label}")
             return
-        price_update = _fmt(chart_data.get_latest_update_time(self.conn))
-        candidate_update = _fmt(chart_data.get_latest_candidate_update_time(self.conn))
+        price_update = self._format_update_timestamp(chart_data.get_latest_update_time(self.conn))
+        candidate_update = self._format_update_timestamp(chart_data.get_latest_candidate_update_time(self.conn))
         self.status_label.setText(
             f"股價更新至：{price_update}\n候選清單算至：{candidate_update}\n下次更新時間：{next_run_label}"
         )
+
+    @staticmethod
+    def _format_update_timestamp(ts: str | None) -> str:
+        """把DB裡存的ISO8601時間戳字串格式化成"YYYY-MM-DD HH:MM"給使用者看，缺值時
+        顯示「尚無資料」——status_label(選股分頁)、market_update_label(大盤分頁)
+        共用同一套格式，避免兩處各自維護一份格式邏輯而不小心不一致。"""
+        if not ts:
+            return "尚無資料"
+        try:
+            return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return ts
