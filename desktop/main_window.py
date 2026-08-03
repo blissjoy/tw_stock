@@ -990,6 +990,16 @@ class MainWindow(QMainWindow):
         analysis_tab_layout.addWidget(self.analysis_summary_view)
         analysis_tab_layout.addWidget(self._analysis_tech_box)
         analysis_tab_layout.addWidget(self._analysis_chip_box)
+        # ⚠️ 2026-08-04修正：使用者反映收合/展開技術面時，籌碼面的標題列跟下面的內容
+        # 之間會出現一大段空白、整體版面還會跳動——查證是因為這裡少了跟「個股明細」
+        # 分頁(overview_layout.addStretch()，見_build_stock_overview_tab())同樣的
+        # 收尾addStretch()：detail_scroll(QScrollArea, setWidgetResizable(True))的
+        # viewport高度不會剛好等於內容高度，收合技術面騰出空間後，QVBoxLayout會把
+        # 這段「多出來的viewport空間」分配給其餘用預設Preferred size policy的子
+        # widget(這裡是_analysis_chip_box)撐大，不是真的有更多內容，是空白被塞進
+        # 收合框裡。加上addStretch()讓多餘空間統一被這個stretch吸收、留在整個分頁
+        # 最下方，各個_CollapsibleBox的高度就只反映自己實際內容的需求，不會被撐大。
+        analysis_tab_layout.addStretch()
         self.detail_inner_tabs.addTab(analysis_tab, "個股分析")
         self.analysis_summary_view.anchorClicked.connect(self._on_reference_link_clicked)
         self.analysis_summary_view.anchorClicked.connect(
@@ -1751,6 +1761,8 @@ class MainWindow(QMainWindow):
         market_analysis_tab_layout.addWidget(self.market_analysis_summary_view)
         market_analysis_tab_layout.addWidget(self._market_analysis_tech_box)
         market_analysis_tab_layout.addWidget(self._market_analysis_chip_box)
+        # 跟analysis_tab_layout同一個修正，見那裡的說明。
+        market_analysis_tab_layout.addStretch()
         self.market_inner_tabs.addTab(market_analysis_tab, "大盤分析")
         self.market_analysis_summary_view.anchorClicked.connect(self._on_reference_link_clicked)
         self.market_analysis_summary_view.anchorClicked.connect(

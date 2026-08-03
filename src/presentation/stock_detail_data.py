@@ -171,17 +171,28 @@ ESTIMATED_COST_GROUPS = ("外資", "投信")
 
 
 def load_institutional_estimated_cost(conn, stock_id: str) -> dict[str, dict[str, float | None]] | None:
-    """回傳外資／投信在INSTITUTIONAL_PERIODS各天期的「預估持股成本價」——用當天均價
-    (成交金額/成交量，缺均價時退回收盤價)乘以當天買賣超股數加權平均。該天期買賣超
-    合計<=0(淨賣出或淨零，沒有淨累積部位)時回傳None(不適用)，不硬算一個沒有意義
-    的數字；查無法人資料回傳最外層None。
+    """回傳外資／投信在INSTITUTIONAL_PERIODS各天期的「預估持股成本價」——只用「淨買超」
+    的交易日(當天均價=成交金額/成交量，缺均價時退回收盤價)加權平均；該天期買賣超合計
+    <=0(淨賣出或淨零，沒有淨累積部位)時回傳None(不適用)，不硬算一個沒有意義的數字；
+    查無法人資料回傳最外層None。
 
-    2026-08-03新增：陳家豐書中提到分點層級的「持股成本」概念可以用「每日買賣張數
-    ×當日均價加權平均」粗略估算(見ai/ebook-summary-chen/P01-C3-好用籌碼工具哪裡找.md)，
-    這裡把同一套邏輯套用在外資/投信這個類別層級(本專案沒有分點資料，書中原文是分點
-    層級)——書中沒有給精確演算法，這是工程實作，不是嚴格的移動平均成本會計：賣出
-    當天的股數是用「當天均價」加權抵銷，不是用「原始買進價」抵銷，屬於簡化估算，
-    使用者已確認接受這個做法與「淨賣出天期標示不適用」的處理方式。
+    2026-08-03新增：陳家豐書中提到分點層級的「持股成本」概念可以用「每日買賣張數×當日
+    均價加權平均」粗略估算(見ai/ebook-summary-chen/P01-C3-好用籌碼工具哪裡找.md)，這裡
+    把同一套邏輯套用在外資/投信這個類別層級(本專案沒有分點資料，書中原文是分點層級)——
+    書中沒有給精確演算法，這是工程實作，不是嚴格的移動平均成本會計。
+
+    2026-08-04修正一個數學上的缺陷：一開始的版本把賣出天的股數也計入分母(用當天均價
+    「加權抵銷」)，結果使用者以緯創為例回報算出來的成本價(291.78/508.68)遠高於這段
+    期間股價實際出現過的任何一天(最高186)，查證後發現是「加權平均」用負權重(賣出淨額
+    是負數)時，只要買超總和跟賣超總和剛好相減後只剩一個很小的正數(分母很小)，就會被
+    分子的規模放大成一個脫離實際價格區間的離群值——這不是特定資料錯誤，是這個公式本身
+    的數學缺陷(負權重的「加權平均」不再是真正的凸組合，理論上就是可能超出原始數值範圍)。
+    改成只累加「淨買超」的交易日(net>0)，賣出天完全不參與加權平均——這也更貼近會計上
+    「移動平均成本」的定義(賣出只減少持有數量，不會改變剩餘部位的每股成本)，同時保證
+    算出來的數字必然落在窗口內實際成交價格的範圍內，不會再出現這種脫離現實的離群值。
+    「該天期整體是否為淨賣出」的判斷(是否顯示不適用)仍然看全部交易日(含賣出)的合計，
+    跟加權平均本身用哪些交易日是兩個獨立的判斷，不能只看買超天數合計來決定適用與否
+    (那樣的話賣超力道再大也不會被排除，跟「淨賣出天期不適用」的原意矛盾)。
     """
     max_days = max(INSTITUTIONAL_PERIODS.values())
     dates, net_by_date = _fetch_institutional_by_date(conn, stock_id, max_days)
@@ -200,16 +211,17 @@ def load_institutional_estimated_cost(conn, stock_id: str) -> dict[str, dict[str
     for label, n in INSTITUTIONAL_PERIODS.items():
         window = dates[:n]
         for group in ESTIMATED_COST_GROUPS:
+            total_net = sum(net_by_date[d].get(group, 0) for d in window)
             numerator = 0.0
             denominator = 0
             for d in window:
                 price = avg_price_by_date.get(d)
                 net = net_by_date[d].get(group, 0)
-                if price is None or net == 0:
+                if price is None or net <= 0:
                     continue
                 numerator += net * price
                 denominator += net
-            result[group][label] = numerator / denominator if denominator > 0 else None
+            result[group][label] = numerator / denominator if total_net > 0 and denominator > 0 else None
     return result
 
 

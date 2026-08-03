@@ -217,6 +217,27 @@ def test_load_institutional_estimated_cost_marks_unavailable_when_net_sell():
     assert result["外資"]["1日"] is None
 
 
+def test_load_institutional_estimated_cost_ignores_sell_days_to_avoid_out_of_range_average():
+    """2026-08-04修正的迴歸測試：day1淨買超1000股@100元、day2淨賣超990股@200元，
+    兩天合計淨買超剩10股(整體天期仍是淨買超，不是不適用)。原始版本會把賣出天的股數
+    也計入分母(net*price加總後除以net加總=(1000*100-990*200)/10=-9800，一個負的、
+    完全脫離實際成交價格區間的離群值)；修正後只用淨買超的交易日(day1)計算，結果應該
+    是100.0，必然落在這兩天實際成交價[100,200]的範圍內。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-30", "close": 100.0, "volume": 10_000, "trading_money": 1_000_000},
+        {"date": "2026-07-31", "close": 200.0, "volume": 10_000, "trading_money": 2_000_000},
+    ])
+    _seed_institutional(conn, "2330", {
+        "2026-07-30": {"Foreign_Investor": (1000, 0)},
+        "2026-07-31": {"Foreign_Investor": (10, 1000)},
+    })
+
+    result = stock_detail_data.load_institutional_estimated_cost(conn, "2330")
+
+    assert result["外資"]["2日"] == 100.0
+
+
 def test_load_institutional_estimated_cost_falls_back_to_close_when_no_trading_money():
     """yfinance回補的舊資料trading_money可能是None，均價無從算起時退回用收盤價加權。"""
     conn = _main_conn()
