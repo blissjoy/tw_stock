@@ -1614,11 +1614,16 @@ class MainWindow(QMainWindow):
         # 時間)，但那個toolbar整組scope在_build_screener_tab()裡，只有切到「選股」
         # 分頁才看得到，大盤分頁完全沒有對應顯示。這裡不去動那個共用toolbar(牽涉範圍
         # 較大、風險較高)，改成大盤分頁自己顯示一個較簡單的版本，只顯示股價更新時間
-        # (大盤分頁本來就沒有候選清單/下次排程時間這些概念)，跟個股明細「交易資訊」
-        # 區塊的「資料時間：」同一種視覺風格(灰色小字)。
+        # (大盤分頁本來就沒有候選清單/下次排程時間這些概念)。2026-08-03改版：使用者
+        # 指出應該放在右上角、跟「選股」分頁status_label同一個位置才一致——那邊是用
+        # QHBoxLayout先addStretch()再放status_label，把它推到最右邊，這裡比照同一種
+        # 排法，不是單獨佔一整行的靠左標籤。
+        market_update_row = QHBoxLayout()
+        market_update_row.addStretch()
         self.market_update_label = QLabel("")
         self.market_update_label.setStyleSheet("color: #666666;")
-        market_layout.addWidget(self.market_update_label)
+        market_update_row.addWidget(self.market_update_label)
+        market_layout.addLayout(market_update_row)
 
         self.market_inner_tabs = _AutoHeightTabWidget()
         market_chart_tab = QWidget()
