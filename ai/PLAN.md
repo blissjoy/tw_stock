@@ -5053,3 +5053,44 @@ K棒本身反而被壓縮在中間一小段，其餘留白都是「切線外推�
   顯示「不適用」，投信全期間都是淨買超、顯示合理的成本價區間(2,0xx~2,4xx，
   貼近2330實際股價範圍)。驗證用HTML/截圖已依慣例刪除，這次只刪scratchpad
   目錄裡自己產生的檔案，不動`temp/`(吸收上一則紀錄的教訓)。
+
+## 交易資訊區新增外資/投信持有成本＋盤中均價估算(2026-08-03)
+
+使用者提出兩件事：①在「交易資訊」區塊成交金額下方也顯示「外資/投信持有成本
+(預估)」；②以緯創(3231)為例，發現盤中沒有均價/成交金額，追問是否可以先用
+更新當時的資料估算。
+
+查證緯創當天(2026-08-03)那筆資料`is_intraday=1`(TWSE官方收盤還沒公布，用
+yfinance盤中即時價備援)，成交量本身是有的(149,208張，跟候選清單看到的數字
+一致)，缺的是`trading_money`(yfinance即時報價不提供這個欄位)，導致均價=
+成交金額/成交量算不出來。跟使用者確認兩件事：①盤中缺均價/成交金額時要不要
+用(最高+最低+收盤)/3先估算、標註「(估)」——確認要加；②新的「外資/投信持有
+成本(預估)」該用哪個天期——確認用「最長可用天期，從1年往下退，不適用就換
+更短的」這個邏輯。
+
+- `src/presentation/stock_detail_data.py`的`load_quote_summary()`：
+  `trading_money`缺值時不再直接讓均價/成交金額回傳None，改用典型價格(最高+
+  最低+收盤)/3估算均價、乘以成交量回推估算成交金額，新增`avg_price_is_
+  estimated`欄位供UI判斷要不要標「(估)」。這個估算不限定盤中才套用，
+  yfinance回補的舊歷史資料同樣缺`trading_money`，一併受益。
+- 同檔案新增`pick_longest_available_cost(cost_by_period)`：從
+  INSTITUTIONAL_PERIODS最長天期往最短找第一個非None的預估持股成本；
+  `load_latest_institutional_cost_summary(conn, stock_id)`：包一層
+  `load_institutional_estimated_cost()`，回傳外資/投信各自套用上面退回
+  邏輯後的單一數字。
+- `desktop/main_window.py`的`_build_overview_quote_html()`：均價/成交金額
+  (億)是估算值時附加「（估）」；新增一行「外資持有成本(預估)」/「投信持有
+  成本(預估)」，都不適用時顯示「不適用」。
+- `tests/test_stock_detail_data.py`新增6個測試：均價估算公式正確、
+  trading_money存在時不誤標估算、成交量也缺值(防呆)時仍回傳None、
+  `pick_longest_available_cost()`退回邏輯、`load_latest_institutional_
+  cost_summary()`兩個分類各自獨立退回不互相干擾、查無資料回傳None。
+  `pytest tests/ -q`860個測試全數通過。
+- 用真實DB驗證：3231截圖時剛好TWSE官方收盤資料已經進來(`is_intraday`
+  在驗證過程中從1變成0，`trading_money`補上了)，反而驗證到「有官方資料時
+  不會誤標估算」這條路徑，均價182.33跟本來的收盤價/成交量回推完全一致；
+  新增的「外資持有成本(預估)」291.78／「投信持有成本(預估)」508.68正確
+  顯示。另外找一檔目前仍缺`trading_money`的上櫃股票(5481)直接呼叫
+  `load_quote_summary()`確認估算路徑：均價(20.3+19.9+20.0)/3=20.0667、
+  `avg_price_is_estimated=True`，跟「均價」欄位共用同一段程式碼，UI顯示
+  邏輯已用程式碼檢視確認一致，不需要另外截圖驗證這條路徑。

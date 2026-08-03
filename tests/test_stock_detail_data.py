@@ -1,4 +1,5 @@
 import math
+from datetime import date, timedelta
 
 from src.data.storage import (
     init_db,
@@ -54,16 +55,47 @@ def test_load_quote_summary_matches_manual_calculation():
     assert math.isclose(result["amplitude_pct"], (2425.0 - 2345.0) / 2205.0 * 100)
 
 
-def test_load_quote_summary_handles_missing_trading_money():
-    """yfinance回補的舊資料trading_money可能是None，均價/成交金額(億)應該一併是
-    None，不強行算一個不可靠的數字或crash。"""
+def test_load_quote_summary_estimates_avg_price_when_trading_money_missing():
+    """trading_money缺值(盤中即時價備援沒有這個欄位，或yfinance回補的舊資料沒有)時，
+    2026-08-03改版：改用典型價格(最高+最低+收盤)/3估算均價，不再直接回傳None——
+    (2500+2400+2420)/3=2440.0，再乘以成交量2000股回推估算成交金額4,880,000元
+    (=0.0488億)，並標記avg_price_is_estimated=True供UI顯示「(估)」。"""
     conn = _main_conn()
-    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0, "trading_money": None}])
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-31", "open": 2410.0, "high": 2500.0, "low": 2400.0, "close": 2420.0,
+         "volume": 2000, "trading_money": None},
+    ])
+
+    result = stock_detail_data.load_quote_summary(conn, "2330")
+
+    assert result["avg_price"] == 2440.0
+    assert result["avg_price_is_estimated"] is True
+    assert math.isclose(result["trading_money_billion"], 4_880_000 / 1e8)
+
+
+def test_load_quote_summary_avg_price_not_estimated_when_trading_money_present():
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-31", "close": 2425.0, "volume": 56_896_000, "trading_money": 136_371_955_000},
+    ])
+
+    result = stock_detail_data.load_quote_summary(conn, "2330")
+
+    assert result["avg_price_is_estimated"] is False
+
+
+def test_load_quote_summary_avg_price_none_when_volume_also_missing():
+    """volume是0(理論上不該發生在真實資料，但防呆用)時估算公式沒有意義，avg_price
+    仍然回傳None，不強行除以0或用0成交量估算出一個假的均價。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-31", "close": 2425.0, "volume": 0, "trading_money": None},
+    ])
 
     result = stock_detail_data.load_quote_summary(conn, "2330")
 
     assert result["avg_price"] is None
-    assert result["trading_money_billion"] is None
+    assert result["avg_price_is_estimated"] is False
 
 
 def test_load_quote_summary_first_day_has_no_prev_close():
@@ -203,6 +235,56 @@ def test_load_institutional_estimated_cost_falls_back_to_close_when_no_trading_m
 def test_load_institutional_estimated_cost_returns_none_when_no_data():
     conn = _main_conn()
     assert stock_detail_data.load_institutional_estimated_cost(conn, "9999") is None
+
+
+def test_pick_longest_available_cost_falls_back_to_shorter_period():
+    """1年/6個月/3個月都不適用(None)，40日開始才有值，應該回傳40日的數字，不是
+    直接回傳None或誤用更短的天期。"""
+    cost_by_period = {label: None for label in stock_detail_data.INSTITUTIONAL_PERIODS}
+    cost_by_period["40日"] = 123.45
+    cost_by_period["20日"] = 111.11
+
+    assert stock_detail_data.pick_longest_available_cost(cost_by_period) == 123.45
+
+
+def test_pick_longest_available_cost_returns_none_when_all_unavailable():
+    cost_by_period = {label: None for label in stock_detail_data.INSTITUTIONAL_PERIODS}
+    assert stock_detail_data.pick_longest_available_cost(cost_by_period) is None
+
+
+def test_load_latest_institutional_cost_summary_picks_longest_available_per_group():
+    """40個連續交易日、股價全程持平100元(方便驗證加權平均一定是100.0)：外資最近
+    10天淨賣出(net=-100/天)、更早30天淨買超(net=+100/天)；投信全程40天都淨買超。
+    外資最近10天(甚至最近20天，剛好正負抵銷成0)應該不適用，退到40日(=1年，兩者
+    因為資料只有40天剛好算出同一個窗口)才有值；投信全期間都適用，直接用最長的
+    「1年」那格——驗證兩個分類各自獨立套用pick_longest_available_cost()的退回
+    邏輯，不會互相干擾。"""
+    conn = _main_conn()
+    base = date(2026, 1, 1)
+    all_dates = [(base + timedelta(days=i)).isoformat() for i in range(40)]
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": d, "close": 100.0, "volume": 1000, "trading_money": 100_000} for d in all_dates
+    ])
+    by_date = {}
+    for d in all_dates[:30]:  # 較早30天：外資／投信都淨買超
+        by_date[d] = {"Foreign_Investor": (100, 0), "Investment_Trust": (100, 0)}
+    for d in all_dates[30:]:  # 最近10天：外資轉為淨賣出，投信持續淨買超
+        by_date[d] = {"Foreign_Investor": (0, 100), "Investment_Trust": (100, 0)}
+    _seed_institutional(conn, "2330", by_date)
+
+    result = stock_detail_data.load_latest_institutional_cost_summary(conn, "2330")
+
+    cost = stock_detail_data.load_institutional_estimated_cost(conn, "2330")
+    assert cost["外資"]["10日"] is None  # 最近10天淨賣出
+    assert cost["外資"]["20日"] is None  # 最近20天正負剛好抵銷成0，denominator不>0
+    assert cost["外資"]["1年"] == 100.0  # 40天資料全部落在窗口內，淨買超2000股，均價100
+    assert result["外資"] == 100.0
+    assert result["投信"] == 100.0
+
+
+def test_load_latest_institutional_cost_summary_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_latest_institutional_cost_summary(conn, "9999") is None
 
 
 def _seed_margin(conn, stock_id: str, rows: list[dict]) -> None:

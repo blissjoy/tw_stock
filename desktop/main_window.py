@@ -2243,20 +2243,35 @@ class MainWindow(QMainWindow):
         view.setFixedHeight(int(doc_height) + frame_width + 8)
 
     def _build_overview_quote_html(self, stock_id: str) -> str:
-        """「交易資訊」區塊內容，對應temp/個股詳情-1.jpg。"""
+        """「交易資訊」區塊內容，對應temp/個股詳情-1.jpg。2026-08-03改版：均價/成交
+        金額(億)缺值時改顯示估算值(見stock_detail_data.load_quote_summary()的
+        avg_price_is_estimated)，並多加一行「外資/投信持有成本(預估)」。
+        """
         quote = stock_detail_data.load_quote_summary(self.conn, stock_id)
         if quote is None:
             return "<p>查無成交資料。</p>"
         c = self._colored_num
+        estimated_suffix = "（估）" if quote["avg_price_is_estimated"] else ""
+        avg_price_text = f"{quote['avg_price']:,.2f}{estimated_suffix}" if quote["avg_price"] is not None else "-"
+        trading_money_text = (
+            f"{quote['trading_money_billion']:,.2f}{estimated_suffix}"
+            if quote["trading_money_billion"] is not None else "-"
+        )
+        cost_summary = stock_detail_data.load_latest_institutional_cost_summary(self.conn, stock_id)
+        foreign_cost = cost_summary["外資"] if cost_summary else None
+        trust_cost = cost_summary["投信"] if cost_summary else None
+        foreign_cost_text = f"{foreign_cost:,.2f}" if foreign_cost is not None else "不適用"
+        trust_cost_text = f"{trust_cost:,.2f}" if trust_cost is not None else "不適用"
         rows = [
             ("成交", f"<b>{c(quote['close'], 2)}</b>", "昨收", f"{quote['prev_close']:,.2f}" if quote["prev_close"] is not None else "-"),
             ("開盤", f"{quote['open']:,.2f}", "漲跌幅", c(quote["change_pct"], 2, signed=True, suffix="%")),
             ("最高", f"{quote['high']:,.2f}", "漲跌", c(quote["change"], 2, signed=True)),
             ("最低", f"{quote['low']:,.2f}", "總量", f"{quote['volume_lots']:,} 張"),
-            ("均價", f"{quote['avg_price']:,.2f}" if quote["avg_price"] is not None else "-", "昨量",
+            ("均價", avg_price_text, "昨量",
              f"{quote['prev_volume_lots']:,} 張" if quote["prev_volume_lots"] is not None else "-"),
-            ("成交金額(億)", f"{quote['trading_money_billion']:,.2f}" if quote["trading_money_billion"] is not None else "-",
+            ("成交金額(億)", trading_money_text,
              "振幅", c(quote["amplitude_pct"], 2, suffix="%") if quote["amplitude_pct"] is not None else "-"),
+            ("外資持有成本(預估)", foreign_cost_text, "投信持有成本(預估)", trust_cost_text),
         ]
         table = f'<p style="color:#666666;">資料時間：{quote["date"]}</p><table cellspacing="0" cellpadding="4" width="100%">'
         for label1, value1, label2, value2 in rows:

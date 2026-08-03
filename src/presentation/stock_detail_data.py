@@ -45,10 +45,14 @@ def load_quote_summary(conn, stock_id: str) -> dict | None:
     """回傳最新交易日的成交資訊：成交(收盤)/開盤/最高/最低/均價/成交金額(億)/昨收/
     漲跌/漲跌幅(%)/總量(張)/昨量(張)/振幅(%)，查無資料回傳None。
 
-    均價=成交金額/成交股數，成交金額(億)=成交金額/1億——trading_money是yfinance
-    回補的舊資料可能是None(見schema.sql的欄位說明)，這種情況均價/成交金額(億)
-    一併回傳None，不強行算一個不可靠的數字。總量/昨量原始單位是「股」，除以1000
-    換算成台股慣用的「張」，四捨五入到整數張。
+    均價=成交金額/成交股數，成交金額(億)=成交金額/1億——trading_money缺值時(盤中
+    即時價備援沒有這個欄位，或yfinance回補的舊資料本來就沒有，見schema.sql的欄位
+    說明)，2026-08-03改版：不再直接回傳None，改用當天OHLC湊出的「典型價格」
+    (最高+最低+收盤)/3估算均價，再乘以成交量回推一個估算成交金額——不是真正逐筆
+    成交算出來的官方數字，只是近似值，`avg_price_is_estimated`標記這種情況，UI
+    據此顯示「(估)」，不能跟官方數字混著看。成交量本身不受trading_money是否缺值
+    影響，一律是DB裡實際紀錄的股數(盤中即時價備援也有累計成交量，不是缺值)。
+    總量/昨量原始單位是「股」，除以1000換算成台股慣用的「張」，四捨五入到整數張。
     """
     rows = conn.execute(
         "SELECT date, open, high, low, close, volume, trading_money FROM stock_prices "
@@ -63,7 +67,15 @@ def load_quote_summary(conn, stock_id: str) -> dict | None:
     prev_close = prev[4] if prev else None
     prev_volume = prev[5] if prev else None
 
-    avg_price = trading_money / volume if trading_money and volume else None
+    avg_price_is_estimated = False
+    if trading_money and volume:
+        avg_price = trading_money / volume
+    elif volume:
+        avg_price = (high + low + close) / 3
+        trading_money = avg_price * volume
+        avg_price_is_estimated = True
+    else:
+        avg_price = None
     trading_money_billion = trading_money / 1e8 if trading_money is not None else None
     change = close - prev_close if prev_close is not None else None
     change_pct = change / prev_close * 100 if change is not None and prev_close else None
@@ -76,6 +88,7 @@ def load_quote_summary(conn, stock_id: str) -> dict | None:
         "high": high,
         "low": low,
         "avg_price": avg_price,
+        "avg_price_is_estimated": avg_price_is_estimated,
         "trading_money_billion": trading_money_billion,
         "prev_close": prev_close,
         "change": change,
@@ -198,6 +211,34 @@ def load_institutional_estimated_cost(conn, stock_id: str) -> dict[str, dict[str
                 denominator += net
             result[group][label] = numerator / denominator if denominator > 0 else None
     return result
+
+
+def pick_longest_available_cost(cost_by_period: dict[str, float | None]) -> float | None:
+    """從INSTITUTIONAL_PERIODS裡最長的天期往最短的天期找，回傳第一個「適用」(非
+    None)的預估持股成本，全部天期都不適用時回傳None。
+
+    2026-08-03新增：供「交易資訊」區塊顯示單一「最新持有成本(預估)」數字使用——
+    天期越長，越接近「這段時間內真正累積的部位」，優先採用；剛好那個天期是淨賣出
+    (不適用)才退到較短天期，盡量給出一個有意義的數字，不是固定用某一個天期、
+    動不動就顯示不適用。
+    """
+    for label in reversed(list(INSTITUTIONAL_PERIODS.keys())):
+        value = cost_by_period.get(label)
+        if value is not None:
+            return value
+    return None
+
+
+def load_latest_institutional_cost_summary(conn, stock_id: str) -> dict[str, float | None] | None:
+    """回傳外資／投信「最新持有成本(預估)」單一數字(見pick_longest_available_cost()
+    的天期選擇邏輯)——{"外資": 數字或None, "投信": 數字或None}，查無法人資料回傳
+    最外層None。2026-08-03新增，供「交易資訊」區塊使用，是load_institutional_
+    estimated_cost()完整矩陣的精簡摘要，不是另一套計算邏輯。
+    """
+    cost = load_institutional_estimated_cost(conn, stock_id)
+    if cost is None:
+        return None
+    return {group: pick_longest_available_cost(cost[group]) for group in ESTIMATED_COST_GROUPS}
 
 
 def load_institutional_flow_analysis(conn, stock_id: str, lookback_days: int = 30) -> dict[str, dict] | None:
