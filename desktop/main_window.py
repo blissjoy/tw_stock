@@ -2239,21 +2239,33 @@ class MainWindow(QMainWindow):
         # QTextBrowser本身的行為，只有桌面版需要escape。
         _EMPTY_TEASER = {"tech": "目前沒有符合任何已接上規則庫的訊號。", "chip": "目前沒有符合任何已接上的籌碼規則。"}
 
-        def section_teaser(label: str, matches: list[dict], anchor: str) -> str:
-            link = f'<a href="jumpto:///{anchor}">查看{label}↓</a>'
+        def section_teaser(matches: list[dict], anchor: str) -> str:
+            """2026-08-04第二次改版：使用者反映拆成技術面/籌碼面後，總結分析退化成
+            「共N條規則，信心最高：...」這種資訊量太少的版本，要求照拆分前的舊格式
+            (多頭/空頭/其他傾向統計＋信心最高訊號的目前狀態)——這裡沿用拆分前
+            _build_analysis_html()的summary_block寫法，籌碼面套用同一套格式，不是
+            只給tech用。"""
+            link = f'<a href="jumpto:///{anchor}">查看{"技術面" if anchor == "tech" else "籌碼面"}↓</a>'
             if not matches:
                 return f"{_EMPTY_TEASER[anchor]}{link}"
-            top = matches[0]
+            summary = summarize_signal_matches(matches)
+            top = summary["top_match"]
+            top_note = (top.get("note") or "").split("\n")[0] if top else ""
             return (
-                f"共{len(matches)}條規則，信心最高：{html.escape(top['rule_id'])}　"
-                f"{html.escape(top['title'])}（{top['confidence']}%）　{link}"
+                f"本次共觸發 {summary['total']} 條規則"
+                f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
+                f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。<br>"
+                f"信心最高的訊號：{html.escape(top['rule_id'])}　{html.escape(top['title'])}"
+                f"（{top['confidence']}%）"
+                + (f"<br>目前狀態：{html.escape(top_note)}" if top_note else "")
+                + f"<br>{link}"
             )
 
         summary_html = (
             f"<p><b>{html.escape(header_label)}</b></p>"
-            '<p><b>📌 總結分析</b><br>'
-            f"1. 技術面（{section_teaser('技術面', tech_matches, 'tech')}）<br>"
-            f"2. 籌碼面（{section_teaser('籌碼面', chip_matches, 'chip')}）</p>"
+            '<p><b>📌 總結分析</b></p>'
+            f"<p><b>1. 技術面</b><br>{section_teaser(tech_matches, 'tech')}</p>"
+            f"<p><b>2. 籌碼面</b><br>{section_teaser(chip_matches, 'chip')}</p>"
         )
 
         def section_html(title: str, matches: list[dict], anchor: str) -> str:
