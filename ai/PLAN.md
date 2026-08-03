@@ -5239,3 +5239,45 @@ addStretch()`)同樣的收尾`addStretch()`：`detail_scroll`(QScrollArea，
   狀態：投信已連續買超6天...」，格式跟技術面完全一致。`pytest tests/ -q`
   869個測試全數通過(這次改動不影響任何既有測試涵蓋的邏輯，純粹是HTML
   組字方式調整)。
+
+## 候選清單訊號欄位一律附上符合的篩選條件描述(2026-08-04)
+
+使用者回報兩個候選清單疑惑(附截圖temp/q1.jpg、temp/q2.jpg)：①勾了「SAR
+翻轉」，訊號欄位卻完全看不到SAR字樣；②取消「朱家泓技術分析」後，訊號欄位
+卻還是出現非SAR相關的規則名稱。查證`apply_candidate_filters()`後確認這是
+現有設計、不是bug，但確實容易誤解：「訊號」欄位原本顯示的是`daily_
+candidates`表(每日排程用`_SCREEN_FUNCTIONS`規則跑出來的結果)裡這檔股票
+當天真正觸發的規則，只有在這欄位「原本是空的」時才會補上「均線多頭排列/
+SAR翻轉」這種篩選條件描述文字——q1因為同時勾了「朱家泓技術分析」，這個
+條件本身要求「當天必須出現在daily_candidates」，清單裡每一列都保證有規則
+名稱可顯示，SAR描述文字這個備援永遠不會被用到；q2取消朱家泓後，候選池
+混了「剛好也有daily_candidates規則」跟「單純符合均線+SAR條件」兩種股票，
+前者訊號欄位不是空的所以不會被覆寫。
+
+順便回答使用者的第一個問題：app剛啟動時，`MainWindow.__init__()`建構
+視窗時就直接呼叫一次`_reload_candidates()`(不用等使用者手動按「立即重新
+篩選」)，用`chart_data.py`的`CANDIDATE_FILTER_DEFAULTS`(均線多頭排列
+MA5>MA10>MA20=True)、`CANDIDATE_SAR_FLIP_ENABLED_DEFAULT`(True，多頭/
+1天內)、`CANDIDATE_ZHU_RULE_ONLY_DEFAULT`(True)這幾個預設值跑出畫面一開
+就看到的候選清單。
+
+詢問使用者這種行為要保持現狀還是要改，使用者選擇「改成始終附上符合的篩選
+條件」——這樣勾了SAR就一定能在訊號欄位看到SAR翻轉字樣，不管那檔股票剛好
+有沒有另外觸發daily_candidates規則。
+
+- `src/presentation/chart_data.py`的`apply_candidate_filters()`：原本只在
+  `signal_name`原本是None時才補上篩選條件描述，改成不管signal_name原本是
+  不是空的，一律把符合的篩選條件描述接在後面(用換行分隔)——已有daily_
+  candidates規則的股票會變成「規則名稱\n篩選條件描述」，原本是空的股票
+  維持只顯示篩選條件描述。
+- `tests/test_chart_data.py`更新`test_apply_candidate_filters_backfills_
+  signal_name_with_matched_condition_when_missing`(重新命名為
+  `_appends_matched_condition_to_signal_name`)反映新行為：已有真訊號的
+  股票也會被接上條件描述，不是維持原樣不變。`pytest tests/ -q`869個測試
+  全數通過(只有這1個測試需要更新斷言，其餘測試都只斷言stock_id清單或用
+  沒有signal_name欄位的情境，不受影響)。
+- 用真實DB重現q1/q2兩個情境驗證：q1(SAR+朱家泓皆勾選)所有6檔股票的訊號
+  欄位都正確附上「均線多頭排列（MA5>MA10>MA20）\nSAR翻轉（多頭，1天內）」；
+  q2(取消朱家泓)前6檔(有daily_candidates規則)一樣附上條件描述，第7~12檔
+  (單純符合均線+SAR)維持只顯示條件描述，兩種情境的訊號欄位現在都能一致
+  反映實際符合的篩選條件。

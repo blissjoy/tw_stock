@@ -332,10 +332,14 @@ def apply_candidate_filters(
     之後幾天的資料，被誤判成「已經是幾天前翻轉的」而被「N天內翻轉」篩選條件排除掉。見
     `_fetch_recent_columns_batched`的詳細說明。
 
-    回傳結果裡，靠均線/SAR條件篩出來、但當天沒有觸發任何朱家泓規則(signal_name原本是
-    None)的股票，「訊號」欄位會補上「符合條件本身」的描述文字(例如「均線多頭排列
-    （MA5>MA10>MA20）」)，不是留空——使用者要求這樣才知道這檔股票是「為什麼」出現在
-    清單裡，不是無中生有；已經有真正規則訊號的股票維持原樣，不會被覆蓋。
+    回傳結果裡，靠均線/SAR條件篩出來的股票，「訊號」欄位一律會附上「符合條件本身」的
+    描述文字(例如「均線多頭排列（MA5>MA10>MA20）」「SAR翻轉（多頭，1天內）」)——2026-
+    08-04改版：原本只在signal_name原本是None(當天沒有觸發任何daily_candidates規則)
+    時才補上這段描述，使用者反映這樣容易誤解成「篩選條件沒生效」(勾了SAR翻轉，但那些
+    剛好也觸發別的規則、signal_name本來就非空的股票，訊號欄位完全看不到SAR字樣)。
+    改成不管signal_name原本是不是空的，一律把符合的篩選條件描述文字接在後面(用換行
+    分隔)，讓使用者清楚看到「這檔股票為什麼會出現在清單裡」不會因為它剛好也觸發了
+    別的規則就被蓋掉。
     """
     if candidates_df.empty:
         return candidates_df
@@ -377,9 +381,10 @@ def apply_candidate_filters(
 
     result = candidates_df[mask].reset_index(drop=True)
     if matched_condition_labels and "signal_name" in result.columns:
+        condition_text = "\n".join(matched_condition_labels)
         blank_signal = result["signal_name"].isna()
-        if blank_signal.any():
-            result.loc[blank_signal, "signal_name"] = "\n".join(matched_condition_labels)
+        result.loc[blank_signal, "signal_name"] = condition_text
+        result.loc[~blank_signal, "signal_name"] = result.loc[~blank_signal, "signal_name"] + "\n" + condition_text
     return result
 
 

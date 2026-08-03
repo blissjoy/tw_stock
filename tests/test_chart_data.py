@@ -832,10 +832,13 @@ def test_apply_candidate_filters_unfiltered_when_zhu_rule_only_false():
     assert list(result["stock_id"]) == ["2330", "9999"]
 
 
-def test_apply_candidate_filters_backfills_signal_name_with_matched_condition_when_missing(monkeypatch):
-    """全市場掃描時，若某檔股票是靠MA/SAR條件篩出來、但當天沒有觸發任何朱家泓規則
-    (signal_name原本是None)，使用者要求「訊號」欄要顯示條件本身，不是留空——已經有
-    真正規則訊號的股票(9527)則維持原樣，不會被覆蓋。"""
+def test_apply_candidate_filters_appends_matched_condition_to_signal_name(monkeypatch):
+    """2026-08-04改版：使用者反映「訊號」欄位只在signal_name原本是None時才補上符合的
+    篩選條件描述，容易誤解成「篩選條件沒生效」(勾了SAR翻轉，但那些剛好也觸發別的規則、
+    signal_name本來就非空的股票，訊號欄位完全看不到SAR字樣)——改成不管signal_name
+    原本是不是空的，一律把符合的篩選條件描述接在後面(用換行分隔)：2330(原本None)
+    直接顯示條件文字；9527(已有真訊號R-TREND-14)則是規則文字後面換行接上條件描述，
+    不會因為剛好也觸發別的規則就看不到「為什麼」出現在清單裡。"""
     df = pd.DataFrame({
         "stock_id": ["2330", "9527"],
         "signal_name": [None, "R-TREND-14多頭短線進場（92%）"],
@@ -852,7 +855,7 @@ def test_apply_candidate_filters_backfills_signal_name_with_matched_condition_wh
     row_2330 = result[result["stock_id"] == "2330"].iloc[0]
     assert row_2330["signal_name"] == "均線多頭排列（MA5>MA10>MA20）"
     row_9527 = result[result["stock_id"] == "9527"].iloc[0]
-    assert row_9527["signal_name"] == "R-TREND-14多頭短線進場（92%）"  # 已有真訊號，不覆蓋
+    assert row_9527["signal_name"] == "R-TREND-14多頭短線進場（92%）\n均線多頭排列（MA5>MA10>MA20）"
 
 
 def test_apply_candidate_filters_full_market_scan_includes_stocks_without_zhu_signal(monkeypatch):
