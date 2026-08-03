@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+import pandas as pd
 import pytest
 
 import scripts.daily_pipeline as daily_pipeline
@@ -340,6 +341,90 @@ def test_run_daily_pipeline_line_still_sent_when_email_not_configured(monkeypatc
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
 
     assert notify_calls == ["line"]
+
+
+def test_run_daily_pipeline_notifications_apply_same_default_filters_as_ui(monkeypatch):
+    """使用者回報：收到的LINE通知涵蓋股票數比打開UI看到的候選清單多很多，兩邊篩選
+    條件對不齊。根因是通知端直接送出run_screen_and_store()的原始candidates(「當天
+    觸發過任何一條規則」的完整清單)，沒有套用UI候選清單預設額外要求的均線多頭排列+
+    SAR翻轉條件。這裡驗證修正後：daily_pipeline.py會用跟UI完全同一套預設參數
+    (chart_data.CANDIDATE_FILTER_DEFAULTS/CANDIDATE_SAR_FLIP_*_DEFAULT/
+    CANDIDATE_ZHU_RULE_ONLY_DEFAULT)呼叫apply_candidate_filters()，只有通過篩選
+    的股票才會出現在LINE/Email內容裡——不重新測試apply_candidate_filters()本身的
+    篩選邏輯是否正確(那部分tests/test_chart_data.py已經覆蓋)，只驗證daily_
+    pipeline.py有沒有正確接上、用篩選後的結果縮小candidates。
+    """
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    raw_candidates = [
+        {"stock_id": "2330", "signal_name": "R-TEST", "entry_price": 100.0, "stop_loss": 95.0, "note": ""},
+        {"stock_id": "9999", "signal_name": "R-TEST", "entry_price": 50.0, "stop_loss": 48.0, "note": ""},
+    ]
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: raw_candidates)
+
+    captured_filter_args = {}
+
+    def _fake_apply_filters(conn, df, active_filter_labels, sar_flip_option=None, zhu_rule_only=False, as_of_date=None):
+        captured_filter_args["active_filter_labels"] = active_filter_labels
+        captured_filter_args["sar_flip_option"] = sar_flip_option
+        captured_filter_args["zhu_rule_only"] = zhu_rule_only
+        # 模擬只有2330通過篩選(9999被均線/SAR條件濾掉)
+        return pd.DataFrame({"stock_id": ["2330"]})
+
+    monkeypatch.setattr(daily_pipeline.chart_data, "apply_candidate_filters", _fake_apply_filters)
+    monkeypatch.setattr(
+        daily_pipeline.chart_data, "load_stock_universe_for_date",
+        lambda conn, target_date=None: (pd.DataFrame({"stock_id": ["2330", "9999"]}), target_date, False),
+    )
+
+    sent_texts = []
+    monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: sent_texts.append(text))
+    monkeypatch.setattr(daily_pipeline, "send_email", lambda subject, body: sent_texts.append(body))
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
+
+    from src.presentation import chart_data
+
+    assert captured_filter_args["active_filter_labels"] == [
+        label for label, default in chart_data.CANDIDATE_FILTER_DEFAULTS.items() if default
+    ]
+    assert captured_filter_args["sar_flip_option"] == chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT
+    assert captured_filter_args["zhu_rule_only"] is chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT
+    assert any("2330" in text for text in sent_texts)
+    assert not any("9999" in text for text in sent_texts)
+
+
+def test_run_daily_pipeline_falls_back_to_unfiltered_candidates_when_notify_filter_fails(monkeypatch):
+    """通知篩選這一步(load_stock_universe_for_date/apply_candidate_filters)萬一
+    出錯，不應該讓整條pipeline中斷或掉入'failed'狀態、也不應該讓使用者今天完全
+    收不到通知——候選清單已經成功寫進DB了，退回寄出未篩選的原始candidates即可。
+    """
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    raw_candidates = [
+        {"stock_id": "2330", "signal_name": "R-TEST", "entry_price": 100.0, "stop_loss": 95.0, "note": ""},
+    ]
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: raw_candidates)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("模擬daily_indicators查詢失敗")
+
+    monkeypatch.setattr(daily_pipeline.chart_data, "load_stock_universe_for_date", _raise)
+
+    sent_texts = []
+    monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: sent_texts.append(text))
+    monkeypatch.setattr(daily_pipeline, "send_email", lambda subject, body: sent_texts.append(body))
+
+    result = daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
+
+    assert result == raw_candidates
+    assert any("2330" in text for text in sent_texts)
 
 
 def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):

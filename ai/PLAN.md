@@ -4583,3 +4583,56 @@ refresh_btn/fetch_btn的點擊處理已經有「依目前分頁決定要重新�
 進主layout，變成靠左佔一整行。改成包一層`QHBoxLayout`、先`addStretch()`
 再放label，比照`status_label`所在的`top_bar`同一種「靠右對齊」排法。截圖
 確認位置正確對齊到右上角。
+
+## 修正LINE/Email通知清單與UI候選清單條件不一致(2026-08-03)
+
+使用者貼了一段實測log：①一長串TPEx股票「下載錯誤」；②候選清單print出現大量
+重複股票(例如9802、9925各印了2~3次)；③質疑「發LINE通知的清單與候選清單列出
+來的沒有對齊，應該是條件不一致」。查證後三件事其實是兩個獨立問題：
+
+**①②：不是bug，是既有設計的「原始候選清單」本來就會有重複**——使用者貼的
+「9802：進場71.80 停損72.10」這種格式，來自`scripts/daily_pipeline.py`第291行
+的`print()`，直接印`run_screen_and_store()`的原始`candidates`——這是「當天
+觸發過任何一條規則」的清單，同一檔股票觸發3條規則就會有3筆(每筆對應不同規則)，
+console log重複是刻意保留、方便除錯看到底命中哪些規則，不是bug。真正送出的
+LINE訊息(`format_candidates_message()`)2026-08-01就已經改成依股票代號分組、
+不會重複，使用者誤把console log內容當成LINE訊息本身。
+
+至於「下載錯誤」：查了這些TPEx股票代號在DB裡的歷史，發現大多數都有788~862天
+的完整價格歷史(涵蓋2023年至今)，只是缺最近1~2天——這是yfinance非官方批次API
+下載600多檔股票時常見的偶發性部分失敗，不是系統性壞掉。但也發現少數股票(例如
+2940歐都納缺561天、4183福永生技缺75天)有嚴重的持續性缺口——`daily_pipeline.py`
+只抓「今天」、沒有回頭補漏機制，跟上一輪修過的法人/資券缺口是同一類問題，只是
+這次發生在`stock_prices`。**這部分還沒有動手修，需要跟使用者確認是否要仿照
+`scripts/backfill_institutional_margin_gaps.py`做一支類似的`stock_prices`
+缺口回補腳本**，留待下次討論。
+
+**③：真正的bug，已修正**——`daily_pipeline.py`發送LINE/Email通知時，直接把
+`run_screen_and_store()`的原始`candidates`(當天觸發過「任何一條」朱家泓規則的
+全市場股票，未套用UI候選清單頁面預設的額外篩選條件)拿去格式化發送；但UI候選
+清單頁面(`desktop/main_window.py`)2026-08-02改版後預設會另外套用「均線多頭
+排列(MA5>MA10>MA20)」+「SAR翻轉(多頭1天內)」兩個篩選條件(且基礎池已經是全
+市場，不是只有daily_candidates)，是`daily_candidates`的子集合——兩者從那次
+改版後就不再是同一個集合，通知端沒有跟著更新篩選條件。實測用真實DB查證：
+同一天原始`daily_candidates`有626檔，套用UI預設篩選後只剩3檔，落差非常大。
+
+- `src/presentation/chart_data.py`新增3個共用常數：`CANDIDATE_SAR_FLIP_
+  ENABLED_DEFAULT`(True)、`CANDIDATE_SAR_FLIP_OPTION_DEFAULT`({"direction":
+  "多頭", "within_days": 1})、`CANDIDATE_ZHU_RULE_ONLY_DEFAULT`(True)——跟
+  既有的`CANDIDATE_FILTER_DEFAULTS`同樣精神，集中定義成常數避免UI跟通知各自
+  維護一份、之後改一邊忘記改另一邊(這正是這次bug的根因)。
+- `desktop/main_window.py`：`sar_flip_checkbox`/`sar_flip_direction_combo`/
+  `sar_flip_days_spin`/`zhu_rule_checkbox`的初始狀態全部改成讀這幾個新常數，
+  不再各自寫死初始值。
+- `scripts/daily_pipeline.py`：發送通知前，先用`chart_data.load_stock_
+  universe_for_date()`+`apply_candidate_filters()`套用跟UI完全相同的預設
+  參數，篩出`notify_stock_ids`，再從原始`candidates`篩出這個集合內的股票才
+  格式化發送(`notify_candidates`)——console log的原始print維持不變(除錯用，
+  刻意保留完整未篩選的清單)。這個篩選步驟獨立包一層try/except，失敗時退回
+  寄送未篩選的原始`candidates`(候選清單已經成功寫進DB，篩選失敗不應該讓整條
+  pipeline被標記失敗、也不應該讓使用者今天完全收不到通知)。
+- 新增`tests/test_daily_pipeline.py`兩個測試：驗證通知會用UI同一套預設參數
+  呼叫`apply_candidate_filters()`且正確套用篩選結果縮小`candidates`；驗證
+  篩選失敗時正確退回未篩選清單、不中斷pipeline。`pytest tests/ -q`828個
+  測試全數通過。用真實DB驗證：原始626檔候選 → 套用UI預設篩選後3檔(1459/
+  1733/4430)，且確認篩選後的集合是原始集合的子集合(沒有篩出範圍外的股票)。

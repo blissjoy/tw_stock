@@ -663,17 +663,19 @@ class MainWindow(QMainWindow):
         # 塞進CANDIDATE_FILTERS的registry迴圈，另外獨立組裝、獨立傳給apply_candidate_filters
         # 的sar_flip_option參數(見src/presentation/chart_data.py)。
         self.sar_flip_checkbox = QCheckBox("SAR 翻轉")
-        # 2026-08-02使用者要求候選清單預設就是「SAR多頭翻轉1天內」+「朱家泓技術分析」
-        # 兩個都打勾(下面sar_flip_direction_combo/sar_flip_days_spin本來就預設「多頭」/
-        # 1，這裡補上勾選框本身的預設勾選)。
-        self.sar_flip_checkbox.setChecked(True)
+        # 預設值改讀chart_data.CANDIDATE_SAR_FLIP_ENABLED_DEFAULT/_OPTION_DEFAULT
+        # (2026-08-03改版：跟scripts/daily_pipeline.py的LINE/Email通知共用同一份
+        # 常數，避免UI初始狀態跟通知內容各自維護一份預設值、之後改一邊忘記改另一邊
+        # ——這正是使用者回報「LINE通知清單跟候選清單對不齊」的根因)。
+        self.sar_flip_checkbox.setChecked(chart_data.CANDIDATE_SAR_FLIP_ENABLED_DEFAULT)
         method_bar.addWidget(self.sar_flip_checkbox)
         self.sar_flip_direction_combo = QComboBox()
         self.sar_flip_direction_combo.addItems(["多頭", "空頭"])
+        self.sar_flip_direction_combo.setCurrentText(chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT["direction"])
         method_bar.addWidget(self.sar_flip_direction_combo)
         self.sar_flip_days_spin = QSpinBox()
         self.sar_flip_days_spin.setRange(1, 60)
-        self.sar_flip_days_spin.setValue(1)
+        self.sar_flip_days_spin.setValue(chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT["within_days"])
         self.sar_flip_days_spin.setSuffix(" 天內翻轉")
         method_bar.addWidget(self.sar_flip_days_spin)
 
@@ -681,11 +683,12 @@ class MainWindow(QMainWindow):
         # (SAR翻轉)一樣是獨立的AND條件，不是「候選清單本來就限定在這個範圍」的基礎池
         # ——候選清單基礎池現在是全市場(見chart_data.load_stock_universe_for_date())，
         # 勾選這裡才會額外要求「當天有出現在daily_candidates(觸發過某條朱家泓規則)」；
-        # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。預設勾選，維持
-        # 「候選清單=已觸發朱家泓規則的股票」這個原本的預設體驗。
+        # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。預設勾選(讀
+        # chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT)，維持「候選清單=已觸發朱家泓
+        # 規則的股票」這個原本的預設體驗。
         method_bar.addSpacing(20)
         self.zhu_rule_checkbox = QCheckBox("朱家泓技術分析")
-        self.zhu_rule_checkbox.setChecked(True)
+        self.zhu_rule_checkbox.setChecked(chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT)
         self.zhu_rule_checkbox.setToolTip("勾選時只保留當天有觸發朱家泓規則的股票；取消勾選則不限制，均線/SAR等條件會對全市場掃描")
         method_bar.addWidget(self.zhu_rule_checkbox)
 

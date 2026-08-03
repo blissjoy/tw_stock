@@ -186,6 +186,18 @@ CANDIDATE_FILTER_DEFAULTS: dict[str, bool] = {
 # 用「勾選才查」的精神一致，不是每次載入候選清單都算。
 SAR_FLIP_LOOKBACK_DAYS = 250
 
+# 候選清單「篩選方法」(SAR翻轉/朱家泓技術分析)預設是否啟用、SAR翻轉的預設方向/天數：
+# 跟CANDIDATE_FILTER_DEFAULTS同樣的精神，集中定義成常數，desktop/main_window.py的
+# UI初始狀態、scripts/daily_pipeline.py的LINE/Email通知內容都讀同一份，確保「畫面
+# 預設顯示的候選清單」跟「主動推播的內容」是同一個集合。⚠️ 2026-08-03修正：先前
+# 兩處分別各自維護一份預設值(UI用widget初始狀態、通知用run_screen_and_store()完全
+# 沒套用這些篩選的原始daily_candidates全部內容)，導致使用者收到的LINE通知涵蓋的
+# 股票數比打開UI看到的候選清單多很多(通知端沒有另外要求MA5>10>20+SAR翻轉)，使用者
+# 回報「發LINE通知的清單與候選清單列出來的沒有對齊」後才發現這個落差。
+CANDIDATE_SAR_FLIP_ENABLED_DEFAULT = True
+CANDIDATE_SAR_FLIP_OPTION_DEFAULT: dict = {"direction": "多頭", "within_days": 1}
+CANDIDATE_ZHU_RULE_ONLY_DEFAULT = True
+
 
 def compute_sar_flip_flags(
     conn, stock_ids: list[str], direction: str = "多頭", within_days: int = 1,

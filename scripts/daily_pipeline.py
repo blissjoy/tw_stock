@@ -37,7 +37,7 @@ from src.data import finmind_client, storage, twse_client, yfinance_client  # no
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
-from src.presentation import pipeline_status  # noqa: E402
+from src.presentation import chart_data, pipeline_status  # noqa: E402
 from src.screener.daily_screener import refresh_indicator_window, run_screen_and_store  # noqa: E402
 
 
@@ -304,15 +304,49 @@ def run_daily_pipeline(
         if dry_run:
             print("--dry-run：略過實際發送LINE/Email通知。")
         else:
+            # ⚠️ 2026-08-03修正：通知內容套用跟UI候選清單「預設檢視」完全相同的篩選
+            # 條件(chart_data.CANDIDATE_FILTER_DEFAULTS/CANDIDATE_SAR_FLIP_*_DEFAULT/
+            # CANDIDATE_ZHU_RULE_ONLY_DEFAULT)，不是直接送出run_screen_and_store()的
+            # 原始candidates——candidates是「當天觸發過任何一條規則」的完整清單，沒有
+            # 套用UI預設額外要求的均線多頭排列+SAR翻轉條件，範圍比UI候選清單寬很多。
+            # 使用者回報收到的LINE通知涵蓋股票數比打開UI看到的候選清單多，兩邊篩選
+            # 條件對不齊、讓人誤以為系統有bug，才發現這個落差——這裡改成先用跟UI同一套
+            # 預設條件篩選過，再從candidates篩出通過的股票才格式化發送，確保「主動推播
+            # 收到的」跟「打開UI看到的」是同一個集合。獨立包一層try/except，理由跟下面
+            # 兩個通知管道一致：候選清單已經成功寫進DB了，如果這層篩選本身出問題(例如
+            # daily_indicators查詢失敗)，不應該讓整條pipeline被標記成失敗、也不應該讓
+            # 使用者今天完全收不到通知——退回寄出未篩選的原始candidates(寧可訊息範圍
+            # 比UI寬，也不要整批通知直接消失)。
+            notify_candidates = candidates
+            try:
+                universe_df, _, _ = chart_data.load_stock_universe_for_date(conn, target_date=iso_date)
+                active_filter_labels = [
+                    label for label, default in chart_data.CANDIDATE_FILTER_DEFAULTS.items() if default
+                ]
+                filtered_df = chart_data.apply_candidate_filters(
+                    conn, universe_df, active_filter_labels,
+                    sar_flip_option=(
+                        chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT
+                        if chart_data.CANDIDATE_SAR_FLIP_ENABLED_DEFAULT else None
+                    ),
+                    zhu_rule_only=chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT,
+                    as_of_date=iso_date,
+                )
+                notify_stock_ids = set(filtered_df["stock_id"])
+                notify_candidates = [c for c in candidates if c["stock_id"] in notify_stock_ids]
+                print(f"通知套用UI預設篩選後：{len(notify_stock_ids)}檔（原始規則命中{len(candidates)}筆）")
+            except Exception as exc:  # noqa: BLE001
+                print(f"通知篩選失敗，改寄未篩選的原始候選清單（略過，不影響已寫入的候選清單）：{exc}")
+
             # 兩個通知管道各自獨立try/except：例如Gmail憑證還沒設定時，LINE通知仍應正常發送，
             # 不應該讓其中一個管道還沒設定/暫時失敗就讓整條pipeline中斷（候選清單已經寫進Turso了）。
             try:
                 stock_names = {sid: info.get("name", "") for sid, info in stock_info_by_id.items()}
-                send_line_broadcast(format_candidates_message(iso_date, candidates, stock_names=stock_names))
+                send_line_broadcast(format_candidates_message(iso_date, notify_candidates, stock_names=stock_names))
             except Exception as exc:  # noqa: BLE001
                 print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
             try:
-                send_email(f"[每日選股] {iso_date}", format_candidates_email_body(iso_date, candidates))
+                send_email(f"[每日選股] {iso_date}", format_candidates_email_body(iso_date, notify_candidates))
             except Exception as exc:  # noqa: BLE001
                 print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
 
