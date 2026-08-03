@@ -1240,6 +1240,52 @@ def test_load_holidays_for_chart_fails_gracefully_when_fetch_raises(monkeypatch)
     assert len(fig.layout.xaxis.rangebreaks) == 1
 
 
+def test_load_holidays_for_chart_includes_weekday_gaps_not_in_official_calendar(monkeypatch):
+    """2026-08-03新增：官方假日曆抓不到的臨時休市日(例如颱風假)，只要df裡對應的
+    平日缺資料，也要納入休市清單——不然rangebreaks不會壓縮這天，圖上會留下斷點。
+    這裡模擬2026-07-10(週五)這種官方假日曆完全沒有、但df裡確實缺資料的情境(查證
+    真實案例：TWSE官方端點對2026-07-10回傳0筆資料，證實是真正的休市日，但不在
+    trading_calendar.holidays_between()抓到的年度假日曆裡)。
+    """
+    dates = pd.to_datetime(["2026-07-08", "2026-07-09", "2026-07-13", "2026-07-14"])  # 07-10(五)缺資料
+    df = pd.DataFrame({"close": [1, 2, 3, 4]}, index=dates)
+    monkeypatch.setattr(chart_data.trading_calendar, "holidays_between", lambda start, end: [])
+
+    holidays, ok = load_holidays_for_chart(df)
+
+    assert "2026-07-10" in holidays
+    assert ok is True
+
+
+def test_load_holidays_for_chart_merges_official_and_implied_holidays(monkeypatch):
+    """官方假日曆抓到的假日、跟資料缺口反推出的假日要合併，不是互相取代。"""
+    dates = pd.to_datetime(["2026-01-01", "2026-01-05"])  # 01-02(五)~01-04(日)缺資料
+    df = pd.DataFrame({"close": [1, 2]}, index=dates)
+    monkeypatch.setattr(chart_data.trading_calendar, "holidays_between", lambda start, end: ["2026-06-19"])
+
+    holidays, ok = load_holidays_for_chart(df)
+
+    assert "2026-06-19" in holidays  # 官方假日曆抓到的
+    assert "2026-01-02" in holidays  # 資料缺口反推的(週五)
+    assert ok is True
+
+
+def test_load_holidays_for_chart_falls_back_to_implied_holidays_only_when_fetch_fails(monkeypatch):
+    """官方假日曆抓取失敗時，至少還有資料缺口反推出的假日可用，不是完全空清單。"""
+    dates = pd.to_datetime(["2026-07-08", "2026-07-09", "2026-07-13"])  # 07-10(五)缺資料
+    df = pd.DataFrame({"close": [1, 2, 3]}, index=dates)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("模擬TWSE暫時打不通")
+
+    monkeypatch.setattr(chart_data.trading_calendar, "holidays_between", _raise)
+
+    holidays, ok = load_holidays_for_chart(df)
+
+    assert holidays == ["2026-07-10"]
+    assert ok is False
+
+
 def test_compute_sar_flip_flags_false_when_not_enough_history():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])

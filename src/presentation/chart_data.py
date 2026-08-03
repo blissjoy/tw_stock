@@ -689,16 +689,38 @@ def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
 
 
 def load_holidays_for_chart(df: pd.DataFrame) -> tuple[list[str], bool]:
-    """回傳(該圖表資料範圍內的休市日清單, 是否成功抓取)。TWSE假日曆這一步是畫圖路徑上
-    新增的網路依賴，抓取失敗時回傳([], False)而不拋例外，呼叫端可以決定要不要提示使用者
-    「假日清單暫時無法取得」，圖表仍能正常畫出來(退回只套用週末rangebreak)。
+    """回傳(該圖表資料範圍內的休市日清單, 是否成功抓取)。休市日清單來自兩個來源合併：
+    ①TWSE官方公告的年度假日曆(trading_calendar.holidays_between())，只涵蓋預先公告
+    的固定國定假日；②資料本身的「平日缺口」——`df`資料範圍內任何一個週一~週五、但
+    `df`裡完全沒有那天資料的日期，也一併視為休市日。
+
+    ⚠️ 2026-08-03新增②：使用者回報K線圖某個日期還是有斷點(即使先前已經修過rangebreaks
+    的connectgaps問題)，查證發現2026-07-10(週五)TWSE官方端點對那天回傳0筆資料，證實
+    是真正的休市日(研判是颱風假這類臨時公告、當天才決定的休市，不在年度預先公告的
+    假日曆裡)。①單獨抓不到這種「臨時性」休市日，導致rangebreaks沒有把這天壓縮掉，
+    在圖上留了一格空白斷點(K棒/成交量/均線在這個x位置全部中斷一格，不是connectgaps
+    能解決的問題——那次修的是「rangebreaks有正確壓縮、但Plotly.js對平緩線段的繪圖
+    瑕疵」，這次是「rangebreaks根本不知道要壓縮這天」，成因不同)。
+
+    直接從`df`本身的資料缺口反推，不管背後原因是國定假日、臨時休市、還是資料抓取
+    失敗，只要這天沒有資料就一律壓縮掉，不會在圖上留白——這是比「只信任官方年度
+    假日曆」更穩健的做法，之後遇到同類型的臨時休市日也能自動處理，不需要每次都手動
+    加清單。
+
+    TWSE假日曆①這一步是畫圖路徑上的網路依賴，抓取失敗時只退回用②(資料缺口)這個
+    來源，不會完全沒有假日清單，並回傳False提示呼叫端「官方假日清單暫時無法取得」。
     """
     if df.empty:
         return [], True
+    implied_holidays = [
+        d.strftime("%Y-%m-%d")
+        for d in pd.bdate_range(df.index.min(), df.index.max()).difference(df.index)
+    ]
     try:
-        return trading_calendar.holidays_between(df.index.min().year, df.index.max().year), True
+        official_holidays = trading_calendar.holidays_between(df.index.min().year, df.index.max().year)
+        return sorted(set(official_holidays) | set(implied_holidays)), True
     except Exception:  # noqa: BLE001 - 不應該讓TWSE暫時打不通就讓整張圖表壞掉
-        return [], False
+        return implied_holidays, False
 
 
 # 台灣證交所公告的股票升降單位（價格級距，越高價股票的最小跳動點越大）：
