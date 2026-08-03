@@ -46,12 +46,12 @@ TAIEX_DISPLAY_NAME = "台股加權指數"
 
 TAB_MARKET = "大盤"
 TAB_SCREENER = "選股"
-TAB_STOCK_DETAIL = "個股清單"
+TAB_STOCK_DETAIL = "個股資訊"
 TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL]
 
 
 def _format_month_day(date_str: str) -> str:
-    """"YYYY-MM-DD" -> "X月X日"(不補零)，供「個股清單」分頁右上角的來源標籤使用
+    """"YYYY-MM-DD" -> "X月X日"(不補零)，供「個股資訊」分頁右上角的來源標籤使用
     (跟桌面版desktop/main_window.py的同名函式對齊)。格式不符預期時原樣回傳，不拋
     例外——來源標籤只是輔助資訊，不應該因為格式問題讓整頁crash。
     """
@@ -280,7 +280,7 @@ def main() -> None:
             st.caption(f"股價更新至　{_fmt(get_latest_update_time(conn))}")
             st.caption(f"候選清單算至　{_fmt(get_latest_candidate_update_time(conn))}")
 
-    # 三個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股清單(個股查詢+K線圖+個股
+    # 三個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+個股
     # 分析)——原本候選清單跟個股圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選
     # 清單點選任一列會自動切到③並代入該股票資料。
     #
@@ -418,7 +418,7 @@ def main() -> None:
             if candidates_df.empty:
                 st.write("這一天沒有符合條件的候選股。")
             else:
-                st.caption("點選任一列會自動切換到「個股清單」分頁查看該檔股票的價格走勢")
+                st.caption("點選任一列會自動切換到「個股資訊」分頁查看該檔股票的價格走勢")
                 event = st.dataframe(
                     candidates_df, use_container_width=True, hide_index=True,
                     on_select="rerun", selection_mode="single-row", key="candidates_table",
@@ -432,8 +432,8 @@ def main() -> None:
                 )
                 if event.selection.rows:
                     selected_stock_id = str(candidates_df.iloc[event.selection.rows[0]]["stock_id"])
-                    # 記錄來源候選清單日期，供「個股清單」分頁右上角顯示「來源：X月X日的
-                    # 選股策略」；順便清掉手動查詢欄位殘留的舊文字(不然下面「個股清單」
+                    # 記錄來源候選清單日期，供「個股資訊」分頁右上角顯示「來源：X月X日的
+                    # 選股策略」；順便清掉手動查詢欄位殘留的舊文字(不然下面「個股資訊」
                     # 分頁重新渲染時，text_input帶著上次查詢的舊文字又會把這裡剛設定的
                     # stock_id蓋掉，見下面TAB_STOCK_DETAIL分支的說明)，再切到該分頁。
                     st.session_state["detail_stock_id"] = selected_stock_id

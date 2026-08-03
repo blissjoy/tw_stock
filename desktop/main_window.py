@@ -71,7 +71,7 @@ from src.screener.daily_screener import analyze_stock_signals, run_screen_and_st
 
 TAIEX_DISPLAY_NAME = "台股加權指數"
 
-# 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股清單/產業輪動/庫存清單/觀察清單。
+# 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股資訊/產業輪動/庫存清單/觀察清單。
 TAB_MARKET = 0
 TAB_SCREENER = 1
 TAB_STOCK_DETAIL = 2
@@ -110,7 +110,7 @@ _INVENTORY_TREE_LOT_COUNT_COLUMN = _INVENTORY_TREE_HEADERS.index("批次數")
 
 
 def _format_month_day(date_str: str) -> str:
-    """"YYYY-MM-DD" -> "X月X日"(不補零)，供「個股清單」分頁右上角的來源標籤使用。
+    """"YYYY-MM-DD" -> "X月X日"(不補零)，供「個股資訊」分頁右上角的來源標籤使用。
     格式不符預期時原樣回傳，不拋例外——來源標籤只是輔助資訊，不應該因為格式問題讓
     整個畫面crash。
     """
@@ -611,7 +611,7 @@ class MainWindow(QMainWindow):
 
         self._pipeline_worker: PipelineWorker | None = None
         self._current_stock_id: str | None = None
-        # 目前「個股清單」分頁顯示的股票是從候選清單哪一天的選股策略點進來的("YYYY-MM-DD"
+        # 目前「個股資訊」分頁顯示的股票是從候選清單哪一天的選股策略點進來的("YYYY-MM-DD"
         # 字串)；手動查詢時設為None，右上角的來源標籤(self.stock_source_label)就不顯示
         # (見_on_candidate_selected()/_on_search())。
         self._current_stock_source: str | None = None
@@ -651,7 +651,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # 六個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股清單(個股查詢+K線圖+
+        # 六個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+
         # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單——原本候選清單跟個股圖表擠在
         # 同一個分頁，使用者反映畫面太擁擠，拆開後候選清單點選任一列會自動切到③並代入
         # 該股票資料(見_on_candidate_selected())。①跟③都用同一套規則比對邏輯
@@ -675,9 +675,9 @@ class MainWindow(QMainWindow):
 
     def _build_screener_tab(self) -> None:
         """「選股」分頁：候選清單篩選條件+候選清單本身，不含個股圖表/分析(那些移到
-        「個股清單」分頁，見_build_stock_detail_tab())——原本候選清單跟個股圖表擠在
+        「個股資訊」分頁，見_build_stock_detail_tab())——原本候選清單跟個股圖表擠在
         同一個分頁，使用者反映畫面太擁擠，拆開後這裡可以完整顯示候選清單，不用捲很久
-        才看得到後面的圖表。點選候選清單裡任一列會自動切到「個股清單」分頁並代入該
+        才看得到後面的圖表。點選候選清單裡任一列會自動切到「個股資訊」分頁並代入該
         股票資料(見_on_candidate_selected())。
         """
         screener_scroll = QScrollArea()
@@ -802,9 +802,9 @@ class MainWindow(QMainWindow):
         self.fetch_btn = QPushButton("▶ 手動抓取今日資料")
         self.fetch_btn.setToolTip("抓取當天TWSE/TPEx資料並重新選股，較耗時(TPEx約需1小時內)，在背景執行不會卡住畫面")
         self.fetch_btn.clicked.connect(self._on_fetch_clicked)
-        # 在候選清單「內」搜尋(跟「個股清單」分頁裡的self.search_input不同——那個是不限
+        # 在候選清單「內」搜尋(跟「個股資訊」分頁裡的self.search_input不同——那個是不限
         # 候選清單、對任意股票代號/名稱做全域查詢；這個只在目前候選清單的列裡找，找到就
-        # 選取+捲動過去，順便觸發_on_candidate_selected()連帶切到「個股清單」分頁)。
+        # 選取+捲動過去，順便觸發_on_candidate_selected()連帶切到「個股資訊」分頁)。
         self.candidate_search_input = QLineEdit()
         self.candidate_search_input.setPlaceholderText("在候選清單中搜尋代號或名稱")
         self.candidate_search_input.setMaximumWidth(220)
@@ -863,7 +863,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.candidates_table, stretch=1)
 
     def _build_stock_detail_tab(self) -> None:
-        """「個股清單」分頁：個股查詢+K線圖+均線/切線/支撐壓力/MACD/KD/SAR切換+個股分析+
+        """「個股資訊」分頁：個股查詢+K線圖+均線/切線/支撐壓力/MACD/KD/SAR切換+個股分析+
         最新交易日摘要。從「選股」分頁候選清單點選任一列時會自動切換到這個分頁並代入
         該股票資料，右上角顯示「來源：X月X日的選股策略」；使用者在這個分頁自己手動
         查詢股票時則不顯示來源(見_on_candidate_selected()/_on_search())。
@@ -875,7 +875,7 @@ class MainWindow(QMainWindow):
         """
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
-        self.tabs.addTab(detail_scroll, "個股清單")
+        self.tabs.addTab(detail_scroll, "個股資訊")
 
         detail_content = QWidget()
         detail_scroll.setWidget(detail_content)
@@ -1734,7 +1734,7 @@ class MainWindow(QMainWindow):
         content()那樣的手動同步workaround。
 
         2026-08-02改版：K線圖跟大盤分析拆成內層兩個tab(見self.market_inner_tabs)，跟
-        個股清單分頁的處理方式一致(見_build_stock_detail_tab())，版面不再同時擠著圖表
+        個股資訊分頁的處理方式一致(見_build_stock_detail_tab())，版面不再同時擠著圖表
         跟一長串規則比對清單。
         """
         market_scroll = QScrollArea()
@@ -1872,7 +1872,7 @@ class MainWindow(QMainWindow):
     def showEvent(self, event) -> None:
         """視窗第一次顯示時，補打一次目前分頁(預設是分頁0「大盤」)的_on_tab_changed()，
         見__init__()裡self._startup_tab_refreshed的說明——`tabs.currentChanged`訊號
-        在建構階段(-1→ 0)不會觸發，「大盤」分頁不像「個股清單」分頁那樣，一定會經過
+        在建構階段(-1→ 0)不會觸發，「大盤」分頁不像「個股資訊」分頁那樣，一定會經過
         使用者手動切換一次才觸發刷新。用QTimer.singleShot(0, ...)延到這次show事件處理
         完之後才呼叫，確保跟手動切換分頁時一樣，viewport已經有真正的layout(不是0或
         預設值)，算出來的高度/圖表才會正確，不是這裡直接同步呼叫。
@@ -1886,7 +1886,7 @@ class MainWindow(QMainWindow):
         if index == TAB_MARKET:
             self._refresh_market_tab()
         elif index == TAB_STOCK_DETAIL:
-            # 切到「個股清單」分頁時重新整理一次(不管是不是剛從候選清單點過來)，確保
+            # 切到「個股資訊」分頁時重新整理一次(不管是不是剛從候選清單點過來)，確保
             # 圖表/分析面板都是在分頁真正顯示、有正確layout之後才計算(見_build_stock_
             # detail_tab()的說明)；_rerender_chart()本身有「沒有選取任何股票」的
             # 空狀態防呆，不會因為使用者還沒選過股票就直接切過來而出錯。
@@ -2018,7 +2018,7 @@ class MainWindow(QMainWindow):
             return
         stock_id = self.candidates_table.item(rows[0].row(), 0).text()
         self._current_stock_id = stock_id
-        # 記錄來源候選清單日期(目前分頁選取的日期)，供「個股清單」分頁右上角顯示
+        # 記錄來源候選清單日期(目前分頁選取的日期)，供「個股資訊」分頁右上角顯示
         # 「來源：X月X日的選股策略」。自動切到該分頁——切換會觸發_on_tab_changed()
         # 呼叫_rerender_chart()，這裡不用另外呼叫(也不應該在切換前就呼叫：分頁還沒
         # 顯示的話，圖表/分析面板還沒有正確的layout，見_build_stock_detail_tab()的
@@ -2209,7 +2209,7 @@ class MainWindow(QMainWindow):
         寫死的高度上限——訊號一多就會超過寫死的高度，QTextBrowser自己的垂直捲軸
         (已在建構時關閉)原本就會被塞爆，變成使用者要在這個小框框裡另外捲動一次；
         改成跟內容一樣高，多出來的部分交給最外層的QScrollArea(整個分頁)捲動，只有
-        一層捲軸，不是兩層。「個股清單」/「大盤」分頁都是plain QVBoxLayout+
+        一層捲軸，不是兩層。「個股資訊」/「大盤」分頁都是plain QVBoxLayout+
         QScrollArea(setWidgetResizable(True))，本來就能正確隨內容量調整捲軸範圍，
         不需要額外的高度同步workaround(見2026-07-29大盤分析截斷bug的除錯記錄)。
 
@@ -3047,7 +3047,7 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         self._refresh_date_list()
         self._reload_candidates()
         self._poll_pipeline_status()  # 立即刷新狀態列的「候選清單算至：...」，不等下一次5秒輪詢
-        # 只在使用者目前真的停留在「大盤」/「個股清單」分頁時才立即整理——分頁還沒被
+        # 只在使用者目前真的停留在「大盤」/「個股資訊」分頁時才立即整理——分頁還沒被
         # 切換過去顯示的話，QTextEdit/QWebEngineView還沒有真正的layout，這時候整理
         # 只會算出錯誤的高度(見_build_stock_detail_tab()/_build_market_tab()的說明)。
         # 之後切過去時_on_tab_changed()會自動重新整理，資料本來就是即時查DB，不會

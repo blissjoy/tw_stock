@@ -881,23 +881,23 @@ def test_candidate_filter_ma240_requires_ma120_in_the_chain_too():
     old_buggy_flags = compute_ma_bullish_flags(conn, ["2330"], periods=(5, 10, 20, 240))
     assert old_buggy_flags["2330"] is True  # 舊寫法會漏掉MA120，誤判為多排成立
 
-    filter_fn = chart_data.CANDIDATE_FILTERS["均線多頭排列（...>MA240）"]
+    filter_fn = chart_data.CANDIDATE_FILTERS["（...>MA240）"]
     fixed_flags = filter_fn(conn, ["2330"], None)
     assert fixed_flags["2330"] is False  # 修正後正確抓出MA120<MA240，不算完整多排
 
 
 def test_candidate_filters_includes_ma60_ma120_and_ma240_extensions():
     """2026-08-04新增：使用者發現「...>MA60」這個選項之前漏做了，補上。"""
-    assert "均線多頭排列（...>MA60）" in chart_data.CANDIDATE_FILTERS
-    assert "均線多頭排列（...>MA120）" in chart_data.CANDIDATE_FILTERS
-    assert "均線多頭排列（...>MA240）" in chart_data.CANDIDATE_FILTERS
+    assert "（...>MA60）" in chart_data.CANDIDATE_FILTERS
+    assert "（...>MA120）" in chart_data.CANDIDATE_FILTERS
+    assert "（...>MA240）" in chart_data.CANDIDATE_FILTERS
 
 
 def test_candidate_filter_defaults_only_checks_ma5_10_20_by_default():
     assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（MA5>MA10>MA20）"] is True
-    assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（...>MA60）"] is False
-    assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（...>MA120）"] is False
-    assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（...>MA240）"] is False
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["（...>MA60）"] is False
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["（...>MA120）"] is False
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["（...>MA240）"] is False
 
 
 def test_candidate_filter_ma60_extension_uses_correct_periods():
@@ -915,7 +915,7 @@ def test_candidate_filter_ma60_extension_uses_correct_periods():
     upsert_stock_prices(conn, rows)
     _populate_indicators(conn, "2330", rows)
 
-    filter_fn = chart_data.CANDIDATE_FILTERS["均線多頭排列（...>MA60）"]
+    filter_fn = chart_data.CANDIDATE_FILTERS["（...>MA60）"]
     flags = filter_fn(conn, ["2330"], rows[-1]["date"])
 
     assert flags["2330"] is True

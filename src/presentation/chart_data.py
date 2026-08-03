@@ -164,11 +164,15 @@ def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str],
 # 之後要加其他篩選條件(例如量能/型態)時，在這裡多加一組標籤/函式即可，兩個前端
 # (dashboard/app.py、desktop/main_window.py)都是迴圈讀取這個registry動態產生勾選框、
 # 不用另外改UI程式碼。
+#
+# 2026-08-04：後面三個延伸選項的標籤刻意不重複「均線多頭排列」四個字——UI上這四個
+# 勾選框排在同一列，全部都用完整的「均線多頭排列（...）」開頭視覺上很重複，第一個
+# 已經確立「均線多頭排列」這個脈絡，後面用「（...>MA60）」這種省略式接續即可。
 CANDIDATE_FILTERS: dict[str, Callable[[object, list[str], str | None], dict[str, bool]]] = {
     "均線多頭排列（MA5>MA10>MA20）": _ma_bullish_filter((5, 10, 20)),
-    "均線多頭排列（...>MA60）": _ma_bullish_filter((5, 10, 20, 60)),
-    "均線多頭排列（...>MA120）": _ma_bullish_filter((5, 10, 20, 60, 120)),
-    "均線多頭排列（...>MA240）": _ma_bullish_filter((5, 10, 20, 60, 120, 240)),
+    "（...>MA60）": _ma_bullish_filter((5, 10, 20, 60)),
+    "（...>MA120）": _ma_bullish_filter((5, 10, 20, 60, 120)),
+    "（...>MA240）": _ma_bullish_filter((5, 10, 20, 60, 120, 240)),
 }
 
 # 各篩選器預設勾選狀態：MA5>MA10>MA20是書中做多的基本地基條件，預設打勾；延伸到
@@ -176,9 +180,9 @@ CANDIDATE_FILTERS: dict[str, Callable[[object, list[str], str | None], dict[str,
 # 一開啟候選清單就發現空空如也、誤以為系統壞掉。未列在這裡的篩選標籤視為預設不勾。
 CANDIDATE_FILTER_DEFAULTS: dict[str, bool] = {
     "均線多頭排列（MA5>MA10>MA20）": True,
-    "均線多頭排列（...>MA60）": False,
-    "均線多頭排列（...>MA120）": False,
-    "均線多頭排列（...>MA240）": False,
+    "（...>MA60）": False,
+    "（...>MA120）": False,
+    "（...>MA240）": False,
 }
 
 
