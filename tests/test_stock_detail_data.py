@@ -251,6 +251,71 @@ def test_load_institutional_flow_analysis_returns_none_when_no_data():
     assert stock_detail_data.load_institutional_flow_analysis(conn, "9999") is None
 
 
+def test_institutional_periods_uses_20_day_not_30_day():
+    """2026-08-03改版：法人買賣總覽表格的天期欄位從30日改成20日。"""
+    assert stock_detail_data.INSTITUTIONAL_PERIODS["20日"] == 20
+    assert "30日" not in stock_detail_data.INSTITUTIONAL_PERIODS
+
+
+def test_load_institutional_momentum_analysis_compares_recent_vs_prior_window():
+    """10個交易日只有外資有紀錄：前5天(day1~5)每天買超100、近5天(day6~10)每天買超
+    200——5日這個天期的近5天合計應該是1000、前5天合計應該是500，兩者都是買超，
+    近期更多，判定為「買超力道增強」。資料只有10天，湊不滿20日/40日各自要求的
+    40天/80天，這兩個天期不應該出現在結果裡。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+    _seed_institutional(conn, "2330", {
+        "2026-07-01": {"Foreign_Investor": (150, 50)},
+        "2026-07-02": {"Foreign_Investor": (150, 50)},
+        "2026-07-03": {"Foreign_Investor": (150, 50)},
+        "2026-07-04": {"Foreign_Investor": (150, 50)},
+        "2026-07-05": {"Foreign_Investor": (150, 50)},
+        "2026-07-06": {"Foreign_Investor": (250, 50)},
+        "2026-07-07": {"Foreign_Investor": (250, 50)},
+        "2026-07-08": {"Foreign_Investor": (250, 50)},
+        "2026-07-09": {"Foreign_Investor": (250, 50)},
+        "2026-07-10": {"Foreign_Investor": (250, 50)},
+    })
+
+    result = stock_detail_data.load_institutional_momentum_analysis(conn, "2330")
+
+    assert result["5日"]["current"] == 1000
+    assert result["5日"]["prior"] == 500
+    assert result["5日"]["trend"] == "買超力道增強"
+    assert "20日" not in result
+    assert "40日" not in result
+
+
+def test_load_institutional_momentum_analysis_returns_none_when_insufficient_data():
+    """只有3天資料，湊不滿5日天期要求的2*5=10天完整比較區間，整個結果應該是
+    None，不是回傳空dict或用不足的天數硬湊比較。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+    _seed_institutional(conn, "2330", {
+        "2026-07-29": {"Foreign_Investor": (100, 0)},
+        "2026-07-30": {"Foreign_Investor": (100, 0)},
+        "2026-07-31": {"Foreign_Investor": (100, 0)},
+    })
+
+    assert stock_detail_data.load_institutional_momentum_analysis(conn, "2330") is None
+
+
+def test_load_institutional_momentum_analysis_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_institutional_momentum_analysis(conn, "9999") is None
+
+
+def test_classify_institutional_momentum_directions():
+    classify = stock_detail_data._classify_institutional_momentum
+    assert classify(1000, 500) == "買超力道增強"
+    assert classify(500, 1000) == "買超力道減弱"
+    assert classify(-1000, -500) == "賣壓加重"
+    assert classify(-500, -1000) == "賣壓減緩"
+    assert classify(300, -200) == "由賣轉買"
+    assert classify(-300, 200) == "由買轉賣"
+    assert classify(0, 0) == "買賣力道持平"
+
+
 def test_load_margin_maintenance_analysis_matches_book_liquidation_example():
     """陳家豐書中範例：100元買進、6成融資，股價跌到72元時維持率剛好是斷頭線120%
     (classify_margin_maintenance_state()的既有測試已經確認120%本身歸類在「警戒區」，

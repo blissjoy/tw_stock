@@ -4876,3 +4876,37 @@ K棒本身反而被壓縮在中間一小段，其餘留白都是「切線外推�
   上升段SAR點位(在K棒下方)顯示紅色，下跌翻轉段SAR點位(在K棒上方)顯示綠色，
   跟K棒/成交量/MACD的紅綠語意一致。這是`build_candlestick_figure()`共用的
   核心畫圖函式，桌面版跟Streamlit版都共用，修正對兩邊都生效。
+
+## 法人買賣總覽表格30日改20日＋新增近5/20/40日買賣力道變化分析(2026-08-03)
+
+使用者要求兩件事：①法人買賣總覽表格的天期欄位把「30日」改成「20日」；
+②在表格下方的分析文字裡，加上「累積近5日/20日/40日是變多還是變少，代表
+法人持續買進還是賣出」的判讀。
+
+- `src/presentation/stock_detail_data.py`：`INSTITUTIONAL_PERIODS`的
+  `"30日": 30`改成`"20日": 20`(位置不變，仍在"10日"跟"40日"之間)。
+- 同檔案新增`_classify_institutional_momentum(current, prior)`跟
+  `load_institutional_momentum_analysis(conn, stock_id)`：對三大法人分別
+  比較「近N天合計買賣超」跟「再往前N天合計」(N=5/20/40)，判讀出「買超力道
+  增強/減弱」「賣壓加重/減緩」「由賣轉買/由買轉賣」「買賣力道持平」。這不是
+  書中理論依據(朱家泓/陳家豐書中都沒有給「比較不同天期區間」的規則)，是
+  使用者直接指定的量化比較邏輯，程式註解跟畫面文字都刻意不掛書名，避免誤植
+  成書中規則——這跟既有的`load_institutional_flow_analysis()`「連續同方向
+  天數」判讀是互補但不同的角度，那個看方向持續多久，這個看近期力道有沒有比
+  上一個同長度區間更強。天數不足2N天(例如新上市股票)的天期不計算，不用不足
+  N天的區間硬湊比較基準。
+- `desktop/main_window.py`的`_build_institutional_flow_analysis_html()`
+  新增`momentum`參數，在既有「連續買賣超」分析文字下方加一段「📐 三大法人
+  買賣力道變化（近期比前期）」，逐一列出5日/20日/40日的近期合計、前期合計、
+  力道變化文字，用`_colored_num()`同一套紅漲綠跌配色(增強/由賣轉買→紅、
+  加重/由買轉賣→綠、其餘轉趨緩→灰)。`_build_overview_institutional_html()`
+  呼叫`load_institutional_momentum_analysis()`並傳入。
+- `tests/test_stock_detail_data.py`新增6個測試：確認`INSTITUTIONAL_PERIODS`
+  改用20日、動能比較的近期/前期合計數字正確、天數不足時個別天期跳過或整體
+  回傳None、`_classify_institutional_momentum()`各方向分類邏輯。`pytest
+  tests/ -q`845個測試全數通過。
+- 用真實DB(2330台積電)驗證：直接讀取`QTextEdit.toHtml()`確認表格欄位是
+  "20日"不是"30日"，且三大法人5日/20日/40日的近期合計數字跟表格對應欄位
+  完全一致(這是同一套`_fetch_institutional_by_date()`資料來源、只是取的
+  區間不同，數字一致代表邏輯正確)，新增的「📐 三大法人買賣力道變化」段落
+  正確顯示三種顏色的判讀文字。驗證用HTML/截圖已依慣例刪除。

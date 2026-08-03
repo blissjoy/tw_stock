@@ -2259,10 +2259,11 @@ class MainWindow(QMainWindow):
             table += "</tr>"
         table += "</table>"
         flow = stock_detail_data.load_institutional_flow_analysis(self.conn, stock_id)
-        return table + self._build_institutional_flow_analysis_html(flow)
+        momentum = stock_detail_data.load_institutional_momentum_analysis(self.conn, stock_id)
+        return table + self._build_institutional_flow_analysis_html(flow, momentum)
 
     @staticmethod
-    def _build_institutional_flow_analysis_html(flow: dict | None) -> str:
+    def _build_institutional_flow_analysis_html(flow: dict | None, momentum: dict | None = None) -> str:
         """依load_institutional_flow_analysis()的「連續買超／賣超天數」判讀結果，
         組出法人買賣總覽表格下方的分析文字。2026-08-03新增，使用者要求依朱家泓/
         陳家豐書中的理論基礎，把「連續N日買賣超」判讀成停損觀察或可能的進場訊號。
@@ -2279,60 +2280,89 @@ class MainWindow(QMainWindow):
         雖然有類似案例(例如可成2012年公司派逆勢加碼的故事)，但明確承認沒有給出
         「連續幾天／多少金額才算數」的精確門檻，程式化時勉強湊一個數字出來反而是
         過度宣稱，不在這裡呈現，只呈現書中真正給出明確天數門檻的兩條規則。
+
+        momentum是stock_detail_data.load_institutional_momentum_analysis()的
+        「近N天合計 vs 前N天合計」比較結果，2026-08-03新增：使用者要求另外呈現
+        累積近5日/20日/40日的買賣力道是變多還是變少。這段不是書中理論，是使用者
+        直接指定的量化比較邏輯，跟上面「連續同方向天數」的判讀角度不同(那個看
+        方向持續多久，這個看力道有沒有比上一個同長度區間更強)，文字裡不掛書名，
+        避免誤植成書中規則。
         """
-        if flow is None:
+        if flow is None and momentum is None:
             return ""
         lines = ['<p style="margin-top:10px;"><b>📊 法人籌碼分析</b></p>']
+        streak_lines_start = len(lines)
 
-        sanhua = flow["三大法人"]
-        if sanhua["is_sell_warning"]:
-            lines.append(
-                f'<p style="color:#27ae60;">⚠️ 三大法人已連續賣超{sanhua["streak_days"]}天，'
-                "達到停損觀察門檻（依朱家泓《抓住飆股輕鬆賺》淘汰法選股排除規則第8項："
-                "三大法人連續賣超應避開，建議留意停損／減碼）。</p>"
-            )
-        elif sanhua["is_buy_watch"]:
-            lines.append(
-                f'<p style="color:#c0392b;">三大法人已連續買超{sanhua["streak_days"]}天，'
-                "短線動能偏多，但書中沒有給「連續買超代表安全」的保證，僅供參考。</p>"
-            )
+        if flow is not None:
+            sanhua = flow["三大法人"]
+            if sanhua["is_sell_warning"]:
+                lines.append(
+                    f'<p style="color:#27ae60;">⚠️ 三大法人已連續賣超{sanhua["streak_days"]}天，'
+                    "達到停損觀察門檻（依朱家泓《抓住飆股輕鬆賺》淘汰法選股排除規則第8項："
+                    "三大法人連續賣超應避開，建議留意停損／減碼）。</p>"
+                )
+            elif sanhua["is_buy_watch"]:
+                lines.append(
+                    f'<p style="color:#c0392b;">三大法人已連續買超{sanhua["streak_days"]}天，'
+                    "短線動能偏多，但書中沒有給「連續買超代表安全」的保證，僅供參考。</p>"
+                )
 
-        invtrust = flow["投信"]
-        if invtrust["is_buy_watch"]:
-            lines.append(
-                f'<p style="color:#c0392b;">📈 投信已連續買超{invtrust["streak_days"]}天'
-                "（依陳家豐《看懂籌碼 股市賺大錢》：投信受法規限制(單一個股持股上限10%、"
-                "單日買進不得超過成交量10%)須分批布局，連續加碼3~5天且個股剛脫離下跌"
-                "整理通常是切入時機——本畫面沒有另外判斷「是否剛脫離整理區」，需自行"
-                "對照K線圖）。</p>"
-            )
-        elif invtrust["is_sell_warning"]:
-            lines.append(
-                f'<p style="color:#27ae60;">投信已連續賣超{invtrust["streak_days"]}天，'
-                "留意是否轉向保守（書中提到投信若轉向防禦型持股，代表對後市看淡）。</p>"
-            )
+            invtrust = flow["投信"]
+            if invtrust["is_buy_watch"]:
+                lines.append(
+                    f'<p style="color:#c0392b;">📈 投信已連續買超{invtrust["streak_days"]}天'
+                    "（依陳家豐《看懂籌碼 股市賺大錢》：投信受法規限制(單一個股持股上限10%、"
+                    "單日買進不得超過成交量10%)須分批布局，連續加碼3~5天且個股剛脫離下跌"
+                    "整理通常是切入時機——本畫面沒有另外判斷「是否剛脫離整理區」，需自行"
+                    "對照K線圖）。</p>"
+                )
+            elif invtrust["is_sell_warning"]:
+                lines.append(
+                    f'<p style="color:#27ae60;">投信已連續賣超{invtrust["streak_days"]}天，'
+                    "留意是否轉向保守（書中提到投信若轉向防禦型持股，代表對後市看淡）。</p>"
+                )
 
-        foreign = flow["外資"]
-        if foreign["is_buy_watch"] or foreign["is_sell_warning"]:
-            direction_text = "買超" if foreign["is_buy_watch"] else "賣超"
-            lines.append(
-                f'<p style="color:#999999;">外資已連續{direction_text}{foreign["streak_days"]}天——'
-                "⚠️ 陳家豐書中提醒：外資買賣單只有在中小型股(非權值股)才有參考價值，"
-                "權值股/大型股的外資買賣受全球布局、期貨套利、指數調整干擾，不宜直接"
-                "採信本訊號判斷多空。</p>"
-            )
+            foreign = flow["外資"]
+            if foreign["is_buy_watch"] or foreign["is_sell_warning"]:
+                direction_text = "買超" if foreign["is_buy_watch"] else "賣超"
+                lines.append(
+                    f'<p style="color:#999999;">外資已連續{direction_text}{foreign["streak_days"]}天——'
+                    "⚠️ 陳家豐書中提醒：外資買賣單只有在中小型股(非權值股)才有參考價值，"
+                    "權值股/大型股的外資買賣受全球布局、期貨套利、指數調整干擾，不宜直接"
+                    "採信本訊號判斷多空。</p>"
+                )
 
-        dealer = flow["自營商"]
-        if dealer["is_buy_watch"] or dealer["is_sell_warning"]:
-            direction_text = "買超" if dealer["is_buy_watch"] else "賣超"
-            lines.append(
-                f'<p style="color:#999999;">自營商連續{direction_text}{dealer["streak_days"]}天——'
-                "⚠️ 陳家豐書中建議「自營商首先剔除」，操作週期短、常忽買忽賣，不建議"
-                "用連續性判斷趨勢，僅供參考。</p>"
-            )
+            dealer = flow["自營商"]
+            if dealer["is_buy_watch"] or dealer["is_sell_warning"]:
+                direction_text = "買超" if dealer["is_buy_watch"] else "賣超"
+                lines.append(
+                    f'<p style="color:#999999;">自營商連續{direction_text}{dealer["streak_days"]}天——'
+                    "⚠️ 陳家豐書中建議「自營商首先剔除」，操作週期短、常忽買忽賣，不建議"
+                    "用連續性判斷趨勢，僅供參考。</p>"
+                )
 
-        if len(lines) == 1:
-            lines.append(f"<p>近期法人買賣方向尚未達連續{INSTITUTIONAL_STREAK_THRESHOLD}天門檻，暫無明顯訊號。</p>")
+            if len(lines) == streak_lines_start:
+                lines.append(f"<p>近期法人買賣方向尚未達連續{INSTITUTIONAL_STREAK_THRESHOLD}天門檻，暫無明顯訊號。</p>")
+
+        if momentum:
+            lines.append('<p style="margin-top:6px;"><b>📐 三大法人買賣力道變化（近期比前期）</b></p>')
+            trend_colors = {
+                "買超力道增強": "#c0392b",
+                "由賣轉買": "#c0392b",
+                "賣壓加重": "#27ae60",
+                "由買轉賣": "#27ae60",
+            }
+            for label, info in momentum.items():
+                current_lots = info["current"] / 1000
+                prior_lots = info["prior"] / 1000
+                trend = info["trend"]
+                color = trend_colors.get(trend, "#999999")
+                lines.append(
+                    f'<p style="color:{color};">近{label}合計買賣超{current_lots:+,.0f}張，'
+                    f"較前{label}（{prior_lots:+,.0f}張）{trend}"
+                    f'——{"持續買進" if trend in ("買超力道增強", "由賣轉買") else ("持續賣出" if trend in ("賣壓加重", "由買轉賣") else "力道趨緩，方向未明確轉變")}。</p>'
+                )
+
         return "".join(lines)
 
     def _build_overview_dealer_html(self, stock_id: str) -> str:

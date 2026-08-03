@@ -36,7 +36,7 @@ INSTITUTIONAL_GROUPS = ["外資", "投信", "自營商", "三大法人"]
 # 1年是約略的交易日數換算，不是真的日曆月，跟chart_data.py的TREND_LOOKBACK_DAYS
 # 抓法一致，都是「交易日」不是「日曆日」)。
 INSTITUTIONAL_PERIODS = {
-    "1日": 1, "2日": 2, "3日": 3, "5日": 5, "10日": 10, "30日": 30, "40日": 40,
+    "1日": 1, "2日": 2, "3日": 3, "5日": 5, "10日": 10, "20日": 20, "40日": 40,
     "3個月": 60, "6個月": 120, "1年": 240,
 }
 
@@ -170,6 +170,62 @@ def load_institutional_flow_analysis(conn, stock_id: str, lookback_days: int = 3
         group: institutional_flow.classify_flow_streak([net_by_date[d].get(group, 0) for d in dates])
         for group in INSTITUTIONAL_GROUPS
     }
+
+
+_MOMENTUM_PERIODS = (5, 20, 40)
+
+
+def _classify_institutional_momentum(current: int, prior: int) -> str:
+    """比較「近N天合計買賣超」(current)跟「再往前N天合計」(prior)，回傳力道變化
+    文字。這不是book裡的規則，是2026-08-03使用者直接指定要加的比較邏輯：跟
+    load_institutional_flow_analysis()看的「連續同方向天數」是互補但不同的角度，
+    這裡看的是「近期力道有沒有比上一個同長度區間更強/更弱」。"""
+    if current > 0 and prior > 0:
+        if current > prior:
+            return "買超力道增強"
+        if current < prior:
+            return "買超力道減弱"
+        return "買超力道持平"
+    if current < 0 and prior < 0:
+        if current < prior:
+            return "賣壓加重"
+        if current > prior:
+            return "賣壓減緩"
+        return "賣壓持平"
+    if current > 0 and prior <= 0:
+        return "由賣轉買"
+    if current < 0 and prior >= 0:
+        return "由買轉賣"
+    return "買賣力道持平"
+
+
+def load_institutional_momentum_analysis(conn, stock_id: str) -> dict[str, dict] | None:
+    """回傳三大法人在近5日/20日/40日這三個天期的「近N天合計」vs「前N天合計」比較
+    結果——{天期標籤: {"current": 近N天合計股數, "prior": 前N天合計股數,
+    "trend": 力道變化文字}}，查無資料回傳None。
+
+    2026-08-03新增：使用者要求在法人買賣總覽的分析文字裡，加上「累積近5日/20日/
+    40日是變多還是變少，代表法人持續買進還是賣出」這段判讀。要湊滿一個公平的
+    「近N天」vs「前N天」比較，需要2N天完整資料，天數不足2N天的天期就不計算
+    (不強行用不足N天的區間硬湊，避免比較基準不一致而誤導)。
+    """
+    max_days = max(_MOMENTUM_PERIODS) * 2
+    dates, net_by_date = _fetch_institutional_by_date(conn, stock_id, max_days)
+    if not dates:
+        return None
+    group = "三大法人"
+    result: dict[str, dict] = {}
+    for n in _MOMENTUM_PERIODS:
+        if len(dates) < n * 2:
+            continue
+        current = sum(net_by_date[d].get(group, 0) for d in dates[:n])
+        prior = sum(net_by_date[d].get(group, 0) for d in dates[n:n * 2])
+        result[f"{n}日"] = {
+            "current": current,
+            "prior": prior,
+            "trend": _classify_institutional_momentum(current, prior),
+        }
+    return result or None
 
 
 def _balance_streak(balances: list[float]) -> str | None:
