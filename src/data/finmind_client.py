@@ -164,6 +164,29 @@ def fetch_securities_traders() -> list[dict]:
     ]
 
 
+def fetch_holding_shares_per(stock_id: str, start_date: str, end_date: str) -> list[dict]:
+    """集保戶股權分散表(TaiwanStockHoldingSharesPer)，2026-08-04新增：黃豐凱籌碼分析法
+    (見src/indicators/huang_chip_signals.py)「大戶/散戶持股週變化」用的資料來源。
+
+    ⚠️ 這份資料集是TDCC(集保結算所)週更新(通常每週五)，不是每個交易日都有新的一筆——
+    呼叫這個函式不代表一定會拿到「今天」這個日期的資料，可能是「上次已知」的那一批，
+    見src/data/schema.sql的holder_shares_distribution說明。呼叫端不應該假設回傳資料
+    的date等於呼叫當下的日期，dedup判斷要比較「已存的最新date」跟「這次回傳的最新date」。
+    """
+    raw_rows = _get("TaiwanStockHoldingSharesPer", data_id=stock_id, start_date=start_date, end_date=end_date)
+    return [
+        {
+            "stock_id": r["stock_id"],
+            "date": r["date"],
+            "holding_shares_level": r["HoldingSharesLevel"],
+            "people": r.get("people"),
+            "unit": r.get("unit"),
+            "percent": r["percent"],
+        }
+        for r in raw_rows
+    ]
+
+
 def fetch_broker_chips(stock_id: str, date: str) -> list[dict]:
     """分點進出籌碼（單日查詢，不支援日期範圍）。需要Sponsor付費方案，免費帳號會拋出FinMindTierError。"""
     raw_rows = _get("TaiwanStockTradingDailyReport", data_id=stock_id, extra_params={"date": date})

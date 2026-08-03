@@ -20,8 +20,8 @@ from pathlib import Path
 
 import markdown
 import pandas as pd
-from PySide6.QtCore import QEvent, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTextBrowser,
     QTextEdit,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -62,11 +64,12 @@ from desktop.chart_render import render_chart_html
 from src.data import portfolio_storage, storage
 from src.data.connection import get_default_connection, get_default_portfolio_connection
 from src.data.yfinance_client import TAIEX_STOCK_ID
+from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL
 from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src import rule_docs
-from src.presentation import chart_data, pipeline_status, portfolio_data, stock_detail_data
+from src.presentation import chart_data, huang_chip_data, pipeline_status, portfolio_data, stock_detail_data
 from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
 TAIEX_DISPLAY_NAME = "台股加權指數"
@@ -92,6 +95,37 @@ CANDIDATE_SIGNAL_MAX_LINES = 5
 # 觀察清單表格共用的欄位結構(見_populate_portfolio_table())：
 # 股票代號/名稱/現價/漲跌幅(%)/成本價/持股數/市值/帳面損益/報酬率(%)/SAR狀態/SAR距離%/備註
 _PORTFOLIO_NUMERIC_COLUMNS = {2, 3, 4, 5, 6, 7, 8, 10}
+_PORTFOLIO_BASE_COLUMN_COUNT = 12
+
+# 黃豐凱籌碼分析法(見src/indicators/huang_chip_signals.py，程式碼來源private)接在
+# 觀察清單表格既有12欄之後的額外欄位——2026-08-04新增，只接進觀察清單，跟_PORTFOLIO_
+# NUMERIC_COLUMNS/_build_portfolio_table()/_populate_portfolio_table()這組庫存清單
+# 也在用的共用邏輯分開處理，不會影響庫存清單(之後真的要擴充到庫存清單，屆時再讓
+# 庫存清單的表格也接上同一組欄位，這裡的函式已經是可以直接重用的獨立單元)。J欄
+# (大量K參考)原始程式碼裡沒有邏輯(手動欄位)，不顯示。
+_HUANG_CHIP_HEADERS = [
+    "投信", "外資", "大戶週變化", "散戶週變化", "均線狀態", "週K型態",
+    "40日外資", "40日投信", "20日外資", "20日投信", "10日外資", "10日投信", "5日外資", "5日投信",
+]
+_HUANG_CHIP_NUMERIC_COLUMNS = {
+    _PORTFOLIO_BASE_COLUMN_COUNT + i
+    for i, h in enumerate(_HUANG_CHIP_HEADERS)
+    if h in ("40日外資", "40日投信", "20日外資", "20日投信", "10日外資", "10日投信", "5日外資", "5日投信")
+}
+
+# 觀察清單「欄位顯示」下拉選單(見_build_watchlist_tab())的分組定義：{顯示文字: 欄位
+# 索引清單}——「技術面」/「籌碼面」是子選單，各自底下的欄位一起顯示/隱藏；其餘幾項
+# 是扁平的單一欄位開關。「股票代號/名稱/現價/漲跌幅」是識別用欄位，永遠顯示，不放進
+# 選單；「備註」使用者要求先不用做成可切換選項，維持恆常顯示。
+_WATCHLIST_COLUMN_TOGGLE_GROUPS: dict[str, list[int]] = {
+    "參考成本價": [4],
+    "參考股數": [5],
+    "市值": [6],
+    "帳面損益": [7],
+    "報酬率": [8],
+}
+_WATCHLIST_TECH_TOGGLE_COLUMNS = [9, 10]  # SAR狀態/SAR距離%
+_WATCHLIST_CHIP_TOGGLE_COLUMNS = list(range(_PORTFOLIO_BASE_COLUMN_COUNT, _PORTFOLIO_BASE_COLUMN_COUNT + len(_HUANG_CHIP_HEADERS)))
 
 # 庫存清單改用QTreeWidget(彙總父列+可展開的批次明細子列，見_populate_inventory_
 # tree())的欄位結構——父列/子列共用同一組欄，欄位語意見_build_inventory_tab()。
@@ -739,7 +773,11 @@ class MainWindow(QMainWindow):
         self.filter_checkboxes: dict[str, QCheckBox] = {}
         for label in chart_data.CANDIDATE_FILTERS:
             cb = QCheckBox(label)
-            cb.setChecked(chart_data.CANDIDATE_FILTER_DEFAULTS.get(label, False))
+            default_checked = chart_data.CANDIDATE_FILTER_DEFAULTS.get(label, False)
+            # 2026-08-04新增：記住使用者上次的勾選狀態(QSettings)，下次開APP不用重新
+            # 勾一次——查無紀錄(第一次使用)才退回CANDIDATE_FILTER_DEFAULTS的預設值。
+            cb.setChecked(self._app_settings().value(f"screener/filter/{label}", default_checked, type=bool))
+            cb.toggled.connect(lambda checked, key=label: self._app_settings().setValue(f"screener/filter/{key}", checked))
             filter_bar.addWidget(cb)
             self.filter_checkboxes[label] = cb
         filter_bar.addStretch()
@@ -761,16 +799,27 @@ class MainWindow(QMainWindow):
         # (2026-08-03改版：跟scripts/daily_pipeline.py的LINE/Email通知共用同一份
         # 常數，避免UI初始狀態跟通知內容各自維護一份預設值、之後改一邊忘記改另一邊
         # ——這正是使用者回報「LINE通知清單跟候選清單對不齊」的根因)。
-        self.sar_flip_checkbox.setChecked(chart_data.CANDIDATE_SAR_FLIP_ENABLED_DEFAULT)
+        self.sar_flip_checkbox.setChecked(
+            self._app_settings().value("screener/sar_flip_enabled", chart_data.CANDIDATE_SAR_FLIP_ENABLED_DEFAULT, type=bool)
+        )
+        self.sar_flip_checkbox.toggled.connect(lambda checked: self._app_settings().setValue("screener/sar_flip_enabled", checked))
         method_bar.addWidget(self.sar_flip_checkbox)
         self.sar_flip_direction_combo = QComboBox()
         self.sar_flip_direction_combo.addItems(["多頭", "空頭"])
-        self.sar_flip_direction_combo.setCurrentText(chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT["direction"])
+        self.sar_flip_direction_combo.setCurrentText(
+            self._app_settings().value("screener/sar_flip_direction", chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT["direction"])
+        )
+        self.sar_flip_direction_combo.currentTextChanged.connect(
+            lambda text: self._app_settings().setValue("screener/sar_flip_direction", text)
+        )
         method_bar.addWidget(self.sar_flip_direction_combo)
         self.sar_flip_days_spin = QSpinBox()
         self.sar_flip_days_spin.setRange(1, 60)
-        self.sar_flip_days_spin.setValue(chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT["within_days"])
+        self.sar_flip_days_spin.setValue(
+            self._app_settings().value("screener/sar_flip_within_days", chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT["within_days"], type=int)
+        )
         self.sar_flip_days_spin.setSuffix(" 天內翻轉")
+        self.sar_flip_days_spin.valueChanged.connect(lambda value: self._app_settings().setValue("screener/sar_flip_within_days", value))
         method_bar.addWidget(self.sar_flip_days_spin)
 
         # 「朱家泓技術分析」勾選框：2026-08-01新增，2026-08-02改版跟其他「篩選方法」
@@ -782,7 +831,10 @@ class MainWindow(QMainWindow):
         # 規則的股票」這個原本的預設體驗。
         method_bar.addSpacing(20)
         self.zhu_rule_checkbox = QCheckBox("朱家泓技術分析")
-        self.zhu_rule_checkbox.setChecked(chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT)
+        self.zhu_rule_checkbox.setChecked(
+            self._app_settings().value("screener/zhu_rule_only", chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT, type=bool)
+        )
+        self.zhu_rule_checkbox.toggled.connect(lambda checked: self._app_settings().setValue("screener/zhu_rule_only", checked))
         self.zhu_rule_checkbox.setToolTip("勾選時只保留當天有觸發朱家泓規則的股票；取消勾選則不限制，均線/SAR等條件會對全市場掃描")
         method_bar.addWidget(self.zhu_rule_checkbox)
 
@@ -1569,15 +1621,100 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self._refresh_watchlist_tab)
         for btn in (add_btn, edit_btn, delete_btn, refresh_btn):
             toolbar.addWidget(btn)
+        # 「欄位顯示」下拉選單：2026-08-04新增，籌碼面(黃豐凱籌碼分析法D~R共14欄)
+        # 接進來後整張表變得很寬，讓使用者自己選要看哪些欄位。技術上用QToolButton+
+        # QMenu(內含checkable QAction，技術面/籌碼面用子選單)組出「下拉+樹狀勾選」
+        # 的效果——Qt沒有原生的下拉樹狀勾選元件。見_build_watchlist_column_menu()。
+        self.watchlist_column_button = QToolButton()
+        self.watchlist_column_button.setText("欄位顯示 ▾")
+        self.watchlist_column_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._build_watchlist_column_menu()
+        toolbar.addWidget(self.watchlist_column_button)
         toolbar.addStretch()
+        # 「資料更新至」：比照「大盤」分頁既有的做法(見_build_market_tab())，放在
+        # 工具列最右邊、灰色小字。
+        self.watchlist_update_label = QLabel("")
+        self.watchlist_update_label.setStyleSheet("color: #666666;")
+        toolbar.addWidget(self.watchlist_update_label)
         watchlist_layout.addLayout(toolbar)
 
         self.watchlist_table = self._build_portfolio_table(
-            ["股票代號", "名稱", "現價", "漲跌幅(%)", "參考成本價", "參考股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "備註"],
+            ["股票代號", "名稱", "現價", "漲跌幅(%)", "參考成本價", "參考股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "備註"]
+            + _HUANG_CHIP_HEADERS,
+            stretch_column="備註",
         )
         watchlist_layout.addWidget(self.watchlist_table, stretch=1)
 
+        self._restore_watchlist_column_visibility()
         self._reload_watchlist_groups()
+
+    def _app_settings(self) -> QSettings:
+        """整個桌面版共用的持久化設定(QSettings，Windows上實際存在登錄檔)——2026-08-04
+        新增，使用者要求「記錄選股/觀察清單的勾選動作，這樣比較便利」，不用每次重開
+        APP都要重新勾一次篩選條件/欄位顯示。目前只有這兩個地方在用，不需要另外包一層
+        單例快取，QSettings本身建構成本很低。
+        """
+        return QSettings("tw_stock", "desktop")
+
+    def _build_watchlist_column_menu(self) -> None:
+        """組出「欄位顯示」下拉選單：Qt沒有原生的「下拉+樹狀勾選」元件，這裡用
+        QToolButton+QMenu(內含checkable QAction，技術面/籌碼面用子選單QMenu.addMenu())
+        組出同樣的效果。「全部顯示」是一般(非checkable)action，點一下把其餘所有
+        checkable action都設成勾選；「股票代號/名稱/現價/漲跌幅」是識別用欄位，
+        不放進選單、永遠顯示；「備註」使用者要求先不用做成可切換選項，也不放進來。
+
+        每個checkable action的toggled訊號都接到_on_watchlist_column_toggled()，
+        依欄位索引清單顯示/隱藏對應的QTableWidget欄位，並把狀態存進QSettings，供
+        _restore_watchlist_column_visibility()下次開啟APP時還原。
+        """
+        menu = QMenu(self.watchlist_column_button)
+        self._watchlist_column_actions: dict[str, tuple[object, list[int]]] = {}
+
+        show_all_action = menu.addAction("全部顯示")
+        show_all_action.triggered.connect(self._on_watchlist_show_all_columns)
+        menu.addSeparator()
+
+        for label, cols in _WATCHLIST_COLUMN_TOGGLE_GROUPS.items():
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.toggled.connect(lambda checked, key=label, c=cols: self._on_watchlist_column_toggled(key, c, checked))
+            self._watchlist_column_actions[label] = (action, cols)
+
+        tech_menu = menu.addMenu("技術面")
+        tech_action = tech_menu.addAction("SAR狀態／SAR距離%")
+        tech_action.setCheckable(True)
+        tech_action.setChecked(True)
+        tech_action.toggled.connect(
+            lambda checked: self._on_watchlist_column_toggled("技術面", _WATCHLIST_TECH_TOGGLE_COLUMNS, checked)
+        )
+        self._watchlist_column_actions["技術面"] = (tech_action, _WATCHLIST_TECH_TOGGLE_COLUMNS)
+
+        chip_menu = menu.addMenu("籌碼面")
+        chip_action = chip_menu.addAction("投信/外資/大戶/散戶/均線/週K/買賣超張數")
+        chip_action.setCheckable(True)
+        chip_action.setChecked(True)
+        chip_action.toggled.connect(
+            lambda checked: self._on_watchlist_column_toggled("籌碼面", _WATCHLIST_CHIP_TOGGLE_COLUMNS, checked)
+        )
+        self._watchlist_column_actions["籌碼面"] = (chip_action, _WATCHLIST_CHIP_TOGGLE_COLUMNS)
+
+        self.watchlist_column_button.setMenu(menu)
+
+    def _on_watchlist_show_all_columns(self) -> None:
+        for action, _cols in self._watchlist_column_actions.values():
+            action.setChecked(True)
+
+    def _on_watchlist_column_toggled(self, group_key: str, columns: list[int], checked: bool) -> None:
+        for col in columns:
+            self.watchlist_table.setColumnHidden(col, not checked)
+        self._app_settings().setValue(f"watchlist/column_visible/{group_key}", checked)
+
+    def _restore_watchlist_column_visibility(self) -> None:
+        settings = self._app_settings()
+        for group_key, (action, _cols) in self._watchlist_column_actions.items():
+            checked = settings.value(f"watchlist/column_visible/{group_key}", True, type=bool)
+            action.setChecked(checked)  # 觸發toggled，連帶套用setColumnHidden()
 
     def _reload_watchlist_groups(self) -> None:
         """重新整理群組下拉選單，找不到任何群組時自動建立一個「預設觀察清單」
@@ -1611,9 +1748,68 @@ class MainWindow(QMainWindow):
             return
         df = portfolio_data.load_watchlist(self.conn, self.portfolio_conn, group_id)
         self._populate_portfolio_table(self.watchlist_table, df)
+        self._populate_huang_chip_columns(self.watchlist_table, df)
         self.watchlist_summary_label.setText(
             self._portfolio_summary_text(df, "總參考成本", "總觀察市值", "累積預估損益"),
         )
+        self.watchlist_update_label.setText(
+            f"資料更新至：{self._format_update_timestamp(chart_data.get_latest_update_time(self.conn))}"
+        )
+
+    def _set_chip_text_item(self, table: QTableWidget, row_idx: int, col: int, label: dict | None) -> None:
+        """label是{"text","color"}字典(或None)——黃豐凱籌碼分析法的判讀函式共用格式，
+        見src/indicators/huang_chip_signals.py。text為空字串或label本身是None都顯示
+        「-」，跟表格其餘欄位「查無資料顯示-」的既有慣例一致。"""
+        text = label["text"] if label and label.get("text") else "-"
+        item = QTableWidgetItem(text)
+        if label and label.get("text"):
+            item.setForeground(QColor(label["color"]))
+        table.setItem(row_idx, col, item)
+
+    def _populate_huang_chip_columns(self, table: QTableWidget, df: pd.DataFrame) -> None:
+        """觀察清單表格既有12欄之後，接上黃豐凱籌碼分析法的D~R欄位(不含手動的J欄，
+        見src/presentation/huang_chip_data.py)。跟_populate_portfolio_table()(庫存
+        清單也在共用)分開處理，只影響觀察清單，不會動到庫存清單。逐股查詢本地DB
+        (觀察清單股票數量少，成本可忽略，不需要背景執行緒)。
+        """
+        if self.conn is None:
+            return
+        base = _PORTFOLIO_BASE_COLUMN_COUNT
+        flow_keys = [
+            "foreign_40d", "invest_40d", "foreign_20d", "invest_20d",
+            "foreign_10d", "invest_10d", "foreign_5d", "invest_5d",
+        ]
+        table.setSortingEnabled(False)
+        for row_idx, stock_id in enumerate(df["stock_id"]):
+            chip_row = huang_chip_data.load_huang_chip_row(self.conn, stock_id)
+
+            self._set_chip_text_item(table, row_idx, base + 0, chip_row["invest_streak"])
+            self._set_chip_text_item(table, row_idx, base + 1, chip_row["foreign_streak"])
+            holder = chip_row["holder_change"]
+            self._set_chip_text_item(table, row_idx, base + 2, holder["whale"] if holder else None)
+            self._set_chip_text_item(table, row_idx, base + 3, holder["retail"] if holder else None)
+
+            ma = chip_row["ma_price_position"]
+            ma_text = "\n".join(line["text"] for line in ma["lines"]) if ma else "-"
+            table.setItem(row_idx, base + 4, QTableWidgetItem(ma_text))
+
+            weekly = chip_row["weekly_volume_pattern"]
+            weekly_text = f"{weekly['pattern']}\n（{weekly['reference_week_start']}）" if weekly else "-"
+            table.setItem(row_idx, base + 5, QTableWidgetItem(weekly_text))
+
+            flow = chip_row["flow"]
+            for i, key in enumerate(flow_keys):
+                col = base + 6 + i
+                if flow is None:
+                    item = _NumericTableWidgetItem("-")
+                else:
+                    value = flow[key]
+                    item = _NumericTableWidgetItem(f"{value:,}")
+                    item.setForeground(QColor(COLOR_BUY if value >= 0 else COLOR_SELL))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_idx, col, item)
+        table.setSortingEnabled(True)
+        table.resizeRowsToContents()
 
     def _on_watchlist_add_group(self) -> None:
         if self.portfolio_conn is None:

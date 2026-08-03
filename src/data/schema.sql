@@ -172,3 +172,28 @@ CREATE TABLE IF NOT EXISTS daily_indicators (
     PRIMARY KEY (stock_id, date)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_indicators_date ON daily_indicators(date);
+
+-- 集保戶股權分散表(FinMind TaiwanStockHoldingSharesPer)，2026-08-04新增：黃豐凱籌碼
+-- 分析法(見src/indicators/huang_chip_signals.py，程式碼來源private)「大戶/散戶持股
+-- 週變化」需要的資料，本專案目前唯一一張「非日更新」的事實表。
+--
+-- ⚠️ TDCC(集保結算所)通常每週五才公布新一批資料，其餘平日呼叫FinMind只會拿到同一批
+-- 「上次已知」的資料，不是每個交易日都有新的一筆——跟stock_prices/institutional_
+-- investors「每個交易日一定有一筆」的既有假設不同。查詢/判斷「有沒有新資料」時，
+-- 要比較「這檔股票DB裡已存的最新一筆date」跟「API這次回傳的最新date」是否相同，
+-- 不能用「今天日期」當比對基準(API幾乎不會剛好回傳"今天"這個日期，用今天日期比對
+-- 會讓dedup判斷永遠失效)。
+--
+-- 存原始逐級距資料(不是只存大戶/散戶兩個算好的百分比)，跟本專案「均線存原始數值不是
+-- 布林旗標」同一個理由——之後如果需要別的級距組合，不用回頭重新設計schema。
+CREATE TABLE IF NOT EXISTS holder_shares_distribution (
+    stock_id                TEXT NOT NULL REFERENCES stocks(stock_id),
+    date                    TEXT NOT NULL,
+    holding_shares_level    TEXT NOT NULL,  -- FinMind HoldingSharesLevel原始值，例如"1-999"、"more than 1,000,001"
+    people                  INTEGER,
+    unit                    INTEGER,
+    percent                 REAL NOT NULL,
+    updated_at              TEXT NOT NULL,
+    PRIMARY KEY (stock_id, date, holding_shares_level)
+);
+CREATE INDEX IF NOT EXISTS idx_holder_shares_distribution_date ON holder_shares_distribution(date);

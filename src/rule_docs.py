@@ -10,6 +10,15 @@
 2026-08-04新增`ai/chen-rules/`：兩份規則庫的檔案格式完全相同(都是`- **欄位**: 值`這種
 結構)，用同一套解析器掃過兩個目錄即可，不需要另外寫解析邏輯，只是`RULE_DOC_DIRS`從
 單一目錄變成清單。
+
+2026-08-04再新增`ai/huang-rules/`(黃豐凱籌碼分析法，程式碼來源private，非書籍)：
+欄位結構比照zhu-rules/chen-rules，但沒有書可以引用，「原文與頁碼」欄位換成「程式碼
+來源」(填private，不附檔名/連結)，「信心」欄位也填private(沒有backtest佐證這套邏輯
+的實戰有效性，不比照zhu/chen那套「書中講得多明確」的評分基礎)。呼叫端(`load_rule_
+doc()`/`parse_confidence()`)用`.get()`取值，這兩個欄位缺「原文與頁碼」/信心不是
+"NN/100"格式時自然回傳None，不會crash，不需要為了這組規則另外改解析邏輯。這組規則
+目前只是文件化(供之後追蹤來源用)，沒有接進`daily_screener.py`/`rule_scan.py`的規則
+比對清單。
 """
 
 from __future__ import annotations
@@ -21,6 +30,7 @@ from pathlib import Path
 RULE_DOC_DIRS = [
     Path(__file__).resolve().parent.parent / "ai" / "zhu-rules",
     Path(__file__).resolve().parent.parent / "ai" / "chen-rules",
+    Path(__file__).resolve().parent.parent / "ai" / "huang-rules",
 ]
 
 # 「原文與頁碼」欄位文字裡引用的書籍筆記檔案存放位置——2026-08-04新增，供resolve_

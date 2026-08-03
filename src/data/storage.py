@@ -247,6 +247,25 @@ def upsert_daily_indicators(conn: sqlite3.Connection, rows: list[dict]) -> None:
     conn.commit()
 
 
+def upsert_holder_shares_distribution(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """rows的每個dict需含 stock_id/date/holding_shares_level/people/unit/percent/
+    updated_at，見schema.sql的holder_shares_distribution說明。來源見
+    src/data/finmind_client.py的fetch_holding_shares_per()。"""
+    conn.executemany(
+        """
+        INSERT INTO holder_shares_distribution
+            (stock_id, date, holding_shares_level, people, unit, percent, updated_at)
+        VALUES
+            (:stock_id, :date, :holding_shares_level, :people, :unit, :percent, :updated_at)
+        ON CONFLICT(stock_id, date, holding_shares_level) DO UPDATE SET
+            people = excluded.people, unit = excluded.unit, percent = excluded.percent,
+            updated_at = excluded.updated_at
+        """,
+        rows,
+    )
+    conn.commit()
+
+
 def get_daily_data_status(conn: sqlite3.Connection, iso_date: str) -> bool | None:
     """回傳指定日期是否為盤中即時價(True)/官方收盤價(False)；查無紀錄回傳None(例如這個
     功能上線前就存在的歷史資料，一律不特別標示，視為已收盤)。"""

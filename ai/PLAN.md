@@ -5551,3 +5551,103 @@ MA200，不要沿用本專案自己的MA240——理由是`d:\tw_stock_analyzer`
   篩選勾選框標籤正確顯示為「均線多頭排列（MA5>MA10>MA20）」「（...>MA60）」
   「（...>MA120）」「（...>MA240）」，分頁列正確顯示「個股資訊」(不是
   「個股清單」)。驗證截圖已從scratchpad清除。
+
+## 黃豐凱籌碼分析法複刻(觀察清單用，D~R欄位)(2026-08-04)
+
+使用者朋友提供一套「黃豐凱籌碼分析法」的Google Apps Script程式碼(程式碼來源
+private，非書籍/公開出處)，原本是Google Sheet「籌碼追蹤」表的自動更新腳本，
+使用者要求先在觀察清單顯示、以後可能擴充到庫存清單／個股資訊，並要求「完全獨立
+出來、跟原code一模一樣、不可漏掉任何一個邏輯」。
+
+拆解原始程式碼後的欄位對照：D/E(投信/外資連續買賣超狀態)、K~R(法人買賣超
+40/20/10/5日張數)可以完全用本專案既有的`institutional_investors`表算，不需要
+呼叫任何API；H(均線狀態)、I(週K型態/大量K判斷)可以用既有的`stock_prices`/
+`daily_indicators`算；只有F/G(大戶/散戶持股週變化)需要新的資料源——FinMind的
+`TaiwanStockHoldingSharesPer`(集保戶股權分散表，週更新)，這是本專案第一張「非
+每日更新」的事實表。J欄(大量K參考)原始程式碼裡完全沒有邏輯(comment明講是「手動」
+欄位)，不複刻。
+
+使用者明確要求三處先跟原code一模一樣、日後驗證通過再回頭詢問是否修正：
+1. 外資只算FinMind的`Foreign_Investor`，不併入`Foreign_Dealer_Self`(跟本專案
+   「個股明細」既有的三大法人併計口徑不同)。
+2. 大量K的52週判斷用「原始資料抓370曆日、分組後取前52組」，不是精確52個完整
+   週K(來源本人也確認這是原程式碼既有的落差)。
+3. 均線狀態改用本專案`daily_indicators`已經算好的MA20/MA60(今天vs前一交易日
+   比較)，數學上等價於原程式碼從K線重新計算，但避開了原程式碼在資料筆數剛好
+   卡在60天邊界時「昨天的MA60其實少算一天」的小瑕疵。
+
+- `src/data/schema.sql`：新增`holder_shares_distribution`表(stock_id/date/
+  holding_shares_level/people/unit/percent/updated_at)，存原始逐級距資料，
+  不是只存算好的大戶/散戶百分比。`src/data/storage.py`新增`upsert_holder_
+  shares_distribution()`。
+- `src/data/finmind_client.py`新增`fetch_holding_shares_per()`，docstring
+  特別註記這份資料週更新、不能假設回傳資料的date等於呼叫當下日期。
+- 新模組`src/indicators/huang_chip_signals.py`：5個純函式，逐一對應原程式碼
+  的5個判斷區塊(`classify_institutional_streak`／`sum_institutional_flow_
+  lots`／`classify_ma_price_position`／`classify_weekly_volume_pattern`／
+  `classify_holder_change`)。特別處理了JS的`Math.round()`跟Python內建
+  `round()`在.5邊界的行為差異(JS永遠無條件進位到正無窮方向，Python是round-
+  half-to-even)，自訂`_js_round()`維持逐位元一致。`tests/test_huang_chip_
+  signals.py`新增29個測試，覆蓋原程式碼每一個分支(連續天數狀態機的N/M兩段、
+  持平/方向未定、資料不足的寬容加總行為、週K大量型態4種分類、大戶/散戶顏色
+  相反的門檻分級等)。
+- 新查詢層`src/presentation/huang_chip_data.py`：把上面的純函式接上本地DB，
+  D/E/H/I/K~R完全不呼叫任何API。`tests/test_huang_chip_data.py`新增12個測試。
+- 驗證：先用單元測試(合成資料)確認邏輯完整覆蓋，接著才對`temp/鉸哥籌碼.jpg`
+  截圖裡的7檔股票(3189/3037/4958/8046/6488/3532/6182)做真實資料驗證，全程
+  遵守使用者「邏輯沒寫完前不要隨便呼叫API」的要求：
+  - D/E/H/I/K~R先用本地既有資料驗證，一開始以「今天」(2026-08-03)為準算出
+    的結果跟截圖對不太起來(3189甚至方向相反)，直接呼叫FinMind重新查詢確認
+    我們本地資料庫的數字跟FinMind「當下」的數字一致(不是本地資料有問題)。
+    使用者推測截圖是前一晚(8/2)20:00後產出的快照，改用`as_of_date=2026-
+    08-02`重算後，3189/8046兩檔的D/E狀態文字、5/10/20日K~R數字逐位元完全
+    吻合(40日仍有小差距，應是回看窗口邊界效應；6182用8/2跟8/3算出來的數字
+    完全相同，研判是該股當天剛好沒有新資料更新)，證實邏輯移植正確，落差
+    純粹是法人資料本身會隨時間被修正、靜態截圖無法逐位元即時比對的特性。
+  - F/G為此才第一次呼叫`fetch_holding_shares_per()`(僅針對這7檔股票，寫入
+    `holder_shares_distribution`)：7檔全部大戶/散戶文字跟百分比都完全吻合
+    截圖，一字不差。
+  - `pytest tests/ -q`925個測試全數通過。
+- `ai/huang-rules/籌碼面/`新增5個規則文件(R-HUANG-01~05)，比照zhu-rules/
+  chen-rules的欄位格式，但「原文與頁碼」換成「程式碼來源」(填private，不附
+  檔名)、「信心」也填private(沒有backtest佐證，評分基礎跟書籍規則不同)。
+  `src/rule_docs.py`的`RULE_DOC_DIRS`新增這個目錄，`load_rule_doc()`/
+  `parse_confidence()`不需要改解析邏輯(用`.get()`取值，缺欄位/非"NN/100"
+  格式自然回傳None)。`tests/test_rule_docs.py`新增2個測試。
+- 這組規則目前**沒有**接進`daily_screener.py`/`rule_scan.py`的規則比對清單
+  (使用者要求「完全獨立出來」)，`ai/huang-rules/`純粹是文件化紀錄，之後
+  如果從這些原始資料定義出具體的門檻式規則，才會考慮接進「個股分析」的
+  籌碼面清單。
+- 尚未完成：觀察清單UI顯示(欄位顯示下拉選單、QSettings記憶勾選狀態、
+  「資料更新至」標籤)、庫存清單/個股資訊擴充——這些留待下一階段。
+
+## 觀察清單接上黃豐凱籌碼分析法UI＋欄位顯示下拉選單＋記住勾選狀態(2026-08-04)
+
+延續上一則：資料層/驗證都做完後，使用者發現重開桌面版沒看到畫面有變化——才
+發現我只完成了資料層，UI(觀察清單分頁實際顯示D~R欄位)還沒動工，這裡補上。
+
+- `desktop/main_window.py`：觀察清單表格既有12欄後面接上14欄(`_HUANG_CHIP_
+  HEADERS`：投信/外資/大戶週變化/散戶週變化/均線狀態/週K型態/40~5日外資投信
+  買賣超張數)，新增`_populate_huang_chip_columns()`逐股查`huang_chip_data.
+  load_huang_chip_row()`填值——刻意跟`_populate_portfolio_table()`(庫存清單
+  也在共用)分開處理，只影響觀察清單，不動庫存清單。投信/外資/大戶/散戶用單一
+  顏色文字，均線狀態/週K型態是多行純文字(沒有做到JS原本的逐行顏色，先求「能
+  看」，之後有需要再加rich text)，K~R數字依正負著色+千分位。
+- 「欄位顯示」下拉選單：Qt沒有原生的「下拉+樹狀勾選」元件，用`QToolButton`+
+  `QMenu`(內含checkable QAction，技術面/籌碼面用`QMenu.addMenu()`子選單)組出
+  同樣效果——「全部顯示」/參考成本價/參考股數/市值/帳面損益/報酬率是扁平選項，
+  技術面(SAR狀態+SAR距離%)、籌碼面(D~R全部14欄一起)是兩個子選單，籌碼面比照
+  使用者要求當一個大開關、不細分。
+- 記住勾選狀態：新增`_app_settings()`回傳共用的`QSettings("tw_stock",
+  "desktop")`，觀察清單的欄位顯示勾選、選股分頁的篩選條件/SAR翻轉/朱家泓技術
+  分析勾選狀態，都存進去，下次開APP時還原，不用每次重新勾一次。
+- 「資料更新至」：比照「大盤」分頁既有的做法搬過來，放在觀察清單工具列最右邊。
+- 過程中用真實視窗截圖驗證時，發現一個浮點數顯示bug：6182的收盤價88.1從SQLite
+  REAL欄位讀回來變成88.0999984741211(浮點數表示誤差)，`_format_price_like_js()`
+  原本直接`str()`會把這個誤差原樣顯示成「P(88.0999984741211)」——修正成先四捨
+  五入到小數點後2位(TWSE股價實際最多到2位)再格式化，新增對應測試。
+- `pytest tests/ -q`926個測試全數通過(新增1個浮點數顯示的迴歸測試)。用PySide6
+  實際視窗截圖驗證：把截圖裡7檔股票加進「預設觀察清單」群組，確認D~R欄位正確
+  顯示、顏色正確(投信/外資紅綠、大戶/散戶紅綠相反、K~R數字正負著色)、「欄位
+  顯示」下拉選單的「籌碼面」子選單勾選/取消勾選能正確一次隱藏/顯示全部14欄、
+  「資料更新至」正確顯示股價資料時間。驗證截圖已從scratchpad清除。

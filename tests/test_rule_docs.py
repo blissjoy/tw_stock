@@ -31,6 +31,25 @@ def test_parse_confidence_returns_none_for_unknown_rule_id():
     assert parse_confidence("R-DOES-NOT-EXIST-99") is None
 
 
+def test_load_rule_doc_finds_huang_rules_directory():
+    """2026-08-04新增ai/huang-rules/(黃豐凱籌碼分析法，程式碼來源private，共5條
+    R-HUANG-01~05)——索引器要能同時認得zhu-rules/chen-rules/huang-rules三個目錄。
+    這組規則的「原文與頁碼」欄位換成「程式碼來源」，且信心/程式碼來源都填private
+    (沒有書可引用、也沒有backtest佐證)，不是"NN/100"格式。"""
+    doc = load_rule_doc("R-HUANG-01")
+    assert doc is not None
+    assert doc["名稱"] == "投信外資連續買賣超狀態判讀"
+    assert doc["程式碼來源"] == "private"
+    assert doc["信心"] == "private"
+    assert "原文與頁碼" not in doc
+
+
+def test_parse_confidence_returns_none_for_huang_rules_private_confidence():
+    """huang-rules的信心欄位是"private"字面字串，不是"NN/100"格式，parse_confidence()
+    應該回傳None，不是誤解析出一個數字或crash。"""
+    assert parse_confidence("R-HUANG-01") is None
+
+
 def test_resolve_reference_files_extracts_single_filename(monkeypatch, tmp_path):
     (tmp_path / "P03-C5-不同K線組合的意義.md").write_text("# 測試", encoding="utf-8")
     monkeypatch.setattr(rule_docs, "EBOOK_SUMMARY_DIRS", [tmp_path])
