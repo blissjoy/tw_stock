@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 import src.presentation.chart_data as chart_data
 from src.data.storage import init_db, upsert_daily_candidates, upsert_daily_indicators, upsert_stock_prices, upsert_stocks
@@ -870,6 +871,66 @@ def test_build_candlestick_figure_price_yaxis_dtick_reflects_tick_size():
 
     expected_dtick = chart_data._price_axis_dtick(df)
     assert fig.layout.yaxis.dtick == expected_dtick
+
+
+def test_price_axis_range_matches_high_low_with_padding():
+    dates = pd.date_range("2026-01-01", periods=3)
+    df = pd.DataFrame(
+        {"open": [150] * 3, "high": [201.0, 190, 195], "low": [122.5, 140, 135], "close": [150] * 3, "volume": [1000] * 3},
+        index=dates,
+    )
+
+    low, high = chart_data._price_axis_range(df)
+
+    span = 201.0 - 122.5
+    assert low == pytest.approx(122.5 - span * 0.05)
+    assert high == pytest.approx(201.0 + span * 0.05)
+
+
+def test_price_axis_range_handles_flat_price_without_crashing():
+    """最高最低價剛好相同(例如漲跌停鎖死一整天)時，span=0不能拿來當除數/比例基準，
+    要退回用價位本身的比例當padding，不能回傳一個上下限相等的range(Plotly會顯示
+    一條沒有高度的軸)。"""
+    dates = pd.date_range("2026-01-01", periods=2)
+    df = pd.DataFrame({"open": [100] * 2, "high": [100, 100], "low": [100, 100], "close": [100] * 2, "volume": [1000] * 2}, index=dates)
+
+    low, high = chart_data._price_axis_range(df)
+
+    assert low < 100 < high
+
+
+def test_build_candlestick_figure_price_yaxis_range_not_distorted_by_extreme_trendline():
+    """2026-08-04修正「K線圖縮成一小條」bug：使用者回報3231(緯創)的K線被壓縮在畫面
+    中間一小段——查證是下降切線/軌道線外推到最新一天時算出負值(-2.6)，遠低於K棒
+    實際價格範圍(122.5~201.0)，Plotly預設的Y軸autorange把這個離譜的外推值也算
+    進去，才會把K棒本身擠成一小段。這裡直接用同樣的數字重現：K棒價格範圍窄，但
+    疊圖的下降切線在圖表最後一天算出遠低於K棒範圍的負值，驗證修正後Y軸range
+    只反映K棒本身，不會被切線的極端外推值拉開。
+    """
+    from src.indicators.trendlines import LinePoint, TrendLine
+
+    dates = pd.date_range("2026-01-01", periods=10)
+    df = pd.DataFrame(
+        {
+            "open": [150.0] * 10, "high": [201.0] + [190.0] * 9, "low": [122.5] + [135.0] * 9,
+            "close": [150.0] * 10, "volume": [1000] * 10,
+        },
+        index=dates,
+    )
+    # 陡峭下降線：從高點(0, 200)到(1, 150)，斜率-50，外推到x=9時已經跌到-200
+    steep_down_line = TrendLine(a=LinePoint(x=0, y=200.0), b=LinePoint(x=1, y=150.0), role="resistance")
+
+    fig = build_candlestick_figure(
+        df, trendlines={"down_tangent": steep_down_line}, show_trendline_keys=("down_tangent",),
+    )
+
+    yaxis_range = fig.layout.yaxis.range
+    # Y軸下限應該貼近K棒實際最低價(122.5)附近，不是被外推到負值的切線拉到-200這種
+    # 離譜範圍——用一個寬鬆但足以偵測bug重現的門檻(K棒最低價再往下50元都不合理)。
+    assert yaxis_range[0] > 122.5 - 50
+    # 切線本身還是要有畫出來(只是Y軸不會為了它而失真)，確認trace確實包含很低的y值
+    trendline_trace = next(t for t in fig.data if t.name == "下降切線")
+    assert min(trendline_trace.y) < 0
 
 
 def test_build_candlestick_figure_uses_ohlc_and_is_not_a_line_chart():

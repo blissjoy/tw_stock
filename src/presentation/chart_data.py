@@ -738,6 +738,35 @@ def _twse_tick_size(price: float) -> float:
     return _TWSE_TICK_SIZE_TIERS[-1][1]
 
 
+def _price_axis_range(df: pd.DataFrame, padding_ratio: float = 0.05) -> tuple[float, float]:
+    """算出價格Y軸應該顯示的(下限, 上限)，只根據K棒本身的高低價決定，不受切線/軌道線/
+    支撐壓力這類疊圖trace影響。
+
+    ⚠️ 2026-08-04修正「K線圖縮成一小條」bug：使用者回報3231(緯創)的K線圖被壓縮在
+    畫面中間一小段，上下留了大片空白。查證發現Plotly預設的Y軸autorange是「畫面上
+    所有trace的y值範圍聯集」，不是只看K棒——切線/軌道線(`chart_overlays.
+    trendline_to_xy()`)刻意延伸畫到資料最後一天(見該函式docstring)，如果原本取點
+    的兩個轉折點時間點很近、價差卻不小，算出來的斜率延伸一大段K棒後會遠遠超出
+    合理價格範圍(3231這個案例：K棒實際價格122.5~201.0，但下降切線/軌道線外推到
+    最新一天時已經跌到21.6、甚至負數-2.6)，這幾個離譜的極端值把Y軸硬拉開一大截，
+    K棒本身反而被壓縮在中間一小段。
+
+    改成明確指定Y軸range(不依賴Plotly autorange)，只用K棒高低價(+`padding_ratio`
+    留白，預設5%)決定範圍——切線/軌道線超出這個範圍的部分還是會畫出來，只是被
+    裁掉看不到超出範圍那一段(這才是正確行為：那些超出K棒實際成交價很遠的延伸段，
+    本來就不是「股價可能到達的地方」，是切線公式外推的產物，不需要為了它們犧牲
+    K棒本身的可讀性)。
+    """
+    low = float(df["low"].min())
+    high = float(df["high"].max())
+    span = high - low
+    if span <= 0:
+        padding = high * padding_ratio if high else 1.0
+        return low - padding, high + padding
+    padding = span * padding_ratio
+    return low - padding, high + padding
+
+
 def _price_axis_dtick(df: pd.DataFrame, target_gridlines: int = 10) -> float:
     """算出價格Y軸的格線間距：取該股票實際升降單位的整數倍，讓格線都落在真正可能成交的
     價位上，不是像Plotly預設那樣依數值大小自動抓一個跟股票本身無關的間距(例如2330股價在
@@ -945,7 +974,7 @@ def build_candlestick_figure(
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
         annotations=annotations,
     )
-    fig.update_yaxes(title_text="價格", dtick=_price_axis_dtick(df), row=1, col=1)
+    fig.update_yaxes(title_text="價格", dtick=_price_axis_dtick(df), range=_price_axis_range(df), row=1, col=1)
     fig.update_yaxes(title_text="成交量", row=2, col=1)
     if macd_row is not None:
         fig.update_yaxes(title_text="MACD", row=macd_row, col=1)
