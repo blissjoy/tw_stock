@@ -2225,14 +2225,22 @@ class MainWindow(QMainWindow):
         view.setFixedHeight(int(doc_height) + frame_width + 8)
 
     @staticmethod
-    def _render_rule_match_blocks(matches: list[dict]) -> str:
+    def _render_rule_match_blocks(matches: list[dict], note_anchor_map: dict[str, str] | None = None) -> str:
         """把analyze_stock_signals()/stock_detail_data.analyze_chip_signals()回傳
         的規則清單逐條組成HTML——技術面／籌碼面共用同一套渲染邏輯，2026-08-04從
         原本的_build_analysis_html()抽出來，避免兩邊各維護一份幾乎一樣的程式碼。
+
+        note_anchor_map：{筆記檔名: 附錄裡的HTML錨點id}，只有「產出報表」呼叫時
+        才會傳入(見_build_report_html())——「個股分析」即時畫面裡的「原文與頁碼」
+        是`ruledoc:///`連結，點擊後開新視窗讀筆記(見_on_reference_link_clicked())，
+        但報表匯出成PDF後沒有「新視窗」可開，改成跳到報表自己附錄章節的PDF內部
+        錨點連結(`_format_reference_html_as_anchors()`)。每個規則block本身也加上
+        `id="cite-{rule_id}"`，供附錄裡「回引用處」連結回跳，不管是哪種模式都加，
+        沒有note_anchor_map時這個id單純不會被用到，不影響原有行為。
         """
         blocks = []
         for m in matches:
-            block = f"<p><b>{html.escape(m['rule_id'])}　{html.escape(m['title'])}（信心{m['confidence']}%）</b><br>"
+            block = f"<p id=\"cite-{html.escape(m['rule_id'])}\"><b>{html.escape(m['rule_id'])}　{html.escape(m['title'])}（信心{m['confidence']}%）</b><br>"
             # 「目前狀態」(這條規則今天為什麼觸發)排在規則名稱後第一個位置，跟dashboard/
             # app.py對齊——使用者最想先看到的是「現在是什麼情況」，解讀/原文頁碼是補充
             # 說明。同一個rule_id若對應多筆觸發，note會是用換行接起來的多行文字，這裡
@@ -2247,10 +2255,38 @@ class MainWindow(QMainWindow):
                 # 跟上面的「目前狀態：」分開標籤，不是延續文字。
                 block += f"分析：{html.escape(m['description'])}<br>"
             if m.get("reference"):
-                block += f"<i>原文與頁碼：{MainWindow._format_reference_html(m['reference'])}</i>"
+                if note_anchor_map is not None:
+                    reference_html = MainWindow._format_reference_html_as_anchors(m["reference"], note_anchor_map)
+                else:
+                    reference_html = MainWindow._format_reference_html(m["reference"])
+                block += f"<i>原文與頁碼：{reference_html}</i>"
             block += "</p><hr>"
             blocks.append(block)
         return "".join(blocks)
+
+    @staticmethod
+    def _format_reference_html_as_anchors(reference: str, note_anchor_map: dict[str, str]) -> str:
+        """跟_format_reference_html()同樣的「文字裡找出.md檔名、包成連結」邏輯，差別
+        是連結目標改成報表內部錨點(`#note-N`，跳到_build_report_reference_appendix()
+        產生的附錄章節)，不是開新視窗的`ruledoc:///`——2026-08-04新增，供「產出報表」
+        的PDF使用：PDF匯出後沒有「開新視窗」這回事，筆記全文要嵌在同一份文件裡，靠
+        PDF內部連結跳轉(QWebEnginePage.printToPdf()會把HTML錨點連結保留成PDF內部
+        可點擊的跳轉連結)。找不到對照(理論上不會發生，note_anchor_map是從同一批
+        matches算出來的)的檔名維持原樣文字，不做成連結。
+        """
+        parts: list[str] = []
+        last_end = 0
+        for match in rule_docs.MD_FILENAME_PATTERN.finditer(reference):
+            filename = match.group(0)
+            parts.append(html.escape(reference[last_end:match.start()]))
+            anchor_id = note_anchor_map.get(filename)
+            if anchor_id:
+                parts.append(f'<a href="#{anchor_id}">{html.escape(filename)}</a>')
+            else:
+                parts.append(html.escape(filename))
+            last_end = match.end()
+        parts.append(html.escape(reference[last_end:]))
+        return "".join(parts)
 
     def _build_analysis_sections_html(self, stock_id: str, header_label: str) -> dict[str, str]:
         """組出「個股分析」/「大盤分析」面板的三段HTML內容：
@@ -2447,19 +2483,66 @@ class MainWindow(QMainWindow):
         self._set_autoheight_html(self.analysis_tech_view, sections["tech"])
         self._set_autoheight_html(self.analysis_chip_view, sections["chip"])
 
+    @staticmethod
+    def _build_report_reference_appendix(matches: list[dict]) -> tuple[str, dict[str, str]]:
+        """從規則清單(technical+chip matches合併後傳入)收集所有「原文與頁碼」實際
+        引用到的筆記檔案(去重複，依第一次出現順序)，組出報表的「附錄：引用筆記
+        全文」章節，跟{筆記檔名: 附錄裡的錨點id}對照表(供_render_rule_match_
+        blocks()的note_anchor_map參數，把內文的引用轉成跳到這裡的連結)。
+
+        2026-08-04新增：使用者要分享報表PDF給其他人，原本「原文與頁碼」點擊開新
+        視窗讀ai/ebook-summary(-chen)/筆記的做法只在本機互動畫面有用，PDF裡沒有
+        「開新視窗」這回事，改成把引用到的筆記全文直接嵌進報表(不是嵌入書籍原文，
+        避免版權疑慮——這幾份筆記本身是使用者自己整理的分析文字，不是書籍逐字
+        複製)，靠PDF內部錨點連結(printToPdf()會保留HTML錨點連結成PDF可點擊的
+        內部跳轉)前後互相跳轉。附錄每段筆記帶一個「回引用處」連結，跳回第一條
+        引用它的規則(見_render_rule_match_blocks()幫每個規則block加的
+        `id="cite-{rule_id}"`)——同一份筆記可能被好幾條規則引用，只回第一條，
+        不追蹤全部引用處，避免過度複雜。
+        """
+        seen: dict[str, Path] = {}
+        first_citing_rule: dict[str, str] = {}
+        for m in matches:
+            reference = m.get("reference")
+            if not reference:
+                continue
+            for filename, path in rule_docs.resolve_reference_files(reference):
+                if filename not in seen:
+                    seen[filename] = path
+                    first_citing_rule[filename] = m["rule_id"]
+        if not seen:
+            return "", {}
+
+        anchor_ids = {filename: f"note-{i}" for i, filename in enumerate(seen)}
+        blocks = ['<h2 id="report-appendix">附錄：引用筆記全文</h2>']
+        for filename, path in seen.items():
+            anchor_id = anchor_ids[filename]
+            back_link = f'<a href="#cite-{html.escape(first_citing_rule[filename])}">🔙 回引用處（{html.escape(first_citing_rule[filename])}）</a>'
+            try:
+                content = path.read_text(encoding="utf-8")
+                body_html = markdown.markdown(content, extensions=["tables", "fenced_code"])
+            except OSError as exc:
+                body_html = f"<p>(讀取失敗：{html.escape(str(exc))})</p>"
+            blocks.append(f'<h3 id="{anchor_id}">{html.escape(filename)}</h3>{body_html}<p>{back_link}</p><hr>')
+        return "".join(blocks), anchor_ids
+
     def _build_report_html(self, stock_id: str, stock_label: str) -> str:
         """組出「產出報表」的完整HTML文件，依使用者指定的順序包含：圖表、個股明細、
-        個股分析——2026-08-04新增，供匯出/列印成PDF用，不是即時互動畫面，重用既有
-        的HTML組裝函式，不重新實作任何一段的內容邏輯：
+        個股分析、附錄(引用筆記全文)——2026-08-04新增，供匯出/列印成PDF用，不是
+        即時互動畫面：
         - 圖表：用`<iframe>`內嵌已經寫好的self._chart_html_path(render_chart_html()
           產生的完整獨立HTML檔案，含Plotly.js)，不重新處理它的內部結構——這個檔案
           在_rerender_chart()裡只要查詢過股票就會寫入，不受目前停留在哪個inner tab
           影響，所以這裡可以直接引用。
         - 個股明細：重用_build_overview_*_html()這5個既有方法，跟_refresh_stock_
           overview_view()用的是同一組函式。
-        - 個股分析：重用_build_analysis_sections_html()，三段(總結/技術面/籌碼面)
-          依序接起來——裡面的「查看技術面↓」等跳轉連結在報表裡不會有作用(沒有對應
-          的_CollapsibleBox可以展開/捲動)，但保留著不影響閱讀，只是點了沒反應。
+        - 個股分析：這裡不能直接重用_build_analysis_sections_html()(那個是給即時
+          互動畫面用的，「原文與頁碼」是開新視窗的ruledoc:///連結，「查看技術面↓」
+          是跳到_CollapsibleBox的jumpto:///連結，兩者在匯出的PDF裡都不會有作用)。
+          改成自己重新呼叫analyze_stock_signals()/analyze_chip_signals()拿到原始
+          matches，總結文字沿用summarize_signal_matches()同一套統計(不含跳轉連結，
+          報表不需要)，規則清單改用_render_rule_match_blocks()的report模式(傳入
+          note_anchor_map，「原文與頁碼」變成跳到附錄的PDF內部連結)。
         """
         detail_builders = {
             "交易資訊": self._build_overview_quote_html,
@@ -2471,8 +2554,33 @@ class MainWindow(QMainWindow):
         detail_html = "".join(
             f"<h3>{html.escape(title)}</h3>{builder(stock_id)}" for title, builder in detail_builders.items()
         )
-        sections = self._build_analysis_sections_html(stock_id, "個股分析")
-        analysis_html = sections["summary"] + sections["tech"] + sections["chip"]
+
+        price_df = chart_data.load_price_history(self.conn, stock_id)
+        trend_df = chart_data.load_price_history(self.conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        tech_matches = analyze_stock_signals(price_df, trend_df=trend_df) if not price_df.empty else []
+        chip_matches = stock_detail_data.analyze_chip_signals(self.conn, stock_id)
+        appendix_html, note_anchor_map = self._build_report_reference_appendix([*tech_matches, *chip_matches])
+
+        def section_summary(matches: list[dict]) -> str:
+            if not matches:
+                return "<p>目前沒有符合任何已接上規則庫的訊號。</p>"
+            summary = summarize_signal_matches(matches)
+            top = summary["top_match"]
+            top_note = (top.get("note") or "").split("\n")[0] if top else ""
+            return (
+                f"<p>本次共觸發 {summary['total']} 條規則"
+                f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
+                f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。<br>"
+                f"信心最高的訊號：{html.escape(top['rule_id'])}　{html.escape(top['title'])}"
+                f"（{top['confidence']}%）"
+                + (f"<br>目前狀態：{html.escape(top_note)}" if top_note else "")
+                + "</p>"
+            )
+
+        analysis_html = (
+            "<h3>技術面</h3>" + section_summary(tech_matches) + self._render_rule_match_blocks(tech_matches, note_anchor_map)
+            + "<h3>籌碼面</h3>" + section_summary(chip_matches) + self._render_rule_match_blocks(chip_matches, note_anchor_map)
+        )
         chart_src = QUrl.fromLocalFile(str(self._chart_html_path)).toString()
 
         return f"""<!DOCTYPE html>
@@ -2484,13 +2592,14 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
 iframe {{ width: 100%; height: 900px; border: none; }}
 </style></head>
 <body>
-<h1>{html.escape(stock_label)} 個股報表</h1>
+<h1 id="report-top">{html.escape(stock_label)} 個股報表</h1>
 <h2>圖表</h2>
 <iframe src="{chart_src}"></iframe>
 <h2>個股明細</h2>
 {detail_html}
 <h2>個股分析</h2>
 {analysis_html}
+{appendix_html}
 </body></html>"""
 
     def _refresh_report_view(self) -> None:

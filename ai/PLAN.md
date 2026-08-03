@@ -5326,3 +5326,43 @@ MA5>MA10>MA20=True)、`CANDIDATE_SAR_FLIP_ENABLED_DEFAULT`(True，多頭/
   success=True，產生的PDF檔案774KB(非空、內容合理)。`pytest tests/ -q`
   869個測試全數通過(這3項改動都沒有新增測試涵蓋的資料層邏輯，純UI/匯出
   功能，用真實視窗驗證取代)。
+
+## 產出報表把引用筆記全文嵌進附錄，用PDF內部連結取代開新視窗(2026-08-04)
+
+使用者問「個股分析」裡「原文與頁碼」的連結能不能也在報表PDF裡實作——目前
+點擊會開新視窗讀`ai/ebook-summary(-chen)/`筆記，但這只在本機互動畫面有用，
+匯出/分享出去的PDF沒有「開新視窗」這回事。先跟使用者討論實作方向：確認
+①使用者手上雖然有原書PDF，但這份報表PDF是要分享給別人的，附上原書內容有
+版權疑慮；②改成只嵌入使用者自己整理的筆記(ebook-summary/ebook-summary-
+chen)，直接包進報表PDF，並確認PDF可以做內部前後連結(HTML錨點連結透過
+QWebEnginePage.printToPdf()會被保留成PDF內部可點擊的跳轉連結，這是Chromium
+既有行為)。
+
+實作前快速查證版權風險：統計`ai/ebook-summary/`＋`ai/ebook-summary-chen/`
+全部73個筆記檔案，直接引用原文的區塊(markdown `>` 引號段落)只佔全部內容的
+0.67%，其餘都是使用者自己重新整理改寫的分析文字——不是逐字複製書籍內容，
+風險遠低於附上原書內容，回報使用者後確認照這個方向實作。
+
+- `desktop/main_window.py`的`_render_rule_match_blocks()`新增
+  `note_anchor_map`參數：不傳(個股分析即時畫面預設)維持原本`ruledoc:///`
+  開新視窗連結；傳入時(產出報表)改用新增的`_format_reference_html_as_
+  anchors()`，把「原文與頁碼」轉成跳到報表內部錨點`#note-N`的連結。每個
+  規則block(不管哪種模式)都加上`id="cite-{rule_id}"`，供附錄「回引用處」
+  連結跳回來源。
+- 新增`_build_report_reference_appendix(matches)`：從技術面/籌碼面規則
+  清單收集所有實際引用到的筆記檔案(去重複，依第一次出現順序)，組出「附錄：
+  引用筆記全文」章節——每份筆記用`markdown.markdown()`轉成HTML全文嵌入
+  (跟`_open_rule_reference_window()`同一套轉換)，帶一個跳回第一條引用它的
+  規則的「🔙 回引用處」連結。
+- `_build_report_html()`：不再直接重用`_build_analysis_sections_html()`
+  (那個是給互動畫面用的即時跳轉連結，PDF裡不會動)，改成自己呼叫
+  `analyze_stock_signals()`/`analyze_chip_signals()`拿原始matches，總結
+  文字沿用`summarize_signal_matches()`同一套統計(不含跳轉連結)，規則清單
+  改用`_render_rule_match_blocks()`的報表模式，報表最後加上附錄章節。
+- 用真實DB(2330台積電)+PySide6真實視窗驗證：報表HTML正確產生「附錄：
+  引用筆記全文」章節，10個`note-`錨點對應10份不重複的引用筆記、10個
+  `cite-`錨點(每條規則各一個)、12個`href="#note-"`連結(部分筆記被超過1條
+  規則引用)、10個`href="#cite-"`回引用連結；附錄內容正確顯示筆記全文(標題/
+  條列/內文都正確轉成HTML)；實際匯出PDF成功(1.77MB，比先前沒有附錄時的
+  774KB大，符合預期)。`pytest tests/ -q`869個測試全數通過(這項改動同樣是
+  UI/匯出邏輯調整，用真實視窗驗證取代新增測試)。
