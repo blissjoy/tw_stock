@@ -37,18 +37,20 @@ def _populate_indicators(conn, stock_id: str, price_rows: list[dict]) -> None:
     upsert_daily_indicators(conn, rows)
 
 
-def _ma240_warmup_rows(stock_id: str, start: float = 20.0, end: float = 9.4, num_days: int = 235) -> list[dict]:
-    """2026-08-04新增：SAR翻轉篩選加了「股價相對MA240位置」的必備條件(見chart_data.py的
-    compute_sar_flip_flags/load_sar_flip_flags_from_table)後，原本只用5~7天資料的SAR測試
-    不夠算出MA240(視為缺值、一律判False)，需要在真正要驗證的日期之前補一段暖身期。
+def _ma200_warmup_rows(stock_id: str, start: float = 20.0, end: float = 9.4, num_days: int = 195) -> list[dict]:
+    """2026-08-04新增：SAR翻轉篩選加了「股價相對MA200位置」的必備條件(見chart_data.py的
+    compute_sar_flip_flags/load_sar_flip_flags_from_table，刻意用ma200、不是本專案「多頭
+    排列」慣例用的ma240——使用者要求SAR這條件要跟另一套獨立工具的200天口徑對齊，方便
+    互相核對)後，原本只用5~7天資料的SAR測試不夠算出MA200(視為缺值、一律判False)，需要
+    在真正要驗證的日期之前補一段暖身期。
 
     刻意不用完全持平的價格(跟`test_compute_sar_flip_flags_batched_query_does_not_cross_
     contaminate_stocks`docstring提到的理由一樣：簡併資料本身會觸發SAR演算法初始種子的
     邊界情況、每天flip-flop)，改用`start`緩步線性下降到`end`(預設收斂到現有5~7天測試
     資料day0的收盤價9.5附近，讓暖身期跟後面測試資料的價格銜接平滑，不會有斷層式跳空造成
-    提早翻轉)。`start`夠高，讓rolling(240)平均後的MA240明顯高於測試資料後段暴跌的收盤價，
-    讓「多頭SAR翻轉需要股價維持在MA240之上」的既有5天測試案例(先前手動追算過，見
-    src/indicators/parabolic_sar.py)在加上MA240條件後依然成立，不需要更動那組驗證過的
+    提早翻轉)。`start`夠高，讓rolling(200)平均後的MA200明顯高於測試資料後段暴跌的收盤價，
+    讓「多頭SAR翻轉需要股價維持在MA200之上」的既有5天測試案例(先前手動追算過，見
+    src/indicators/parabolic_sar.py)在加上MA200條件後依然成立，不需要更動那組驗證過的
     價格數列本身。日期用比測試資料本身(2026-07-xx)更早的年份，確保排序在最前面。"""
     return [
         {
@@ -337,10 +339,10 @@ def test_load_stock_universe_for_date_breaks_confidence_ties_by_sar_distance_pct
     ])
     upsert_daily_indicators(conn, [
         {"stock_id": "1101", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
-         "ma120": None, "ma240": None, "sar_value": 52.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "ma120": None, "ma200": None, "ma240": None, "sar_value": 52.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
          "updated_at": "2026-07-23T18:00:00"},  # (52-50)/50*100 = +4%
         {"stock_id": "3008", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
-         "ma120": None, "ma240": None, "sar_value": 1900.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "ma120": None, "ma200": None, "ma240": None, "sar_value": 1900.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
          "updated_at": "2026-07-23T18:00:00"},  # (1900-2000)/2000*100 = -5%
     ])
 
@@ -371,10 +373,10 @@ def test_load_stock_universe_for_date_breaks_remaining_ties_by_volume():
     ])
     upsert_daily_indicators(conn, [
         {"stock_id": "1101", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
-         "ma120": None, "ma240": None, "sar_value": 52.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "ma120": None, "ma200": None, "ma240": None, "sar_value": 52.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
          "updated_at": "2026-07-23T18:00:00"},  # (52-50)/50*100 = +4%
         {"stock_id": "3008", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
-         "ma120": None, "ma240": None, "sar_value": 2080.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "ma120": None, "ma200": None, "ma240": None, "sar_value": 2080.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
          "updated_at": "2026-07-23T18:00:00"},  # (2080-2000)/2000*100 = +4%，跟1101同分
     ])
 
@@ -680,7 +682,7 @@ def test_load_sar_flip_flags_from_table_matches_live_computed_result():
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     highs = [10.0, 11.0, 12.0, 13.0, 9.0]
     lows = [9.0, 10.0, 10.5, 11.5, 8.0]
-    rows = _ma240_warmup_rows("2330") + [
+    rows = _ma200_warmup_rows("2330") + [
         {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
          "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
         for d in range(5)
@@ -714,10 +716,11 @@ def test_load_sar_flip_flags_from_table_false_when_direction_mismatch():
     assert flags == {"2330": False}
 
 
-def test_load_sar_flip_flags_from_table_false_when_bullish_but_below_ma240():
+def test_load_sar_flip_flags_from_table_false_when_bullish_but_below_ma200():
     """2026-08-04新增：使用者比對d:\\tw_stock_analyzer發現對方「SAR多頭」隱含「股價>MA200」
-    這個條件——這裡直接驗證SAR方向/翻轉天數都符合多頭條件，但收盤價低於MA240時，仍然
-    要判定為不成立(3085/4153/4430/4747/8905是2026-08-03實測發現的真實案例)。"""
+    這個條件——這裡直接驗證SAR方向/翻轉天數都符合多頭條件，但收盤價低於MA200時，仍然
+    要判定為不成立(3085/4153/4430/4747/8905是2026-08-03實測發現的真實案例)。ma240刻意
+    填一個跟ma200不同、且會讓判斷結果相反的數字，確保查詢真的用ma200、不是誤用ma240。"""
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "3085", "name": "測試", "market": "TWSE", "industry": None, "updated_at": "2026-08-03"}])
     upsert_stock_prices(conn, [
@@ -726,7 +729,7 @@ def test_load_sar_flip_flags_from_table_false_when_bullish_but_below_ma240():
     ])
     upsert_daily_indicators(conn, [
         {"stock_id": "3085", "date": "2026-08-03", "ma5": 9.6, "ma10": 9.4, "ma20": 9.2,
-         "ma60": 9.0, "ma120": 9.8, "ma240": 12.0, "sar_value": 9.0, "sar_is_bull": True,
+         "ma60": 9.0, "ma120": 9.8, "ma200": 12.0, "ma240": 8.0, "sar_value": 9.0, "sar_is_bull": True,
          "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
     ])
 
@@ -735,8 +738,8 @@ def test_load_sar_flip_flags_from_table_false_when_bullish_but_below_ma240():
     assert flags == {"3085": False}
 
 
-def test_load_sar_flip_flags_from_table_true_when_bullish_and_above_ma240():
-    """跟上面相反的對照案例：SAR多頭翻轉、收盤價也確實站上MA240，應該維持成立。"""
+def test_load_sar_flip_flags_from_table_true_when_bullish_and_above_ma200():
+    """跟上面相反的對照案例：SAR多頭翻轉、收盤價也確實站上MA200，應該維持成立。"""
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "1742", "name": "台蠟", "market": "TPEx", "industry": None, "updated_at": "2026-08-03"}])
     upsert_stock_prices(conn, [
@@ -745,7 +748,7 @@ def test_load_sar_flip_flags_from_table_true_when_bullish_and_above_ma240():
     ])
     upsert_daily_indicators(conn, [
         {"stock_id": "1742", "date": "2026-08-03", "ma5": 16.8, "ma10": 16.5, "ma20": 16.0,
-         "ma60": 15.5, "ma120": 15.0, "ma240": 14.0, "sar_value": 15.85, "sar_is_bull": True,
+         "ma60": 15.5, "ma120": 15.0, "ma200": 14.0, "ma240": 20.0, "sar_value": 15.85, "sar_is_bull": True,
          "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
     ])
 
@@ -754,9 +757,9 @@ def test_load_sar_flip_flags_from_table_true_when_bullish_and_above_ma240():
     assert flags == {"1742": True}
 
 
-def test_load_sar_flip_flags_from_table_false_when_ma240_missing():
-    """MA240缺值(例如新上市股票不到240天歷史)時無法判斷股價相對長期均線的位置，保守
-    視為不成立，跟均值不足時的既有慣例一致。"""
+def test_load_sar_flip_flags_from_table_false_when_ma200_missing():
+    """MA200缺值(例如新上市股票不到200天歷史、或還沒重新回補過)時無法判斷股價相對長期
+    均線的位置，保守視為不成立，跟均值不足時的既有慣例一致。"""
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "6666", "name": "測試", "market": "TWSE", "industry": None, "updated_at": "2026-08-03"}])
     upsert_stock_prices(conn, [
@@ -765,7 +768,7 @@ def test_load_sar_flip_flags_from_table_false_when_ma240_missing():
     ])
     upsert_daily_indicators(conn, [
         {"stock_id": "6666", "date": "2026-08-03", "ma5": 9.6, "ma10": 9.4, "ma20": 9.2,
-         "ma60": 9.0, "ma120": None, "ma240": None, "sar_value": 9.0, "sar_is_bull": True,
+         "ma60": 9.0, "ma120": None, "ma200": None, "ma240": None, "sar_value": 9.0, "sar_is_bull": True,
          "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
     ])
 
@@ -774,9 +777,9 @@ def test_load_sar_flip_flags_from_table_false_when_ma240_missing():
     assert flags == {"6666": False}
 
 
-def test_load_sar_flip_flags_from_table_false_when_bearish_but_above_ma240():
-    """空頭方向同理：SAR翻轉為空頭、天數也符合，但收盤價其實還在MA240之上(不是真正弱勢)，
-    應該判定為不成立——多頭要求收盤價嚴格大於MA240、空頭要求嚴格小於，這裡驗證空頭側。"""
+def test_load_sar_flip_flags_from_table_false_when_bearish_but_above_ma200():
+    """空頭方向同理：SAR翻轉為空頭、天數也符合，但收盤價其實還在MA200之上(不是真正弱勢)，
+    應該判定為不成立——多頭要求收盤價嚴格大於MA200、空頭要求嚴格小於，這裡驗證空頭側。"""
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "5555", "name": "測試", "market": "TWSE", "industry": None, "updated_at": "2026-08-03"}])
     upsert_stock_prices(conn, [
@@ -785,7 +788,7 @@ def test_load_sar_flip_flags_from_table_false_when_bearish_but_above_ma240():
     ])
     upsert_daily_indicators(conn, [
         {"stock_id": "5555", "date": "2026-08-03", "ma5": 14.6, "ma10": 14.8, "ma20": 15.0,
-         "ma60": 13.0, "ma120": 12.0, "ma240": 12.0, "sar_value": 15.5, "sar_is_bull": False,
+         "ma60": 13.0, "ma120": 12.0, "ma200": 12.0, "ma240": 20.0, "sar_value": 15.5, "sar_is_bull": False,
          "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
     ])
 
@@ -883,15 +886,39 @@ def test_candidate_filter_ma240_requires_ma120_in_the_chain_too():
     assert fixed_flags["2330"] is False  # 修正後正確抓出MA120<MA240，不算完整多排
 
 
-def test_candidate_filters_includes_ma120_and_ma240_extensions():
+def test_candidate_filters_includes_ma60_ma120_and_ma240_extensions():
+    """2026-08-04新增：使用者發現「...>MA60」這個選項之前漏做了，補上。"""
+    assert "均線多頭排列（...>MA60）" in chart_data.CANDIDATE_FILTERS
     assert "均線多頭排列（...>MA120）" in chart_data.CANDIDATE_FILTERS
     assert "均線多頭排列（...>MA240）" in chart_data.CANDIDATE_FILTERS
 
 
 def test_candidate_filter_defaults_only_checks_ma5_10_20_by_default():
     assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（MA5>MA10>MA20）"] is True
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（...>MA60）"] is False
     assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（...>MA120）"] is False
     assert chart_data.CANDIDATE_FILTER_DEFAULTS["均線多頭排列（...>MA240）"] is False
+
+
+def test_candidate_filter_ma60_extension_uses_correct_periods():
+    """驗證「...>MA60」篩選條件實際套用periods=(5,10,20,60)，不是漏掉60本身、或錯誤沿用
+    別組periods——建構一組MA5>MA10>MA20>MA60成立、但MA120不成立的股價(持續上漲60天，
+    不足120天資料，MA120算不出來、視為None)，如果篩選條件誤用到MA120，NaN比較會導致
+    False，藉此區分「真的用periods=(5,10,20,60)」還是「不小心沿用了包含MA120的periods」。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    rows = [
+        {"stock_id": "2330", "date": f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0 + d * 0.5, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(65)
+    ]
+    upsert_stock_prices(conn, rows)
+    _populate_indicators(conn, "2330", rows)
+
+    filter_fn = chart_data.CANDIDATE_FILTERS["均線多頭排列（...>MA60）"]
+    flags = filter_fn(conn, ["2330"], rows[-1]["date"])
+
+    assert flags["2330"] is True
 
 
 def test_apply_candidate_filters_returns_unfiltered_when_no_active_filters():
@@ -1545,7 +1572,7 @@ def test_compute_sar_flip_flags_detects_bearish_flip_on_sharp_drop():
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     highs = [10.0, 11.0, 12.0, 13.0, 9.0]
     lows = [9.0, 10.0, 10.5, 11.5, 8.0]
-    rows = _ma240_warmup_rows("2330") + [
+    rows = _ma200_warmup_rows("2330") + [
         {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
          "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
         for d in range(5)
@@ -1559,15 +1586,15 @@ def test_compute_sar_flip_flags_detects_bearish_flip_on_sharp_drop():
     assert flags_bull["2330"] is False
 
 
-def test_compute_sar_flip_flags_false_when_flipped_but_still_above_ma240():
-    """2026-08-04新增：SAR方向/天數都符合空頭翻轉條件，但收盤價其實還在MA240之上(暖身期
-    價格緩步從3.0爬升到9.4，MA240遠低於最後暴跌後的收盤價8.5)，不是真正弱勢，應該判定
+def test_compute_sar_flip_flags_false_when_flipped_but_still_above_ma200():
+    """2026-08-04新增：SAR方向/天數都符合空頭翻轉條件，但收盤價其實還在MA200之上(暖身期
+    價格緩步從3.0爬升到9.4，MA200遠低於最後暴跌後的收盤價8.5)，不是真正弱勢，應該判定
     為不成立——跟`load_sar_flip_flags_from_table`同一則新增條件，這裡驗證即時計算版本。"""
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     highs = [10.0, 11.0, 12.0, 13.0, 9.0]
     lows = [9.0, 10.0, 10.5, 11.5, 8.0]
-    rows = _ma240_warmup_rows("2330", start=3.0, end=9.4) + [
+    rows = _ma200_warmup_rows("2330", start=3.0, end=9.4) + [
         {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
          "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
         for d in range(5)
@@ -1592,7 +1619,7 @@ def test_compute_sar_flip_flags_batched_query_does_not_cross_contaminate_stocks(
     # 1101用穩定上漲的走勢(不會翻轉為空頭)，跟2330(最後一天暴跌)明顯對比——刻意不用
     # 完全持平的價格序列，那種簡併資料本身就可能觸發SAR演算法初始種子的邊界情況，
     # 不是真正驗證「批次查詢有沒有分組正確」這件事所需要的。
-    rows = _ma240_warmup_rows("2330")
+    rows = _ma200_warmup_rows("2330")
     for d in range(5):
         date_str = f"2026-07-{15 + d:02d}"
         rows.append({
@@ -1628,7 +1655,7 @@ def test_compute_sar_flip_flags_as_of_date_ignores_rows_after_that_date():
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     highs = [10.0, 11.0, 12.0, 13.0, 9.0, 8.5, 8.0]
     lows = [9.0, 10.0, 10.5, 11.5, 8.0, 7.5, 7.0]
-    rows = _ma240_warmup_rows("2330") + [
+    rows = _ma200_warmup_rows("2330") + [
         {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
          "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
         for d in range(7)
@@ -1655,7 +1682,7 @@ def test_apply_candidate_filters_as_of_date_scopes_sar_and_ma_to_historical_cand
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     highs = [10.0, 11.0, 12.0, 13.0, 9.0, 8.5, 8.0]
     lows = [9.0, 10.0, 10.5, 11.5, 8.0, 7.5, 7.0]
-    rows = _ma240_warmup_rows("2330") + [
+    rows = _ma200_warmup_rows("2330") + [
         {"stock_id": "2330", "date": f"2026-07-{15 + d:02d}", "open": highs[d], "high": highs[d], "low": lows[d],
          "close": (highs[d] + lows[d]) / 2, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
         for d in range(7)

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.indicators.moving_average import FULL_PERIODS, compute_ma_set
+from src.indicators.moving_average import FULL_PERIODS, compute_ma_set, sma
 from src.indicators.parabolic_sar import compute_sar, sar_flip_days_ago
 from src.screener.indicator_precompute import compute_indicator_rows
 
@@ -47,6 +47,29 @@ def test_compute_indicator_rows_ma_values_match_compute_ma_set():
     assert row["ma5"] == ma_frame["MA5"].iloc[idx]
     assert row["ma20"] == ma_frame["MA20"].iloc[idx]
     assert row["ma240"] == ma_frame["MA240"].iloc[idx]
+
+
+def test_compute_indicator_rows_ma200_is_independent_of_full_periods():
+    """2026-08-04新增：ma200是SAR翻轉篩選「股價相對長期均線」條件專用的獨立欄位，跟
+    FULL_PERIODS(5,10,20,60,120,240，「多頭排列」慣例用的天期)刻意分開算——這裡驗證
+    數值跟直接呼叫sma(close, 200)一致，且200不在FULL_PERIODS裡也不影響它被正確算出來。"""
+    closes = [100.0 + i * 0.7 for i in range(300)]
+    df = _make_df(closes)
+    target_date = df.index[280].strftime("%Y-%m-%d")
+
+    rows = compute_indicator_rows("2330", df, {target_date})
+    row = rows[0]
+
+    assert 200 not in FULL_PERIODS
+    assert row["ma200"] == sma(df["close"], 200).iloc[280]
+
+
+def test_compute_indicator_rows_ma200_is_none_when_not_enough_history():
+    df = _make_df([100.0 + i for i in range(150)])
+
+    rows = compute_indicator_rows("2330", df, {"2026-01-10"})
+
+    assert rows[0]["ma200"] is None  # 只有150天資料，不夠算MA200
 
 
 def test_compute_indicator_rows_ma_is_none_when_not_enough_history():

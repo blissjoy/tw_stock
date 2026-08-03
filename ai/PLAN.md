@@ -5467,3 +5467,59 @@ vs.200天口徑差異造成的誤判)，結果跟240天版本完全一致，確�
   1742/2425/3229/3231/5490/1459/4570維持成立，`apply_candidate_filters()`
   對這12檔跑出的結果正好是`['1459','1742','2425','3229','3231','4570',
   '5490']`，符合預期。
+
+## SAR翻轉改用獨立的MA200欄位(不沿用ma240)＋補上「...>MA60」多排選項(2026-08-04)
+
+使用者對上面那則MA240修正提出更正：SAR翻轉的「股價相對長期均線」條件應該獨立用
+MA200，不要沿用本專案自己的MA240——理由是`d:\tw_stock_analyzer`那邊本來就是用
+200天，兩邊條件如果口徑不同，以後很難核對，也對不上其他人手上的資料。雖然先前
+實測4430/8905這兩個邊界案例用精確200天SMA重算跟240天版本分類結果一致，但那只是
+「這幾筆剛好對照組結果一樣」，不代表两个口徑本質上可以互相替代，使用者傾向從
+根本上就用同一套定義。
+
+另外一併補上「均線多頭排列」少掉的「...>MA60」選項(先前只有MA5>10>20基本款、
+...>MA120、...>MA240三個，跳過了60)。
+
+- `src/data/schema.sql`：`daily_indicators`新增獨立的`ma200`欄位(不影響既有
+  `ma240`，兩者並存、意義不同——`ma240`留給`FULL_PERIODS`/MA5>10>20>60>120>240
+  多頭排列慣例用，`ma200`只給SAR翻轉這個條件專用)。
+- `src/data/storage.py`：新增`_migrate_schema()`，比照`portfolio_storage.py`
+  既有的`_migrate_portfolio_schema()`同款做法(PRAGMA table_info()檢查欄位是否
+  存在，不存在才ALTER TABLE ADD COLUMN)——`daily_indicators`是已經有真實歷史
+  資料的表，CREATE TABLE IF NOT EXISTS不會自動幫舊DB補上新欄位。`upsert_daily_
+  indicators()`的INSERT/ON CONFLICT UPDATE補上ma200。
+- `src/screener/indicator_precompute.py`：`compute_indicator_rows()`另外呼叫
+  一次`sma(close, 200)`算ma200，刻意不併入`FULL_PERIODS`(避免污染「多頭排列」
+  慣例的天期定義)。
+- `src/presentation/chart_data.py`：`load_sar_flip_flags_from_table()`查
+  `di.ma200`(原本查`di.ma240`)；`compute_sar_flip_flags()`用`rolling(200)`
+  (原本`rolling(240)`)、資料不足200筆(原240筆)視為無法判斷。`CANDIDATE_FILTERS`
+  新增「均線多頭排列（...>MA60）」(periods=(5,10,20,60))，同時把「...>MA120」/
+  「...>MA240」的periods也一併補上60(改成(5,10,20,60,120)/(5,10,20,60,120,240))
+  ——這兩個原本就跳過60，是跟2026-07-29「...>MA240漏檢查MA120」同一類的鏈狀
+  缺口問題，一併修正。`CANDIDATE_FILTER_DEFAULTS`新增「...>MA60」預設不勾
+  (跟120/240一致)。
+- `tests/test_chart_data.py`：`_ma240_warmup_rows`改名`_ma200_warmup_rows`，
+  暖身天數從235天(配240天窗口)縮成195天(配200天窗口)，重新驗證斜坡參數在
+  200天窗口下仍能讓既有5天SAR測試案例維持原本的翻轉/MA條件結果；4個MA200條件
+  專屬測試(bullish低於/高於MA200、MA200缺值、bearish高於MA200)都改填
+  `ma200`欄位(同時保留`ma240`填一個相反方向的數字，確保查詢真的用ma200、
+  不是誤用ma240)。新增`test_candidate_filters_includes_ma60_ma120_and_
+  ma240_extensions`、`test_candidate_filter_ma60_extension_uses_correct_
+  periods`(建構MA60成立但MA120算不出來的股價，區分是否誤用到別組periods)。
+- `tests/test_indicator_precompute.py`：新增2個測試驗證ma200數值跟直接呼叫
+  `sma(close, 200)`一致、且不在FULL_PERIODS裡也能正確算出來；資料不足200天
+  時是None。
+- `tests/test_storage.py`：新增2個測試驗證`ensure_schema()`會幫舊DB(模擬還
+  沒有ma200欄位的daily_indicators表)補上ma200欄位、且重複呼叫不會出錯。
+- 其餘手動建構`daily_indicators` row dict的既有測試(`tests/test_pipeline_
+  status.py`、`tests/test_portfolio_data.py`)補上`"ma200": None`，避免
+  `upsert_daily_indicators()`的SQL命名參數缺值報錯。`pytest tests/ -q`882個
+  測試全數通過。
+- 對`data/tw_stock.db`實際執行`scripts/backfill_daily_indicators.py`(必要的
+  手動步驟，schema變動後才需要跑一次)：`ensure_schema()`自動幫既有DB補上
+  ma200欄位，2435檔股票全部重新算過均線/SAR，共1,834,286筆、耗時350.9秒。
+  重新用真實DB驗證：3085/4153/4430/4747/8905正確被排除、1742/2425/3229/
+  3231/5490/1459/4570維持成立(跟改用ma200前的結果一致，只是現在真的是查
+  獨立的ma200欄位，不是借用ma240)；「...>MA60」篩選條件對20檔股票跑出混合
+  的True/False結果，確認正確運作。

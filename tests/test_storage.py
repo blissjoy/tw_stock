@@ -2,6 +2,7 @@ import sqlite3
 
 from src.data.storage import (
     delete_daily_candidates_for_date,
+    ensure_schema,
     get_daily_data_status,
     init_db,
     is_fetched,
@@ -9,6 +10,7 @@ from src.data.storage import (
     upsert_broker_chips,
     upsert_daily_candidates,
     upsert_daily_data_status,
+    upsert_daily_indicators,
     upsert_institutional_investors,
     upsert_margin_trading,
     upsert_securities_traders,
@@ -51,6 +53,46 @@ def test_init_db_creates_all_expected_tables():
         "securities_traders", "broker_chips", "fetch_log",
     }
     assert expected.issubset(tables)
+
+
+def test_ensure_schema_adds_ma200_column_to_pre_existing_daily_indicators_table():
+    """2026-08-04新增：ma200(SAR翻轉篩選的「股價相對長期均線」條件改用ma200、跟`ma240`
+    這組「多頭排列」慣例分開，見schema.sql說明)是在daily_indicators表已經有真實使用者
+    資料後才新增的欄位——CREATE TABLE IF NOT EXISTS對已存在的表不會自動補上新欄位，
+    這裡模擬「舊版DB(還沒有ma200欄位)」的情境，驗證ensure_schema()會用ALTER TABLE
+    補上，不會讓既有的daily_indicators資料/使用者踩到「no such column: ma200」。"""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE daily_indicators (
+            stock_id TEXT NOT NULL, date TEXT NOT NULL, ma5 REAL, ma10 REAL, ma20 REAL,
+            ma60 REAL, ma120 REAL, ma240 REAL, sar_value REAL, sar_is_bull INTEGER,
+            sar_flip_days_ago INTEGER, updated_at TEXT NOT NULL, PRIMARY KEY (stock_id, date)
+        )
+        """
+    )
+    conn.commit()
+
+    ensure_schema(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(daily_indicators)").fetchall()}
+    assert "ma200" in columns
+
+    upsert_daily_indicators(conn, [
+        {"stock_id": "2330", "date": "2026-08-03", "ma5": 1.0, "ma10": 1.0, "ma20": 1.0,
+         "ma60": 1.0, "ma120": 1.0, "ma200": 12.0, "ma240": 1.0, "sar_value": 1.0,
+         "sar_is_bull": True, "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
+    ])
+    row = conn.execute("SELECT ma200 FROM daily_indicators WHERE stock_id = '2330'").fetchone()
+    assert row[0] == 12.0
+
+
+def test_ensure_schema_migration_is_idempotent_when_ma200_already_exists():
+    """既有表已經有ma200欄位時(一般每天在跑的DB)，重複呼叫ensure_schema()不應該因為
+    重複ALTER TABLE ADD COLUMN而丟例外。"""
+    conn = init_db(":memory:")
+    ensure_schema(conn)
+    ensure_schema(conn)
 
 
 def test_upsert_stocks_inserts_then_updates_on_conflict():

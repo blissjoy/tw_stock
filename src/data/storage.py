@@ -18,7 +18,23 @@ def ensure_schema(conn) -> None:
     """對任一已開啟的連線(本機sqlite3.Connection或src.data.turso_client.TursoConnection皆可)
     套用 schema.sql 建表，可重複呼叫(CREATE TABLE IF NOT EXISTS)。"""
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    _migrate_schema(conn)
     conn.commit()
+
+
+def _migrate_schema(conn) -> None:
+    """補齊「表已經存在、但缺少後來才新增的欄位」的情況，跟src/data/portfolio_storage.py
+    的_migrate_portfolio_schema()同一個理由/同一種做法：CREATE TABLE IF NOT EXISTS只在表
+    完全不存在時才會建表，對已經累積過歷史資料的daily_indicators表不會自動補上schema.sql
+    後來新增的欄位。用PRAGMA table_info()檢查欄位是否存在，不存在才ALTER TABLE ADD
+    COLUMN，可重複呼叫不會重複執行。
+
+    2026-08-04：ma200是第一個踩到這個問題的欄位(SAR翻轉篩選的「股價相對長期均線」條件
+    改用ma200，見schema.sql該欄位的說明)，之後daily_indicators再新增欄位都要在這裡比照
+    補一行。"""
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(daily_indicators)").fetchall()}
+    if "ma200" not in existing_columns:
+        conn.execute("ALTER TABLE daily_indicators ADD COLUMN ma200 REAL")
 
 
 def init_db(db_path: str | Path, check_same_thread: bool = True) -> sqlite3.Connection:
@@ -211,18 +227,18 @@ def upsert_daily_data_status(conn: sqlite3.Connection, iso_date: str, is_intrada
 
 
 def upsert_daily_indicators(conn: sqlite3.Connection, rows: list[dict]) -> None:
-    """rows的每個dict需含 stock_id/date/ma5/ma10/ma20/ma60/ma120/ma240/sar_value/
+    """rows的每個dict需含 stock_id/date/ma5/ma10/ma20/ma60/ma120/ma200/ma240/sar_value/
     sar_is_bull/sar_flip_days_ago/updated_at，見schema.sql的daily_indicators說明。
     來源見src/screener/indicator_precompute.py。"""
     conn.executemany(
         """
         INSERT INTO daily_indicators
-            (stock_id, date, ma5, ma10, ma20, ma60, ma120, ma240, sar_value, sar_is_bull, sar_flip_days_ago, updated_at)
+            (stock_id, date, ma5, ma10, ma20, ma60, ma120, ma200, ma240, sar_value, sar_is_bull, sar_flip_days_ago, updated_at)
         VALUES
-            (:stock_id, :date, :ma5, :ma10, :ma20, :ma60, :ma120, :ma240, :sar_value, :sar_is_bull, :sar_flip_days_ago, :updated_at)
+            (:stock_id, :date, :ma5, :ma10, :ma20, :ma60, :ma120, :ma200, :ma240, :sar_value, :sar_is_bull, :sar_flip_days_ago, :updated_at)
         ON CONFLICT(stock_id, date) DO UPDATE SET
             ma5 = excluded.ma5, ma10 = excluded.ma10, ma20 = excluded.ma20,
-            ma60 = excluded.ma60, ma120 = excluded.ma120, ma240 = excluded.ma240,
+            ma60 = excluded.ma60, ma120 = excluded.ma120, ma200 = excluded.ma200, ma240 = excluded.ma240,
             sar_value = excluded.sar_value, sar_is_bull = excluded.sar_is_bull,
             sar_flip_days_ago = excluded.sar_flip_days_ago, updated_at = excluded.updated_at
         """,

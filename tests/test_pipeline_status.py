@@ -97,10 +97,10 @@ def test_append_run_snapshot_records_only_recently_flipped_stocks(tmp_path, monk
     ])
     upsert_daily_indicators(conn, [
         {"stock_id": "1742", "date": "2026-08-03", "ma5": 17.0, "ma10": 16.63, "ma20": 16.14,
-         "ma60": None, "ma120": None, "ma240": None, "sar_value": 15.85, "sar_is_bull": True,
+         "ma60": None, "ma120": None, "ma200": None, "ma240": None, "sar_value": 15.85, "sar_is_bull": True,
          "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
         {"stock_id": "9999", "date": "2026-08-03", "ma5": 10.0, "ma10": 9.5, "ma20": 9.0,
-         "ma60": None, "ma120": None, "ma240": None, "sar_value": 8.0, "sar_is_bull": True,
+         "ma60": None, "ma120": None, "ma200": None, "ma240": None, "sar_value": 8.0, "sar_is_bull": True,
          "sar_flip_days_ago": 10, "updated_at": "2026-08-03T17:03:00"},
     ])
 

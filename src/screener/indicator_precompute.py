@@ -27,7 +27,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from src.indicators.moving_average import FULL_PERIODS, compute_ma_set
+from src.indicators.moving_average import FULL_PERIODS, compute_ma_set, sma
 from src.indicators.parabolic_sar import compute_sar
 
 # 見上方模組docstring的效能陷阱說明：日常增量更新(不是backfill)呼叫compute_indicator_
@@ -73,10 +73,15 @@ def compute_indicator_rows(stock_id: str, df: pd.DataFrame, target_dates: set[st
 
     均線/SAR都是對整個`df`只算一次(而不是每個target_date各自重算一次回看窗口)，效能上
     遠比「逐日期獨立重算」快，尤其backfill全部歷史時差異更明顯。
+
+    ma200獨立於`FULL_PERIODS`(5,10,20,60,120,240)之外另外算一次：那組是本專案「多頭排列」
+    規則慣例用的天期，跟SAR翻轉篩選「股價相對長期均線」條件要用的200天(見schema.sql的
+    daily_indicators說明)天期不同、用途也不同，不應該混在同一組`FULL_PERIODS`裡。
     """
     if df.empty:
         return []
     ma_frame = compute_ma_set(df["close"], periods=FULL_PERIODS)
+    ma200 = sma(df["close"], 200)
     sar_bull, sar_values = compute_sar(df["high"], df["low"], df["close"])
     flip_days_ago_list = _sar_flip_days_ago_series(sar_bull)
     sar_len = len(sar_bull)
@@ -96,6 +101,7 @@ def compute_indicator_rows(stock_id: str, df: pd.DataFrame, target_dates: set[st
             "ma20": _safe_float(ma_frame["MA20"].iloc[i]),
             "ma60": _safe_float(ma_frame["MA60"].iloc[i]),
             "ma120": _safe_float(ma_frame["MA120"].iloc[i]),
+            "ma200": _safe_float(ma200.iloc[i]),
             "ma240": _safe_float(ma_frame["MA240"].iloc[i]),
             "sar_value": _safe_float(sar_values.iloc[i]) if has_sar else None,
             "sar_is_bull": int(bool(sar_bull.iloc[i])) if has_sar else None,

@@ -166,15 +166,17 @@ def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str],
 # 不用另外改UI程式碼。
 CANDIDATE_FILTERS: dict[str, Callable[[object, list[str], str | None], dict[str, bool]]] = {
     "均線多頭排列（MA5>MA10>MA20）": _ma_bullish_filter((5, 10, 20)),
-    "均線多頭排列（...>MA120）": _ma_bullish_filter((5, 10, 20, 120)),
-    "均線多頭排列（...>MA240）": _ma_bullish_filter((5, 10, 20, 120, 240)),
+    "均線多頭排列（...>MA60）": _ma_bullish_filter((5, 10, 20, 60)),
+    "均線多頭排列（...>MA120）": _ma_bullish_filter((5, 10, 20, 60, 120)),
+    "均線多頭排列（...>MA240）": _ma_bullish_filter((5, 10, 20, 60, 120, 240)),
 }
 
 # 各篩選器預設勾選狀態：MA5>MA10>MA20是書中做多的基本地基條件，預設打勾；延伸到
-# MA120/MA240的「多線多排」條件較嚴格(篩到的股票會少很多)，預設不勾，避免使用者
+# MA60/MA120/MA240的「多線多排」條件較嚴格(篩到的股票會少很多)，預設不勾，避免使用者
 # 一開啟候選清單就發現空空如也、誤以為系統壞掉。未列在這裡的篩選標籤視為預設不勾。
 CANDIDATE_FILTER_DEFAULTS: dict[str, bool] = {
     "均線多頭排列（MA5>MA10>MA20）": True,
+    "均線多頭排列（...>MA60）": False,
     "均線多頭排列（...>MA120）": False,
     "均線多頭排列（...>MA240）": False,
 }
@@ -212,12 +214,15 @@ def compute_sar_flip_flags(
     指標，多算或少算一天都可能讓翻轉判斷的日期整個往後推移，候選清單瀏覽「過去某一天」時
     一定要把這個日期傳進來，不能讓SAR用DB目前最新資料算。
 
-    2026-08-04新增必備條件——股價相對長期均線(MA240)的位置，理由跟`load_sar_flip_flags_
+    2026-08-04新增必備條件——股價相對長期均線(MA200)的位置，理由跟`load_sar_flip_flags_
     from_table`同一則說明一致(使用者比對d:\\tw_stock_analyzer發現對方「SAR多頭」隱含
     「股價>MA200」)。這裡直接用`_fetch_recent_columns_batched`已經抓到的250天close序列
-    自算rolling(240)均值，不用另外查`daily_indicators`——`SAR_FLIP_LOOKBACK_DAYS`(250)
-    本來就大於240，暖身資料充足時剛好夠用；不足240筆(例如新上市股票)視為無法判斷，保守
-    當作不成立，跟`load_sar_flip_flags_from_table`的ma240缺值處理一致。
+    自算rolling(200)均值，不用另外查`daily_indicators`——`SAR_FLIP_LOOKBACK_DAYS`(250)
+    本來就大於200，暖身資料充足時剛好夠用；不足200筆(例如新上市股票)視為無法判斷，保守
+    當作不成立，跟`load_sar_flip_flags_from_table`的ma200缺值處理一致。這條件刻意用
+    ma200、不是本專案「多頭排列」慣例用的ma240——使用者2026-08-04明確要求SAR這條件要
+    跟對方的200天口徑對齊，兩邊才能互相核對，不要因為借用本專案自己既有的欄位而口徑
+    不一致(ma240仍然保留給MA5>10>20>60>120>240的多排條件用，意義不同)。
     """
     if not stock_ids:
         return {}
@@ -239,12 +244,12 @@ def compute_sar_flip_flags(
         if not sar_flipped_within(sar_bull, direction=direction, within_days=within_days):
             flags[stock_id] = False
             continue
-        if len(close) < 240:
+        if len(close) < 200:
             flags[stock_id] = False
             continue
-        ma240 = close.rolling(240).mean().iloc[-1]
+        ma200 = close.rolling(200).mean().iloc[-1]
         last_close = close.iloc[-1]
-        flags[stock_id] = bool(last_close > ma240 if wants_bull else last_close < ma240)
+        flags[stock_id] = bool(last_close > ma200 if wants_bull else last_close < ma200)
     return flags
 
 
@@ -301,19 +306,21 @@ def load_sar_flip_flags_from_table(
     單純看SAR方向翻轉；本專案原本只看sar_is_bull/sar_flip_days_ago，沒有這層把關，
     導致「均線多頭排列+SAR翻轉」篩出一批均線/SAR形式上符合多頭定義、但股價其實還在
     長期均線之下的弱勢股(2026-08-03的3085/4153/4430/4747/8905是實測發現的案例)。
-    這裡長期均線用本專案既有的MA240(`FULL_PERIODS`/`MA_ROW_PERIODS`一貫使用240天，
-    不是200天)，實測對照組(4430/8905這兩檔改用精確200天SMA重算)得到的股價相對均線
-    位置結果跟240天完全一致，不需要為了跟對方的200天位數對齊另外新增一條ma200指標、
-    多一次全歷史回補成本。多頭要求收盤價嚴格大於MA240、空頭要求嚴格小於，跟使用者
-    確認這是「SAR翻轉」判斷本身就該有的意涵，不是另外開一個可勾選的獨立選項；MA240
-    缺值(例如新上市股票不到240天歷史)時無法判斷股價位置，保守視為不成立。
+
+    長期均線刻意用獨立的ma200欄位(見schema.sql的daily_indicators說明)，不是借用本專案
+    「多頭排列」慣例既有的ma240——使用者2026-08-04明確要求：SAR這個條件要跟對方的
+    200天口徑對齊，這樣兩邊的結果之後才能互相核對，不要因為省一次回補成本就沿用本專案
+    自己240天的定義(那是給MA5>10>20>60>120>240多排條件用的，意義跟這裡不同)。多頭要求
+    收盤價嚴格大於MA200、空頭要求嚴格小於，跟使用者確認這是「SAR翻轉」判斷本身就該有的
+    意涵，不是另外開一個可勾選的獨立選項；ma200缺值(例如新上市股票不到200天歷史、或還
+    沒重新回補過)時無法判斷股價位置，保守視為不成立。
     """
     if not stock_ids:
         return {}
     placeholders = ",".join("?" * len(stock_ids))
     cur = conn.execute(
         f"""
-        SELECT di.stock_id, di.sar_is_bull, di.sar_flip_days_ago, di.ma240, sp.close
+        SELECT di.stock_id, di.sar_is_bull, di.sar_flip_days_ago, di.ma200, sp.close
         FROM daily_indicators di
         LEFT JOIN stock_prices sp ON sp.stock_id = di.stock_id AND sp.date = di.date
         WHERE di.stock_id IN ({placeholders}) AND di.date = ?
@@ -322,14 +329,14 @@ def load_sar_flip_flags_from_table(
     )
     wants_bull = direction == "多頭"
     flags: dict[str, bool] = {stock_id: False for stock_id in stock_ids}
-    for stock_id, sar_is_bull, sar_flip_days_ago, ma240, close in cur.fetchall():
+    for stock_id, sar_is_bull, sar_flip_days_ago, ma200, close in cur.fetchall():
         if sar_is_bull is None or sar_flip_days_ago is None:
             continue
         if bool(sar_is_bull) != wants_bull or sar_flip_days_ago > within_days:
             continue
-        if ma240 is None or close is None:
+        if ma200 is None or close is None:
             continue
-        flags[stock_id] = close > ma240 if wants_bull else close < ma240
+        flags[stock_id] = close > ma200 if wants_bull else close < ma200
     return flags
 
 

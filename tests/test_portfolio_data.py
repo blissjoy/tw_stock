@@ -31,7 +31,7 @@ def _seed_stock(main_conn, stock_id: str, name: str, prices: list[dict], indicat
     if indicator is not None:
         upsert_daily_indicators(main_conn, [{
             "stock_id": stock_id, "date": prices[-1]["date"],
-            "ma5": None, "ma10": None, "ma20": None, "ma60": None, "ma120": None, "ma240": None,
+            "ma5": None, "ma10": None, "ma20": None, "ma60": None, "ma120": None, "ma200": None, "ma240": None,
             "sar_value": indicator["sar_value"], "sar_is_bull": indicator["sar_is_bull"],
             "sar_flip_days_ago": 1, "updated_at": "2026-08-02T00:00:00",
         }])

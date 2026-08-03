@@ -149,6 +149,12 @@ CREATE TABLE IF NOT EXISTS daily_data_status (
 -- 收盤後可能重抓一次拿到最終數字，加上這次session才修過的「TAIEX成交量延遲」bug
 -- 證實歷史資料確實會事後被回補/修正，因此scripts/daily_pipeline.py每次排程執行時
 -- 會額外往回重刷INDICATOR_REFRESH_WINDOW_DAYS個交易日，不是只算當天這一筆。
+-- ma200(2026-08-04新增)是獨立於ma5~ma240這組「朱家泓多頭排列」慣例之外的一條均線：
+-- 只給SAR翻轉篩選的必備條件(股價需站上/跌破長期均線，見chart_data.py的
+-- compute_sar_flip_flags()/load_sar_flip_flags_from_table())專用，刻意用200天而不是
+-- 沿用既有的ma240——使用者比對的另一套獨立工具(d:\tw_stock_analyzer)這條件用的是
+-- 200天，兩邊要能對得上號，不能為了省一個欄位就借用本專案自己240天的慣例(那是給
+-- MA5>10>20>60>120>240多排條件用的、意義不同)。
 CREATE TABLE IF NOT EXISTS daily_indicators (
     stock_id            TEXT NOT NULL REFERENCES stocks(stock_id),
     date                TEXT NOT NULL,
@@ -157,6 +163,7 @@ CREATE TABLE IF NOT EXISTS daily_indicators (
     ma20                REAL,
     ma60                REAL,
     ma120               REAL,
+    ma200               REAL,
     ma240               REAL,
     sar_value           REAL,
     sar_is_bull         INTEGER,  -- 0/1，NULL代表資料不足(<3天)算不出SAR
