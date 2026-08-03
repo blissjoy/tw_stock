@@ -211,12 +211,20 @@ def compute_sar_flip_flags(
     as_of_date：見`_fetch_recent_columns_batched`的說明——SAR是路徑相關(path-dependent)
     指標，多算或少算一天都可能讓翻轉判斷的日期整個往後推移，候選清單瀏覽「過去某一天」時
     一定要把這個日期傳進來，不能讓SAR用DB目前最新資料算。
+
+    2026-08-04新增必備條件——股價相對長期均線(MA240)的位置，理由跟`load_sar_flip_flags_
+    from_table`同一則說明一致(使用者比對d:\\tw_stock_analyzer發現對方「SAR多頭」隱含
+    「股價>MA200」)。這裡直接用`_fetch_recent_columns_batched`已經抓到的250天close序列
+    自算rolling(240)均值，不用另外查`daily_indicators`——`SAR_FLIP_LOOKBACK_DAYS`(250)
+    本來就大於240，暖身資料充足時剛好夠用；不足240筆(例如新上市股票)視為無法判斷，保守
+    當作不成立，跟`load_sar_flip_flags_from_table`的ma240缺值處理一致。
     """
     if not stock_ids:
         return {}
     rows_by_stock = _fetch_recent_columns_batched(
         conn, stock_ids, ["high", "low", "close"], lookback_days, as_of_date=as_of_date
     )
+    wants_bull = direction == "多頭"
     flags: dict[str, bool] = {}
     for stock_id in stock_ids:
         per_stock = rows_by_stock.get(stock_id, {})
@@ -228,7 +236,15 @@ def compute_sar_flip_flags(
         low = pd.Series(per_stock["low"])
         close = pd.Series(per_stock["close"])
         sar_bull, _ = compute_sar(high, low, close)
-        flags[stock_id] = sar_flipped_within(sar_bull, direction=direction, within_days=within_days)
+        if not sar_flipped_within(sar_bull, direction=direction, within_days=within_days):
+            flags[stock_id] = False
+            continue
+        if len(close) < 240:
+            flags[stock_id] = False
+            continue
+        ma240 = close.rolling(240).mean().iloc[-1]
+        last_close = close.iloc[-1]
+        flags[stock_id] = bool(last_close > ma240 if wants_bull else last_close < ma240)
     return flags
 
 
@@ -279,23 +295,41 @@ def load_sar_flip_flags_from_table(
 
     `compute_sar_flip_flags()`本身不變、不刪除，理由同`load_ma_bullish_flags_from_
     table()`。查無紀錄的股票(還沒回補、或資料不足<3天算不出SAR)視為不成立(False)。
+
+    2026-08-04新增必備條件——股價相對長期均線的位置：使用者比對另一套獨立工具
+    (d:\\tw_stock_analyzer)發現對方的「SAR多頭」隱含「股價>MA200」這個條件，不是
+    單純看SAR方向翻轉；本專案原本只看sar_is_bull/sar_flip_days_ago，沒有這層把關，
+    導致「均線多頭排列+SAR翻轉」篩出一批均線/SAR形式上符合多頭定義、但股價其實還在
+    長期均線之下的弱勢股(2026-08-03的3085/4153/4430/4747/8905是實測發現的案例)。
+    這裡長期均線用本專案既有的MA240(`FULL_PERIODS`/`MA_ROW_PERIODS`一貫使用240天，
+    不是200天)，實測對照組(4430/8905這兩檔改用精確200天SMA重算)得到的股價相對均線
+    位置結果跟240天完全一致，不需要為了跟對方的200天位數對齊另外新增一條ma200指標、
+    多一次全歷史回補成本。多頭要求收盤價嚴格大於MA240、空頭要求嚴格小於，跟使用者
+    確認這是「SAR翻轉」判斷本身就該有的意涵，不是另外開一個可勾選的獨立選項；MA240
+    缺值(例如新上市股票不到240天歷史)時無法判斷股價位置，保守視為不成立。
     """
     if not stock_ids:
         return {}
     placeholders = ",".join("?" * len(stock_ids))
     cur = conn.execute(
         f"""
-        SELECT stock_id, sar_is_bull, sar_flip_days_ago FROM daily_indicators
-        WHERE stock_id IN ({placeholders}) AND date = ?
+        SELECT di.stock_id, di.sar_is_bull, di.sar_flip_days_ago, di.ma240, sp.close
+        FROM daily_indicators di
+        LEFT JOIN stock_prices sp ON sp.stock_id = di.stock_id AND sp.date = di.date
+        WHERE di.stock_id IN ({placeholders}) AND di.date = ?
         """,
         [*stock_ids, as_of_date],
     )
     wants_bull = direction == "多頭"
     flags: dict[str, bool] = {stock_id: False for stock_id in stock_ids}
-    for stock_id, sar_is_bull, sar_flip_days_ago in cur.fetchall():
+    for stock_id, sar_is_bull, sar_flip_days_ago, ma240, close in cur.fetchall():
         if sar_is_bull is None or sar_flip_days_ago is None:
             continue
-        flags[stock_id] = bool(sar_is_bull) == wants_bull and sar_flip_days_ago <= within_days
+        if bool(sar_is_bull) != wants_bull or sar_flip_days_ago > within_days:
+            continue
+        if ma240 is None or close is None:
+            continue
+        flags[stock_id] = close > ma240 if wants_bull else close < ma240
     return flags
 
 
