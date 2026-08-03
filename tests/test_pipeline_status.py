@@ -1,6 +1,8 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import src.presentation.pipeline_status as pipeline_status
+from src.data.storage import init_db, upsert_daily_indicators, upsert_stocks
 
 
 def test_read_status_returns_none_when_file_does_not_exist(tmp_path, monkeypatch):
@@ -82,6 +84,61 @@ def test_next_scheduled_run_time_skips_weekend():
     now = datetime(2026, 7, 31, 15, 0)  # 2026-07-31是週五，已過當天最後時段
     next_run = pipeline_status.next_scheduled_run_time(now)
     assert next_run == datetime(2026, 8, 3, 10, 0)  # 跳過六日，落在下週一
+
+
+def test_append_run_snapshot_records_only_recently_flipped_stocks(tmp_path, monkeypatch):
+    """2026-08-04新增：只記錄sar_flip_days_ago<=3的股票(候選清單「SAR翻轉」篩選最
+    關心的邊界情況)，避免log檔案隨全市場股票數無限膨脹——9999超過3天不該被記錄。"""
+    monkeypatch.setattr(pipeline_status, "RUN_HISTORY_PATH", tmp_path / "history.jsonl")
+    conn = init_db(":memory:")
+    upsert_stocks(conn, [
+        {"stock_id": "1742", "name": "台蠟", "market": "TPEx", "industry": None, "updated_at": "2026-08-03"},
+        {"stock_id": "9999", "name": "測試", "market": "TWSE", "industry": None, "updated_at": "2026-08-03"},
+    ])
+    upsert_daily_indicators(conn, [
+        {"stock_id": "1742", "date": "2026-08-03", "ma5": 17.0, "ma10": 16.63, "ma20": 16.14,
+         "ma60": None, "ma120": None, "ma240": None, "sar_value": 15.85, "sar_is_bull": True,
+         "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
+        {"stock_id": "9999", "date": "2026-08-03", "ma5": 10.0, "ma10": 9.5, "ma20": 9.0,
+         "ma60": None, "ma120": None, "ma240": None, "sar_value": 8.0, "sar_is_bull": True,
+         "sar_flip_days_ago": 10, "updated_at": "2026-08-03T17:03:00"},
+    ])
+
+    pipeline_status.append_run_snapshot(conn, "2026-08-03", is_intraday=False, candidate_count=12)
+
+    lines = pipeline_status.RUN_HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    snapshot = json.loads(lines[0])
+    assert snapshot["iso_date"] == "2026-08-03"
+    assert snapshot["is_intraday"] is False
+    assert snapshot["candidate_count"] == 12
+    stock_ids = {r["stock_id"] for r in snapshot["recent_sar_flips"]}
+    assert stock_ids == {"1742"}
+
+
+def test_append_run_snapshot_appends_not_overwrites(tmp_path, monkeypatch):
+    """跟write_status()(覆寫)不同，這份紀錄要能保留同一天多次執行的歷史，才能事後
+    比對「14:30那次」跟「17:00那次」的實際數值有沒有不一樣。"""
+    monkeypatch.setattr(pipeline_status, "RUN_HISTORY_PATH", tmp_path / "history.jsonl")
+    conn = init_db(":memory:")
+
+    pipeline_status.append_run_snapshot(conn, "2026-08-03", is_intraday=True, candidate_count=5)
+    pipeline_status.append_run_snapshot(conn, "2026-08-03", is_intraday=False, candidate_count=12)
+
+    lines = pipeline_status.RUN_HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["candidate_count"] == 5
+    assert json.loads(lines[1])["candidate_count"] == 12
+
+
+def test_append_run_snapshot_swallows_exceptions():
+    """DB查詢失敗不應該讓呼叫端crash——這份紀錄是事後診斷輔助，不是pipeline是否成功
+    的判準，跟write_status()同樣的容錯原則。"""
+    class _BadConn:
+        def execute(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    pipeline_status.append_run_snapshot(_BadConn(), "2026-08-03", is_intraday=False, candidate_count=0)
 
 
 def test_next_scheduled_run_time_defaults_to_now_when_not_given(monkeypatch):

@@ -24,6 +24,13 @@ from typing import Any
 
 STATUS_PATH = Path(__file__).resolve().parents[2] / "data" / "pipeline_status.json"
 
+# 2026-08-04新增：使用者發現同一個交易日內，14:30跟17:00兩次排程跑出來的候選清單
+# (MA5>MA10>MA20+SAR翻轉)不一致，但`stock_prices`/`daily_indicators`每次排程都是
+# 直接覆寫、沒有保留歷史，事後完全查不到「14:30那次實際寫入的數值」，只能推測不能
+# 舉證。這裡新增一份「累積、不覆寫」的執行紀錄檔，之後再發生類似情況，可以直接比對
+# 同一天不同時段的實際數值，不用再事後憑印象猜測。
+RUN_HISTORY_PATH = Path(__file__).resolve().parents[2] / "data" / "pipeline_run_history.jsonl"
+
 # Windows工作排程器實際建立的每日排程時間(週一~五，見README.md「Windows工作排程器」章節
 # 與ai/PLAN.md 2026-07-24的建立紀錄：`tw_stock_pipeline_1000`~`_1430`共6個排程工作)，
 # 用來推算「下次更新時間」顯示給使用者看。這裡刻意寫死這份清單，不在執行期間呼叫
@@ -78,6 +85,46 @@ def read_status() -> dict[str, Any] | None:
         return json.loads(STATUS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def append_run_snapshot(conn, iso_date: str, is_intraday: bool, candidate_count: int) -> None:
+    """`run_daily_pipeline()`每次執行完畢時追加一筆執行紀錄到`RUN_HISTORY_PATH`(JSONL，
+    一行一筆，只增不減)，供之後診斷「同一個交易日內、不同時段執行結果不一致」這類問題
+    用——2026-08-04新增，起因見上面`RUN_HISTORY_PATH`的說明。
+
+    不記錄全市場每一檔股票(那樣log檔案會無限膨脹)，只記錄`daily_indicators`裡
+    `sar_flip_days_ago<=3`的股票(最近3個交易日內才翻轉、最容易因為資料事後修正而
+    在不同時段執行時「翻轉判定」跟著變動的邊界情況)——這組股票剛好就是候選清單
+    「SAR翻轉」篩選最關心的對象，鎖定這裡記錄，log檔案大小可控。
+
+    寫入失敗(例如data/目錄不存在、DB查詢失敗)不應該讓pipeline本身中斷，這裡直接
+    吞掉例外——這份紀錄是事後診斷輔助，不是pipeline是否成功的判準，跟write_status()
+    同樣的容錯原則。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT stock_id, sar_value, sar_is_bull, sar_flip_days_ago, ma5, ma10, ma20 "
+            "FROM daily_indicators WHERE date = ? AND sar_flip_days_ago <= 3",
+            (iso_date,),
+        ).fetchall()
+        snapshot = {
+            "run_at": datetime.now(timezone.utc).isoformat(),
+            "iso_date": iso_date,
+            "is_intraday": is_intraday,
+            "candidate_count": candidate_count,
+            "recent_sar_flips": [
+                {
+                    "stock_id": r[0], "sar_value": r[1], "sar_is_bull": bool(r[2]),
+                    "sar_flip_days_ago": r[3], "ma5": r[4], "ma10": r[5], "ma20": r[6],
+                }
+                for r in rows
+            ],
+        }
+        RUN_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with RUN_HISTORY_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def is_stale(status: dict[str, Any]) -> bool:

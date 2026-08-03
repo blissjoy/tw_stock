@@ -5366,3 +5366,60 @@ QWebEnginePage.printToPdf()會被保留成PDF內部可點擊的跳轉連結，�
   條列/內文都正確轉成HTML)；實際匯出PDF成功(1.77MB，比先前沒有附錄時的
   774KB大，符合預期)。`pytest tests/ -q`869個測試全數通過(這項改動同樣是
   UI/匯出邏輯調整，用真實視窗驗證取代新增測試)。
+
+## 候選清單/SAR翻轉不一致問題調查＋新增執行紀錄logging(2026-08-04)
+
+使用者以緯創等5檔股票為例，指出`ref-project`(另一套獨立的選股分析工具，
+現正實際跑在`d:\tw_stock_analyzer`，不是repo裡`ref-project/`那份已經是
+7/20的舊快照)抓出的「MA5>10>20+SAR多頭翻1天內」候選清單(1742/2425/3229/
+3231/5490)跟我們的不一樣，且同一天14:30/17:00兩次排程跑出來的候選清單
+本身也不一致——使用者認為14:30時TWSE收盤資料就該已經確定，17:00不該再
+補上新股票，懷疑是bug。
+
+查證過程：
+- 改查`d:\tw_stock_analyzer\database\scanner_cache.db`(這才是使用者實際
+  在跑的版本，最後修改時間是查證當天，比repo裡`ref-project/`那份新很多)，
+  確認CSV裡的5檔數字(close/MA5/10/20/SAR值)跟這個DB完全吻合，但這幾筆
+  的`created_at`是`2026-08-03 02:06:54`——凌晨2點多，早於台股9點開盤，
+  代表ref project「今天」的掃描可能沿用的不是「今天13:30收盤後」的資料，
+  這讓「ref project的5筆絕對是今天最終數字」的假設也有疑點。
+- 直接呼叫我們自己的`load_ma_bullish_flags_from_table()`/`load_sar_flip_
+  flags_from_table()`跟完整的`apply_candidate_filters()`，用**我們目前
+  的DB狀態**測試這8檔股票(ref的5檔+我們原本多出的3檔)：全部8檔目前都
+  符合MA5>10>20+SAR多頭翻1天內，實際跑出的候選清單是12檔(1459/1742/
+  2425/3085/3229/3231/4153/4430/4570/4747/5490/8905)，是ref project那
+  5檔的超集合——代表**目前**我們的篩選邏輯跟ref project的結果並不衝突，
+  只是包含更多。
+- 查`daily_indicators.updated_at`：這12檔全部都是`2026-08-03T17:03:xx`
+  更新的(對應今天稍早新增的17:00排程)，跟`pipeline_status.json`的
+  `updated_at`(UTC 09:03≈台灣時間17:03)吻合，`schtasks`查詢也確認今天
+  10:00~17:00這8個排程(2100那個還沒到執行時間)全部成功執行過。
+  但`stock_prices`/`daily_indicators`都是每次排程直接覆寫、沒有保留
+  歷史，**無法從DB回溯查出14:30那次實際寫入的數值是什麼**，沒辦法直接
+  舉證「14:30到17:00之間到底發生了什麼」——只能確認`refresh_indicator_
+  window()`的既有設計本身就是為了「吸收股價資料事後被修正的風險」而
+  存在(docstring裡明確提到TWSE盤中價→收盤價、以及這次session修過的
+  TAIEX成交量延遲bug當先例)，這類情況在這個系統裡並非首次發生，但無法
+  100%排除是pipeline本身的bug。
+
+使用者選擇：加上logging，讓下次再發生類似情況時能直接拿到證據，不用再
+事後憑印象/推測。
+
+- `src/presentation/pipeline_status.py`新增`RUN_HISTORY_PATH`(`data/
+  pipeline_run_history.jsonl`)跟`append_run_snapshot(conn, iso_date,
+  is_intraday, candidate_count)`：每次呼叫**追加**一行JSON(不覆寫，累積
+  歷史)，記錄執行時間/is_intraday/候選檔數，以及當天`sar_flip_days_ago
+  <=3`(最近翻轉、候選清單SAR篩選最關心的邊界情況)股票的完整指標值——
+  不記錄全市場(避免log檔案無限膨脹)，只鎖定這組最容易受資料修正影響的
+  子集。寫入失敗時吞掉例外，跟`write_status()`同樣的容錯原則。
+- `scripts/daily_pipeline.py`的`run_daily_pipeline()`在`pipeline_status.
+  write_status("done", ...)`前呼叫這個新函式。
+- `tests/test_pipeline_status.py`新增3個測試：只記錄`sar_flip_days_ago
+  <=3`的股票、多次呼叫會累加不覆寫、DB查詢失敗時不crash。`pytest
+  tests/ -q`872個測試全數通過。
+- 用真實pipeline跑一次`--dry-run --skip-tpex`(複製一份DB避免影響正式
+  資料)驗證：`data/pipeline_run_history.jsonl`正確追加一行，
+  candidate_count=854、844檔最近翻轉的股票完整記錄下來，pipeline本身
+  執行正常沒有因為新增的logging而出錯。
+- `README.md`「本機每日排程」章節補充這個新檔案的說明，包含檔案會持續
+  增長(實測每次約100~150KB)、可自行清空的提醒。

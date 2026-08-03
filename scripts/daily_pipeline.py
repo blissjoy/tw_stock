@@ -350,6 +350,7 @@ def run_daily_pipeline(
             except Exception as exc:  # noqa: BLE001
                 print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
 
+        pipeline_status.append_run_snapshot(conn, iso_date, is_intraday, len(candidates))
         pipeline_status.write_status("done", date=iso_date, candidate_count=len(candidates))
         return candidates
     except Exception:

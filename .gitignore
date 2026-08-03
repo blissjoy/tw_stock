@@ -25,5 +25,8 @@ backfill_log.txt
 
 # 每日pipeline執行狀態(供PySide6桌面版UI輪詢顯示「目前正在自動跑」)，純本機執行期狀態，不需要進版控
 data/pipeline_status.json
+# 每次pipeline執行的追加式診斷紀錄(見src/presentation/pipeline_status.py的
+# append_run_snapshot())，純本機事後診斷用途，會持續增長，不需要進版控
+data/pipeline_run_history.jsonl
 
 temp/
