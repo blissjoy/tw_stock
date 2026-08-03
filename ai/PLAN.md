@@ -5281,3 +5281,48 @@ MA5>MA10>MA20=True)、`CANDIDATE_SAR_FLIP_ENABLED_DEFAULT`(True，多頭/
   q2(取消朱家泓)前6檔(有daily_candidates規則)一樣附上條件描述，第7~12檔
   (單純符合均線+SAR)維持只顯示條件描述，兩種情境的訊號欄位現在都能一致
   反映實際符合的篩選條件。
+
+## 候選清單成交量門檻／產業輪動預設排序／個股清單新增「產出報表」PDF匯出(2026-08-04)
+
+使用者一次提出三個UI需求：①「選股」分頁產業別旁邊加一個「成交量>=N張」篩選
+(預設10)；②「產業輪動」分頁預設用漲幅降冪排序；③「個股清單」新增一個
+「產出報表」分頁，依序包含圖表/個股明細/個股分析，且要是真正的匯出/列印
+功能(存成PDF)——這點先問過使用者，確認要「真正的匯出/列印功能」而不是單純
+把三個既有分頁內容拼接成另一個互動畫面。
+
+- `desktop/main_window.py`「選股」分頁的`market_industry_bar`新增
+  `self.volume_filter_spin`(QSpinBox，範圍0~999999，預設10，單位「張」)，
+  跟市場/產業別同一套「改完要按套用篩選才生效」慣例(不即時連動)。
+  `_reload_candidates()`裡`df["volume"]`(原始單位股)跟門檻(張)*1000比較，
+  0代表不限制。
+- `_build_industry_rotation_tab()`/`_refresh_industry_rotation_tab()`：
+  填完表格後呼叫`self.industry_table.sortByColumn(2, Qt.SortOrder.
+  DescendingOrder)`(欄位index 2是「平均漲跌幅(%)」)，一打開就能看到資金
+  最集中流入的產業排最前面。
+- 「產出報表」新增為`detail_inner_tabs`第4個inner tab：
+  - `_build_report_html(stock_id, stock_label)`：組出完整HTML文件，依序
+    包含圖表(用`<iframe>`內嵌已經寫好的`self._chart_html_path`——這是
+    `render_chart_html()`產生的完整獨立HTML檔案，不重新處理它的內部結構，
+    也不用重新畫一次圖)、個股明細(重用`_build_overview_*_html()`這5個
+    既有方法)、個股分析(重用`_build_analysis_sections_html()`，三段接
+    起來)——完全重用既有的HTML組裝函式，沒有另外實作任何一段內容邏輯。
+  - `_refresh_report_view()`：跟`chart_view`/`market_chart_view`同一套
+    「寫進暫存檔案(`self._report_html_path`)再`load()`」做法，避免
+    `setHtml()`的~2MB隱性限制(組合了全部規則說明文字，容易超過)。
+  - `_on_export_report_clicked()`：`QFileDialog.getSaveFileName()`選存檔
+    位置(預設桌面`{股票代號}_{名稱}_報表.pdf`)，呼叫`report_view.page().
+    printToPdf(path)`——這是非同步API，完成與否透過`pdfPrintingFinished`
+    訊號回報(`_on_report_pdf_finished()`，在分頁建構時就連接好，不是每次
+    點擊都重新連接，避免重複connect累積)。
+  - 沿用「切到這個inner tab才重新整理」的既有原則(`_on_detail_inner_tab_
+    changed()`新增index==3分支)，避免每次查詢股票都無條件組一次報表
+    (運算量不小，含全部規則比對)。
+  - `self.report_view`不追求跟其餘QTextBrowser區塊一樣「跟內容一樣高、
+    外層捲動」，讓QWebEngineView自己有內部捲軸(像瀏覽器分頁)，比較符合
+    「預覽報表」的直覺。
+- 用真實DB(2330台積電)+PySide6真實視窗驗證：切到「產出報表」分頁，圖表
+  iframe正確渲染完整K線圖(含均線/切線/支撐壓力/成交量/MACD)，工具列跟
+  右下角浮動回頂部按鈕都正常；實際點擊「匯出PDF」，`printToPdf()`回報
+  success=True，產生的PDF檔案774KB(非空、內容合理)。`pytest tests/ -q`
+  869個測試全數通過(這3項改動都沒有新增測試涵蓋的資料層邏輯，純UI/匯出
+  功能，用真實視窗驗證取代)。

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -623,6 +624,9 @@ class MainWindow(QMainWindow):
         # 通常有4~5MB，遠超過這個限制。改成寫進暫存檔案再用load(QUrl.fromLocalFile(...))，
         # 檔案大小沒有這個限制。同一個視窗重複使用同一個暫存檔案，不會每次渲染都留下新檔案。
         self._chart_html_path = Path(tempfile.gettempdir()) / f"tw_stock_chart_{id(self)}.html"
+        # 「產出報表」分頁的組合HTML(圖表+個股明細+個股分析)暫存檔案，同一套「setHtml()
+        # 大小限制」考量，見上面_chart_html_path的說明。
+        self._report_html_path = Path(tempfile.gettempdir()) / f"tw_stock_report_{id(self)}.html"
         # 見showEvent()：「大盤」是分頁0、也是視窗一開啟就顯示的預設分頁，`tabs.
         # currentChanged`訊號只在「真正切換」時觸發，開頭從-1變成0這個初始狀態不算
         # 「切換」不會發訊號，導致大盤分頁沒有經過_on_tab_changed()、一直是空白，要手動
@@ -710,6 +714,17 @@ class MainWindow(QMainWindow):
         if self.conn is not None:
             self.industry_filter_combo.set_items(chart_data.list_industries(self.conn))
         market_industry_bar.addWidget(self.industry_filter_combo)
+        market_industry_bar.addSpacing(20)
+        # 2026-08-04新增：使用者要求候選清單能篩掉成交量太小、流動性不足的股票——跟
+        # 市場/產業別同一套「候選股票池範圍」性質，改「套用篩選」按鈕時才生效(見
+        # market_filter_combo/industry_filter_combo的既有慣例，不即時連動)，預設
+        # 10張(使用者指定的預設值)。
+        market_industry_bar.addWidget(QLabel("成交量 >="))
+        self.volume_filter_spin = QSpinBox()
+        self.volume_filter_spin.setRange(0, 999_999)
+        self.volume_filter_spin.setValue(10)
+        self.volume_filter_spin.setSuffix(" 張")
+        market_industry_bar.addWidget(self.volume_filter_spin)
         market_industry_bar.addStretch()
         root_layout.addLayout(market_industry_bar)
 
@@ -1013,6 +1028,25 @@ class MainWindow(QMainWindow):
 
         self._build_stock_overview_tab()
 
+        # 2026-08-04新增：「產出報表」分頁，依序把圖表/個股明細/個股分析組合成一份
+        # 完整HTML(見_build_report_html())，用QWebEngineView預覽、可匯出成PDF——
+        # 跟其餘inner tab不同，這裡不追求「跟畫面內容一樣高、外層捲動」，內容本來就是
+        # 一份完整文件，讓QWebEngineView自己捲動比較符合「預覽報表」的直覺(像瀏覽器
+        # 分頁，不是像其餘QTextBrowser區塊那樣融入整頁)。
+        report_tab = QWidget()
+        report_tab_layout = QVBoxLayout(report_tab)
+        report_toolbar = QHBoxLayout()
+        self.report_export_btn = QPushButton("🖨 匯出PDF")
+        self.report_export_btn.clicked.connect(self._on_export_report_clicked)
+        report_toolbar.addWidget(self.report_export_btn)
+        report_toolbar.addStretch()
+        report_tab_layout.addLayout(report_toolbar)
+        self.report_view = QWebEngineView()
+        self.report_view.setMinimumHeight(700)
+        self.report_view.page().pdfPrintingFinished.connect(self._on_report_pdf_finished)
+        report_tab_layout.addWidget(self.report_view, stretch=1)
+        self.detail_inner_tabs.addTab(report_tab, "產出報表")
+
         self.detail_inner_tabs.currentChanged.connect(self._on_detail_inner_tab_changed)
         _FloatingTopButton(detail_scroll)
         bottom_layout.addWidget(self.detail_inner_tabs)
@@ -1161,6 +1195,9 @@ class MainWindow(QMainWindow):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.industry_table.setItem(row_idx, col_idx, item)
         self.industry_table.setSortingEnabled(True)
+        # 2026-08-04新增：使用者要求預設用「平均漲跌幅(%)」(欄位index 2)由高到低排序，
+        # 一打開就能看到資金最集中流入的產業排最前面，不用先手動點一次欄位標題排序。
+        self.industry_table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
 
     # ------------------------------------------------------------------
     # 庫存清單／觀察清單(2026-08-02移植自ref-project，DB跟主DB分開放，見
@@ -1899,6 +1936,12 @@ class MainWindow(QMainWindow):
         selected_industries = self.industry_filter_combo.checked_items()
         if selected_industries:
             df = df[df["industry"].isin(selected_industries)].reset_index(drop=True)
+        # 成交量門檻：跟市場/產業別一樣是「候選股票池範圍」，volume欄位原始單位是股，
+        # 門檻(張)要乘以1000才能比較；0代表不限制(使用者可以把門檻調到0關閉這個篩選)，
+        # 但0*1000=0，跟volume>=0邏輯上等同於不篩選，不需要另外特判。
+        min_volume_lots = self.volume_filter_spin.value()
+        if min_volume_lots > 0:
+            df = df[df["volume"] >= min_volume_lots * 1000].reset_index(drop=True)
         active_filters = [label for label, cb in self.filter_checkboxes.items() if cb.isChecked()]
         sar_flip_option = None
         if self.sar_flip_checkbox.isChecked():
@@ -2129,16 +2172,21 @@ class MainWindow(QMainWindow):
             self._refresh_stock_overview_view()
 
     def _on_detail_inner_tab_changed(self, index: int) -> None:
-        """切到「個股分析」(index==1)或「個股明細」(index==2)tab時才重新整理內容——
-        沿用_on_tab_changed()/showEvent()已經驗證過的模式：tab還沒真正顯示、layout
-        寬度還不正確前就呼叫document().size().height()，算出來的高度會嚴重失真，
-        不能在建構或背景重新整理時就無條件計算(見_build_stock_detail_tab()/
-        _AutoHeightTabWidget的說明)。
+        """切到「個股分析」(index==1)、「個股明細」(index==2)、「產出報表」(index==3)
+        tab時才重新整理內容——沿用_on_tab_changed()/showEvent()已經驗證過的模式：
+        tab還沒真正顯示、layout寬度還不正確前就呼叫document().size().height()，
+        算出來的高度會嚴重失真，不能在建構或背景重新整理時就無條件計算(見
+        _build_stock_detail_tab()/_AutoHeightTabWidget的說明)——「產出報表」用
+        QWebEngineView預覽，沒有這個高度計算問題，但仍然沿用「切到這個tab才重新整理」
+        的原則，避免每次查詢股票都無條件重算一次組合HTML(組合了5個明細區塊+規則
+        比對清單，運算量不小)。
         """
         if index == 1:
             self._refresh_analysis_view()
         elif index == 2:
             self._refresh_stock_overview_view()
+        elif index == 3:
+            self._refresh_report_view()
 
     @staticmethod
     def _build_analysis_text_view() -> QTextBrowser:
@@ -2398,6 +2446,89 @@ class MainWindow(QMainWindow):
         self._set_autoheight_html(self.analysis_summary_view, sections["summary"])
         self._set_autoheight_html(self.analysis_tech_view, sections["tech"])
         self._set_autoheight_html(self.analysis_chip_view, sections["chip"])
+
+    def _build_report_html(self, stock_id: str, stock_label: str) -> str:
+        """組出「產出報表」的完整HTML文件，依使用者指定的順序包含：圖表、個股明細、
+        個股分析——2026-08-04新增，供匯出/列印成PDF用，不是即時互動畫面，重用既有
+        的HTML組裝函式，不重新實作任何一段的內容邏輯：
+        - 圖表：用`<iframe>`內嵌已經寫好的self._chart_html_path(render_chart_html()
+          產生的完整獨立HTML檔案，含Plotly.js)，不重新處理它的內部結構——這個檔案
+          在_rerender_chart()裡只要查詢過股票就會寫入，不受目前停留在哪個inner tab
+          影響，所以這裡可以直接引用。
+        - 個股明細：重用_build_overview_*_html()這5個既有方法，跟_refresh_stock_
+          overview_view()用的是同一組函式。
+        - 個股分析：重用_build_analysis_sections_html()，三段(總結/技術面/籌碼面)
+          依序接起來——裡面的「查看技術面↓」等跳轉連結在報表裡不會有作用(沒有對應
+          的_CollapsibleBox可以展開/捲動)，但保留著不影響閱讀，只是點了沒反應。
+        """
+        detail_builders = {
+            "交易資訊": self._build_overview_quote_html,
+            "法人買賣總覽": self._build_overview_institutional_html,
+            "主力進出": self._build_overview_dealer_html,
+            "資券變化總覽": self._build_overview_margin_html,
+            "大戶籌碼": self._build_overview_chip_html,
+        }
+        detail_html = "".join(
+            f"<h3>{html.escape(title)}</h3>{builder(stock_id)}" for title, builder in detail_builders.items()
+        )
+        sections = self._build_analysis_sections_html(stock_id, "個股分析")
+        analysis_html = sections["summary"] + sections["tech"] + sections["chip"]
+        chart_src = QUrl.fromLocalFile(str(self._chart_html_path)).toString()
+
+        return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body {{ font-family: 'Microsoft JhengHei UI', sans-serif; padding: 0 16px; }}
+h1 {{ font-size: 20px; }}
+h2 {{ font-size: 16px; border-bottom: 2px solid #2980b9; padding-bottom: 4px; margin-top: 32px; }}
+h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
+iframe {{ width: 100%; height: 900px; border: none; }}
+</style></head>
+<body>
+<h1>{html.escape(stock_label)} 個股報表</h1>
+<h2>圖表</h2>
+<iframe src="{chart_src}"></iframe>
+<h2>個股明細</h2>
+{detail_html}
+<h2>個股分析</h2>
+{analysis_html}
+</body></html>"""
+
+    def _refresh_report_view(self) -> None:
+        """填入「產出報表」分頁的預覽內容——跟chart_view/market_chart_view同一套
+        「寫進暫存檔案再load()」做法(見self._chart_html_path的說明)，組合後的HTML
+        含個股分析/個股明細所有規則說明文字，容易超過setHtml()的~2MB隱性限制。
+        """
+        if self.conn is None or not self._current_stock_id:
+            self.report_view.setHtml("<p>請先從候選清單點選或查詢一檔股票。</p>")
+            return
+        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
+        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        report_html = self._build_report_html(self._current_stock_id, stock_label)
+        self._report_html_path.write_text(report_html, encoding="utf-8")
+        self.report_view.load(QUrl.fromLocalFile(str(self._report_html_path)))
+
+    def _on_export_report_clicked(self) -> None:
+        """「🖨 匯出PDF」按鈕：把目前「產出報表」預覽的內容(self.report_view已載入的
+        HTML)輸出成PDF檔案，使用者選擇存檔位置。QWebEnginePage.printToPdf()是非同步
+        API，完成與否透過pdfPrintingFinished訊號回報(見_on_report_pdf_finished()，
+        在_build_stock_detail_tab()建構時就連接好，不是每次點擊都重新連接一次)。
+        """
+        if self.conn is None or not self._current_stock_id:
+            QMessageBox.information(self, "尚未選取股票", "請先從候選清單點選或查詢一檔股票，才能匯出報表。")
+            return
+        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
+        stock_label = f"{self._current_stock_id}_{stock_name}" if stock_name else self._current_stock_id
+        default_path = str(Path.home() / "Desktop" / f"{stock_label}_報表.pdf")
+        path, _ = QFileDialog.getSaveFileName(self, "匯出報表PDF", default_path, "PDF 檔案 (*.pdf)")
+        if not path:
+            return
+        self.report_view.page().printToPdf(path)
+
+    def _on_report_pdf_finished(self, file_path: str, success: bool) -> None:
+        if success:
+            QMessageBox.information(self, "匯出完成", f"報表已儲存至：\n{file_path}")
+        else:
+            QMessageBox.warning(self, "匯出失敗", "PDF匯出失敗，請重試。")
 
     @staticmethod
     def _colored_num(value, decimals: int = 0, signed: bool = False, suffix: str = "") -> str:
