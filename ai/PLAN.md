@@ -5094,3 +5094,80 @@ yfinance盤中即時價備援)，成交量本身是有的(149,208張，跟候選
   `load_quote_summary()`確認估算路徑：均價(20.3+19.9+20.0)/3=20.0667、
   `avg_price_is_estimated=True`，跟「均價」欄位共用同一段程式碼，UI顯示
   邏輯已用程式碼檢視確認一致，不需要另外截圖驗證這條路徑。
+
+## 個股分析／大盤分析拆成技術面／籌碼面兩個可收合區塊＋總結導覽＋浮動回頂部(2026-08-04)
+
+使用者問「個股/大盤分析有沒有接上籌碼的rule？」——查證後確認`src/screener/
+rule_scan.py`明確排除三大法人籌碼類規則(docstring寫「本專案完全沒有抓這些
+資料」，這句話已經過時：這幾天已經在「個股明細」分頁做了三大法人連續買賣超
+判讀跟融資維持率斷頭/超跌反彈判讀，只是沒有接進「個股分析」的規則比對清單)。
+使用者接著要求把「個股分析」重排成「技術面」／「籌碼面」兩個可收合區塊，上方
+先有「📌 總結分析」列出兩個區塊各自的連結，點擊可以直接跳到下方對應區塊，每個
+區塊結尾要有「回頂部」連結，另外要有一個固定在右下角、隨畫面捲動浮動的「回
+頂部」按鈕。「大盤分析」共用同一套渲染邏輯，套用同一個新版面(大盤沒有法人
+籌碼資料，籌碼面區塊自然是空的，這是資料本質限制不是bug)。這次改動範圍較大
+(牽涉6個檔案、UI架構調整)，先用EnterPlanMode規劃過一輪，使用者確認後才動工。
+
+延伸問題：籌碼面要顯示哪些「規則」？查證後只有朱家泓的`R-SCREEN-06`(三大法人
+連續賣超)在`ai/RULE_STATUS.md`有正式信心分數(75/100)；陳家豐書中的「投信連續
+買超觀察」「融資維持率規則」從來沒有被distill成`ai/zhu-rules/`那種正式格式
+檔案。使用者確認：陳家豐整本書(27章)的完整規則荒輪超出這次範圍，先只把目前
+已經寫成程式碼的這2條正式形式化，之後有需要再逐步擴充。
+
+- 新增`ai/chen-rules/籌碼面/投信連續買超觀察.md`(Rule ID: R-CHIP-01，信心
+  80/100)、`融資維持率規則.md`(Rule ID: R-CHIP-02，信心85/100)，格式比照
+  `ai/zhu-rules/`既有檔案。⚠️ 踩到一個解析器細節：`rule_docs.py`的索引器
+  逐行比對`- **欄位**: 值`，多行欄位只有第一行會被抓進索引——一開始把
+  「解讀」「原文與頁碼」寫成手動換行的多行段落，結果只抓到第一行、內容被
+  攔腰截斷(例如「投信受法規限制（單一個股持股比重不得」就斷在這裡)，
+  真實視窗驗證截圖時才發現這個問題，改成整段擠成一行(跟`R-SCREEN-06`既有
+  檔案的寫法一致)才修好，之後新增這類規則檔案要記得這個解析器限制。
+- `src/rule_docs.py`：`ZHU_RULES_DIR`(單一路徑)改成`RULE_DOC_DIRS`(清單，
+  含`ai/zhu-rules`+`ai/chen-rules`)，`_build_index()`改成迴圈跑過清單裡
+  每個目錄，解析邏輯不變。新增`parse_confidence(rule_id)`(封裝「查
+  load_rule_doc()+比對信心欄位開頭NN/100」這段邏輯)，`daily_screener.py`
+  的`analyze_stock_signals()`原本重複這段regex比對的地方改成呼叫這個
+  新函式(去重複)。
+- `src/presentation/stock_detail_data.py`新增`scan_chip_tier(conn,
+  stock_id)`(回傳籌碼面今天觸發的規則清單，重用既有的
+  `load_institutional_flow_analysis()`/`load_margin_maintenance_
+  analysis()`，不重新查DB)跟`analyze_chip_signals(conn, stock_id)`(補上
+  title/confidence/description/reference，跟`daily_screener.analyze_
+  stock_signals()`完全相同的dict結構，同rule_id合併規則沿用同一個模式)。
+- `desktop/main_window.py`(改動範圍最大)：
+  - `_CollapsibleBox`新增`expand()`；新增`_FloatingTopButton(QPushButton)`
+    類別(parent設成目標QScrollArea本身，installEventFilter監聽Resize事件
+    重新定位到右下角，點擊捲回頂部)。
+  - 抽出`_render_rule_match_blocks()`(技術面/籌碼面共用的規則清單渲染)、
+    `_build_analysis_text_view()`(6個QTextBrowser共用的統一設定)、
+    `_set_autoheight_html()`(取代原本`_set_analysis_html`/`_set_market_
+    analysis_html`兩個近乎重複的方法，`_set_overview_block_html()`也一併
+    改用這個共用方法)。
+  - `_build_analysis_html()`改寫成`_build_analysis_sections_html()`，回傳
+    {"summary","tech","chip"}三段HTML；summary裡的「📌 總結分析」用
+    `jumpto:///tech`/`jumpto:///chip`連結。
+  - `analysis_tab`/`market_analysis_tab`原本各自一個QTextBrowser，拆成
+    summary_view(不收合，永遠可見)＋`_analysis_tech_box`/`_analysis_
+    chip_box`(各包一層`_CollapsibleBox`)，大盤版本同理加`market_`前綴。
+    新增`_on_analysis_jump_link_clicked()`(展開目標區塊+
+    `QTimer.singleShot(0, ...)`延後一拍呼叫`ensureWidgetVisible()`)、
+    `_on_analysis_top_link_clicked()`(捲回頂部)，兩個handler都用lambda
+    綁定對應的scroll area/box，同一套handler服務個股分析跟大盤分析。
+  - 3處呼叫site(`_refresh_analysis_view()`、`_refresh_market_tab()`、
+    `_on_market_inner_tab_changed()`)更新成呼叫新的
+    `_build_analysis_sections_html()`+設定3個view；後兩處抽出共用的
+    `_refresh_market_analysis_sections()`避免重複。
+- `tests/test_stock_detail_data.py`新增5個測試(三大法人連續賣超觸發
+  R-SCREEN-06、投信連續買超觸發R-CHIP-01、融資維持率斷頭+超跌反彈同時觸發
+  R-CHIP-02並正確合併成一筆、查無資料回傳空list、`analyze_chip_signals()`
+  排序與合併)；`tests/test_rule_docs.py`新增3個測試(`ai/chen-rules/`索引
+  生效、`parse_confidence()`正確解析/查無規則回傳None)。`pytest tests/ -q`
+  868個測試全數通過。
+- 用真實DB(2330台積電)+PySide6真實視窗驗證：「📌 總結分析」正確顯示兩個
+  區塊的統計+信心最高規則+跳轉連結；籌碼面正確顯示「R-CHIP-01 投信連續
+  買超觀察」(投信已連續買超6天)；模擬點擊「查看籌碼面↓」連結，確認收合
+  狀態的籌碼面區塊會自動展開(`_expanded`從False變True)並正確捲動讓該區塊
+  進入可視範圍(截圖確認捲動後畫面同時看到「技術面」結尾的回頂部連結跟
+  「籌碼面」區塊標題)；右下角浮動「⬆ 回頂部」按鈕在捲動後仍固定停留在
+  同一個畫面位置，符合「隨畫面捲動浮動」的需求。驗證用截圖已依慣例刪除
+  (只清scratchpad，不動`temp/`)。

@@ -1,5 +1,5 @@
 from src import rule_docs
-from src.rule_docs import load_rule_doc, resolve_reference_files
+from src.rule_docs import load_rule_doc, parse_confidence, resolve_reference_files
 
 
 def test_load_rule_doc_returns_fields_for_known_rule_id():
@@ -11,6 +11,24 @@ def test_load_rule_doc_returns_fields_for_known_rule_id():
 
 def test_load_rule_doc_returns_none_for_unknown_rule_id():
     assert load_rule_doc("R-DOES-NOT-EXIST-99") is None
+
+
+def test_load_rule_doc_finds_chen_rules_directory():
+    """2026-08-04新增ai/chen-rules/(陳家豐書中規則，目前只有R-CHIP-01/02兩條)，
+    索引器要能同時認得zhu-rules跟chen-rules兩個目錄，不是只看zhu-rules。"""
+    doc = load_rule_doc("R-CHIP-01")
+    assert doc is not None
+    assert doc["名稱"] == "投信連續買超觀察"
+    assert doc["信心"].startswith("80")
+
+
+def test_parse_confidence_extracts_leading_number():
+    assert parse_confidence("R-TREND-14") == 92
+    assert parse_confidence("R-CHIP-02") == 85
+
+
+def test_parse_confidence_returns_none_for_unknown_rule_id():
+    assert parse_confidence("R-DOES-NOT-EXIST-99") is None
 
 
 def test_resolve_reference_files_extracts_single_filename(monkeypatch, tmp_path):

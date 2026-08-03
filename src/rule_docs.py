@@ -1,10 +1,15 @@
-"""從 ai/zhu-rules/ 規則庫的md檔案，依Rule ID查出該條規則的完整說明(名稱/解讀/信心/原文與
+"""從 ai/zhu-rules/（朱家泓246條規則庫）與 ai/chen-rules/（陳家豐書中規則，目前只有
+少數幾條正式形式化）的md檔案，依Rule ID查出該條規則的完整說明(名稱/解讀/信心/原文與
 頁碼等)，供UI的「個股分析」面板顯示規則說明用。
 
 規則庫本身沒有「Rule ID -> 檔案路徑」的索引（`_manifest.json`只有分類/信心/可程式化的
 統計數字，見`scripts/check_rule_coverage.py`），這裡直接掃過整個目錄比對每個檔案開頭的
-`- **Rule ID**: ...`這一行來建索引——規則庫只有246個檔案，掃描一次的成本可忽略，不需要
-另外維護一份索引檔案跟原始.md檔案內容保持同步的負擔。
+`- **Rule ID**: ...`這一行來建索引——規則庫只有246+2個檔案，掃描一次的成本可忽略，不
+需要另外維護一份索引檔案跟原始.md檔案內容保持同步的負擔。
+
+2026-08-04新增`ai/chen-rules/`：兩份規則庫的檔案格式完全相同(都是`- **欄位**: 值`這種
+結構)，用同一套解析器掃過兩個目錄即可，不需要另外寫解析邏輯，只是`RULE_DOC_DIRS`從
+單一目錄變成清單。
 """
 
 from __future__ import annotations
@@ -13,7 +18,10 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-ZHU_RULES_DIR = Path(__file__).resolve().parent.parent / "ai" / "zhu-rules"
+RULE_DOC_DIRS = [
+    Path(__file__).resolve().parent.parent / "ai" / "zhu-rules",
+    Path(__file__).resolve().parent.parent / "ai" / "chen-rules",
+]
 
 # 「原文與頁碼」欄位文字裡引用的書籍筆記檔案存放位置——2026-08-04新增，供resolve_
 # reference_files()把「原文與頁碼」裡提到的檔名還原成真正的檔案路徑。zhu-rules只會
@@ -27,6 +35,7 @@ EBOOK_SUMMARY_DIRS = [
 
 _RULE_ID_LINE = re.compile(r"^- \*\*Rule ID\*\*: (R-[A-Z0-9-]+)\s*$", re.MULTILINE)
 _FIELD_LINE = re.compile(r"^- \*\*(.+?)\*\*: (.*)$")
+_CONFIDENCE_PREFIX_PATTERN = re.compile(r"^(\d+)/100")
 # 書籍筆記檔名慣例：P##-C#[a-z]?-任意標題文字.md(見ai/ebook-summary/的既有檔案)，標題
 # 部分可能混雜中英文/數字，用\w(含底線)+中文字區間+連字號涵蓋，不含括號/頓號/全形標點
 # 這類「原文與頁碼」欄位裡用來分隔說明文字的符號，讓比對能在檔名結束處自然停下來。
@@ -36,23 +45,36 @@ MD_FILENAME_PATTERN = re.compile(r"[\w一-鿿-]+\.md")
 @lru_cache(maxsize=1)
 def _build_index() -> dict[str, dict[str, str]]:
     index: dict[str, dict[str, str]] = {}
-    for md_path in ZHU_RULES_DIR.rglob("*.md"):
-        text = md_path.read_text(encoding="utf-8")
-        match = _RULE_ID_LINE.search(text)
-        if match is None:
-            continue
-        fields: dict[str, str] = {}
-        for line in text.splitlines():
-            field_match = _FIELD_LINE.match(line)
-            if field_match:
-                fields[field_match.group(1)] = field_match.group(2)
-        index[match.group(1)] = fields
+    for rules_dir in RULE_DOC_DIRS:
+        for md_path in rules_dir.rglob("*.md"):
+            text = md_path.read_text(encoding="utf-8")
+            match = _RULE_ID_LINE.search(text)
+            if match is None:
+                continue
+            fields: dict[str, str] = {}
+            for line in text.splitlines():
+                field_match = _FIELD_LINE.match(line)
+                if field_match:
+                    fields[field_match.group(1)] = field_match.group(2)
+            index[match.group(1)] = fields
     return index
 
 
 def load_rule_doc(rule_id: str) -> dict[str, str] | None:
     """回傳該Rule ID的欄位字典(名稱/分類/解讀/信心/原文與頁碼...)，查無此規則回傳None。"""
     return _build_index().get(rule_id)
+
+
+def parse_confidence(rule_id: str) -> int | None:
+    """回傳該Rule ID的信心分數整數(從load_rule_doc()的「信心」欄位開頭"NN/100"解析)，
+    查無此規則或該規則沒有信心欄位回傳None——2026-08-04新增，供daily_screener.py／
+    stock_detail_data.py共用，取代原本兩處各自重複的regex比對。
+    """
+    doc = load_rule_doc(rule_id)
+    if doc is None or "信心" not in doc:
+        return None
+    match = _CONFIDENCE_PREFIX_PATTERN.match(doc["信心"])
+    return int(match.group(1)) if match else None
 
 
 def find_ebook_summary_file(filename: str) -> Path | None:

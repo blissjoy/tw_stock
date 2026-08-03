@@ -482,3 +482,96 @@ def load_margin_maintenance_analysis(conn, stock_id: str) -> dict | None:
         "state": margin_trading.classify_margin_maintenance_state(latest_ratio),
         "oversold_rebound_signal": bool(rebound_series.iloc[-1]),
     }
+
+
+def scan_chip_tier(conn, stock_id: str) -> list[dict]:
+    """回傳籌碼面「今天」實際觸發的規則清單，每筆為{"rule_id": ..., "note": ...}——
+    跟`src.screener.rule_scan.scan_golden_tier()`同一種「今天有沒有觸發」語意，但這裡
+    涵蓋法人籌碼/融資融券規則(R-SCREEN-06／R-CHIP-*)，需要直接查DB(institutional_
+    investors/margin_trading表)，跟scan_golden_tier()純吃OHLCV DataFrame的架構不同，
+    所以放在這裡(跟本模組其餘函式一樣是DB查詢層)而不是rule_scan.py。查無資料回傳空
+    list，不是None，跟scan_golden_tier()的慣例一致。
+
+    2026-08-04新增，供「個股分析」/「大盤分析」面板的「籌碼面」區塊使用。目前只接了
+    3條規則，都是本專案已經在「個股明細」分頁用過的既有判讀邏輯，這裡只是重新包裝成
+    「今天有沒有觸發」的訊號格式：
+    - R-SCREEN-06(朱家泓)：三大法人連續賣超達INSTITUTIONAL_STREAK_THRESHOLD天。
+    - R-CHIP-01(陳家豐，見ai/chen-rules/籌碼面/投信連續買超觀察.md)：投信連續買超
+      達同一個天數門檻。
+    - R-CHIP-02(陳家豐，見ai/chen-rules/籌碼面/融資維持率規則.md)：融資維持率跌破
+      120%斷頭線，或連續N天低於120%的超跌反彈訊號——兩者可能同時成立，各自成一筆
+      (呼叫端analyze_chip_signals()會合併成同一個rule_id、note用換行接起來)。
+    """
+    results: list[dict] = []
+    flow = load_institutional_flow_analysis(conn, stock_id)
+    if flow is not None:
+        sanhua = flow["三大法人"]
+        if sanhua["is_sell_warning"]:
+            results.append({
+                "rule_id": "R-SCREEN-06",
+                "note": f"三大法人已連續賣超{sanhua['streak_days']}天，達到停損觀察門檻",
+            })
+        trust = flow["投信"]
+        if trust["is_buy_watch"]:
+            results.append({
+                "rule_id": "R-CHIP-01",
+                "note": f"投信已連續買超{trust['streak_days']}天，達最佳切入點觀察門檻(連續3~5天)",
+            })
+
+    margin = load_margin_maintenance_analysis(conn, stock_id)
+    if margin is not None:
+        if margin["state"] == "已跌破斷頭線":
+            ratio_pct = margin["ratio"] * 100 if margin["ratio"] is not None else None
+            ratio_text = f"約{ratio_pct:.1f}%" if ratio_pct is not None else ""
+            results.append({
+                "rule_id": "R-CHIP-02",
+                "note": f"融資維持率{ratio_text}已跌破斷頭線(120%)，留意斷頭賣壓",
+            })
+        if margin["oversold_rebound_signal"]:
+            results.append({
+                "rule_id": "R-CHIP-02",
+                "note": "融資維持率連續低於120%(超跌)，符合搶短線反彈觀察條件",
+            })
+    return results
+
+
+def analyze_chip_signals(conn, stock_id: str) -> list[dict]:
+    """對scan_chip_tier()的結果逐筆查`src.rule_docs.load_rule_doc()`補上title/
+    confidence/description/reference，回傳跟`src.screener.daily_screener.
+    analyze_stock_signals()`完全相同的dict結構([{"rule_id","title","confidence",
+    "note","description","reference"}, ...])，方便UI端重用同一套規則清單渲染邏輯。
+    依confidence由高到低排序。
+
+    同一個rule_id出現多次(R-CHIP-02可能同時觸發斷頭警示+超跌反彈)合併成一筆，note用
+    換行接起來——跟analyze_stock_signals()處理R-TREND-03/04多筆note合併同一個模式。
+    查無規則文件(理論上不會發生，R-SCREEN-06/R-CHIP-01/R-CHIP-02都已經正式形式化)
+    的項目不列入。
+    """
+    from src.rule_docs import load_rule_doc, parse_confidence
+
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for item in scan_chip_tier(conn, stock_id):
+        rule_id = item["rule_id"]
+        confidence = parse_confidence(rule_id)
+        if confidence is None:
+            continue
+        if rule_id not in merged:
+            doc = load_rule_doc(rule_id)
+            merged[rule_id] = {
+                "rule_id": rule_id,
+                "title": doc.get("名稱", rule_id) if doc else rule_id,
+                "confidence": confidence,
+                "note": [item["note"]] if item.get("note") else [],
+                "description": doc.get("解讀") if doc else None,
+                "reference": doc.get("原文與頁碼") if doc else None,
+            }
+            order.append(rule_id)
+        elif item.get("note"):
+            merged[rule_id]["note"].append(item["note"])
+
+    result = [merged[rid] for rid in order]
+    for m in result:
+        m["note"] = "\n".join(m["note"]) if m["note"] else None
+    result.sort(key=lambda m: m["confidence"], reverse=True)
+    return result

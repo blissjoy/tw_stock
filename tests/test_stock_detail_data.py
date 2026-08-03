@@ -486,3 +486,89 @@ def test_load_margin_maintenance_analysis_matches_book_liquidation_example():
 def test_load_margin_maintenance_analysis_returns_none_when_no_data():
     conn = _main_conn()
     assert stock_detail_data.load_margin_maintenance_analysis(conn, "9999") is None
+
+
+def test_scan_chip_tier_detects_institutional_sell_and_trust_buy_streaks():
+    """三大法人(外資賣超蓋過投信買超，合計仍是淨賣超)連續3天觸發R-SCREEN-06；
+    投信自己連續3天淨買超同時觸發R-CHIP-01——兩條規則各自獨立判讀，互不干擾。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 2425.0}])
+    _seed_institutional(conn, "2330", {
+        "2026-07-29": {"Foreign_Investor": (100, 500), "Investment_Trust": (300, 100)},
+        "2026-07-30": {"Foreign_Investor": (100, 400), "Investment_Trust": (250, 50)},
+        "2026-07-31": {"Foreign_Investor": (100, 300), "Investment_Trust": (200, 80)},
+    })
+
+    results = stock_detail_data.scan_chip_tier(conn, "2330")
+
+    rule_ids = {r["rule_id"] for r in results}
+    assert "R-SCREEN-06" in rule_ids
+    assert "R-CHIP-01" in rule_ids
+
+
+def test_scan_chip_tier_detects_margin_liquidation_and_oversold_rebound_together():
+    """融資餘額第1天用收盤價100建立加權平均成本(6成融資，loan_per_share=60)，
+    之後3天收盤價都跌到60元以下維持率<120%(斷頭線)：最新一天同時符合「已跌破
+    斷頭線」跟「連續3天低於120%的超跌反彈」兩個R-CHIP-02子條件。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-28", "close": 100.0},
+        {"date": "2026-07-29", "close": 70.0},
+        {"date": "2026-07-30", "close": 65.0},
+        {"date": "2026-07-31", "close": 60.0},
+    ])
+    _seed_margin(conn, "2330", [
+        {"date": "2026-07-28", "m_buy": 1000, "m_today": 1000},
+        {"date": "2026-07-29", "m_buy": 0, "m_today": 1000},
+        {"date": "2026-07-30", "m_buy": 0, "m_today": 1000},
+        {"date": "2026-07-31", "m_buy": 0, "m_today": 1000},
+    ])
+
+    results = stock_detail_data.scan_chip_tier(conn, "2330")
+
+    chip_02 = [r for r in results if r["rule_id"] == "R-CHIP-02"]
+    assert len(chip_02) == 2
+    notes = "\n".join(r["note"] for r in chip_02)
+    assert "斷頭" in notes
+    assert "超跌" in notes
+
+
+def test_scan_chip_tier_returns_empty_list_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.scan_chip_tier(conn, "9999") == []
+
+
+def test_analyze_chip_signals_merges_duplicate_rule_id_and_sorts_by_confidence():
+    """複用上面兩個情境的資料：R-CHIP-02同時觸發斷頭+超跌，應該合併成一筆(note用
+    換行接起來)，且信心分數(85)比R-SCREEN-06(75)高，排序應該在前面。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [
+        {"date": "2026-07-28", "close": 100.0},
+        {"date": "2026-07-29", "close": 70.0},
+        {"date": "2026-07-30", "close": 65.0},
+        {"date": "2026-07-31", "close": 60.0},
+    ])
+    _seed_margin(conn, "2330", [
+        {"date": "2026-07-28", "m_buy": 1000, "m_today": 1000},
+        {"date": "2026-07-29", "m_buy": 0, "m_today": 1000},
+        {"date": "2026-07-30", "m_buy": 0, "m_today": 1000},
+        {"date": "2026-07-31", "m_buy": 0, "m_today": 1000},
+    ])
+    _seed_institutional(conn, "2330", {
+        "2026-07-29": {"Foreign_Investor": (100, 500), "Investment_Trust": (300, 100)},
+        "2026-07-30": {"Foreign_Investor": (100, 400), "Investment_Trust": (250, 50)},
+        "2026-07-31": {"Foreign_Investor": (100, 300), "Investment_Trust": (200, 80)},
+    })
+
+    result = stock_detail_data.analyze_chip_signals(conn, "2330")
+
+    by_id = {m["rule_id"]: m for m in result}
+    assert set(by_id) == {"R-SCREEN-06", "R-CHIP-01", "R-CHIP-02"}
+    assert by_id["R-CHIP-02"]["confidence"] == 85
+    assert by_id["R-CHIP-02"]["note"].count("\n") == 1  # 兩筆note合併成一筆、用換行接起來
+    assert result[0]["confidence"] >= result[-1]["confidence"]  # 依信心分數由高到低排序
+
+
+def test_analyze_chip_signals_returns_empty_list_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.analyze_chip_signals(conn, "9999") == []

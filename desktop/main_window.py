@@ -20,7 +20,7 @@ from pathlib import Path
 
 import markdown
 import pandas as pd
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -273,6 +273,54 @@ class _CollapsibleBox(QWidget):
         self._expanded = not self._expanded
         self.content.setVisible(self._expanded)
         self._toggle_btn.setText(self._header_text())
+
+    def expand(self) -> None:
+        """展開這個區塊(已經展開的話不做任何事)——2026-08-04新增，供「總結分析」的
+        跳轉連結呼叫：收合狀態下直接捲過去也看不到內容，跳轉前要先確保展開。"""
+        if not self._expanded:
+            self._on_toggle()
+
+
+class _FloatingTopButton(QPushButton):
+    """浮動在QScrollArea右下角、隨畫面捲動固定跟隨的「回頂部」按鈕。2026-08-04新增，
+    供「個股分析」/「大盤分析」面板使用——內容經常很長，使用者反映捲到下面想快速回到
+    最上面時，每次都要手動捲回去太麻煩。
+
+    做法：parent直接設成目標scroll_area本身(不是它的viewport內容元件)，用手動
+    move()定位到右下角固定邊距處，不透過scroll_area自己的layout管理(那是留給
+    viewport/scrollbar用的)，靠raise_()確保疊在最上層。scroll_area大小變化時
+    (例如視窗縮放)要重新定位，這裡用installEventFilter監聽Resize事件，不用另外
+    繼承QScrollArea改寫resizeEvent(現有的detail_scroll/market_scroll都是直接用
+    QScrollArea()建構，改成子類別牽動範圍較大)。
+    """
+
+    _MARGIN = 24
+
+    def __init__(self, scroll_area: QScrollArea) -> None:
+        super().__init__("⬆ 回頂部", scroll_area)
+        self._scroll_area = scroll_area
+        self.setStyleSheet(
+            "QPushButton { background-color: rgba(41, 128, 185, 220); color: white; "
+            "border: none; border-radius: 16px; padding: 8px 16px; font-weight: bold; }"
+            "QPushButton:hover { background-color: rgba(41, 128, 185, 255); }"
+        )
+        self.clicked.connect(lambda: scroll_area.verticalScrollBar().setValue(0))
+        scroll_area.installEventFilter(self)
+        self._reposition()
+        self.raise_()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self._scroll_area and event.type() == QEvent.Type.Resize:
+            self._reposition()
+        return False
+
+    def _reposition(self) -> None:
+        self.adjustSize()
+        area_size = self._scroll_area.size()
+        self.move(
+            area_size.width() - self.width() - self._MARGIN,
+            area_size.height() - self.height() - self._MARGIN,
+        )
 
 
 class _CheckableComboBox(QComboBox):
@@ -603,7 +651,7 @@ class MainWindow(QMainWindow):
         # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單——原本候選清單跟個股圖表擠在
         # 同一個分頁，使用者反映畫面太擁擠，拆開後候選清單點選任一列會自動切到③並代入
         # 該股票資料(見_on_candidate_selected())。①跟③都用同一套規則比對邏輯
-        # (_build_analysis_html())，只是分析對象(大盤/個股)不同，渲染格式共用。
+        # (_build_analysis_sections_html())，只是分析對象(大盤/個股)不同，渲染格式共用。
         # ⑤⑥移植自ref-project的庫存清單/觀察清單，用獨立的self.portfolio_conn(見
         # __init__())，不查主DB的候選清單/圖表相關資料。
         self.tabs = QTabWidget()
@@ -839,19 +887,25 @@ class MainWindow(QMainWindow):
         # 內層tab(見下面self.detail_inner_tabs)——使用者切到這個tab才需要顯示，不用像
         # 之前那樣另外維護一個顯示/隱藏的checkable按鈕狀態。
         # 用QTextBrowser(QTextEdit的子類別，多了連結導覽功能)取代單純的QTextEdit——
-        # 「原文與頁碼」裡的.md檔名會被_build_analysis_html()包成ruledoc:///連結(見該
-        # 函式說明)，anchorClicked訊號跟setOpenLinks()是QTextBrowser才有的API(單純
+        # 「原文與頁碼」裡的.md檔名會被_render_rule_match_blocks()包成ruledoc:///連結
+        # (見該函式說明)，anchorClicked訊號跟setOpenLinks()是QTextBrowser才有的API(單純
         # QTextEdit沒有，2026-08-04第一版誤用QTextEdit直接呼叫setOpenLinks()會
         # AttributeError)，除了連結功能外其餘用法(setReadOnly/setHtml/document()等)
         # 跟QTextEdit完全相容，不影響既有程式碼。setOpenLinks(False)讓它不要自己嘗試
         # 把這個非標準scheme當網址開啟，改由_on_reference_link_clicked()接手判斷、
         # 開新視窗顯示筆記內容。
-        self.analysis_view = QTextBrowser()
-        self.analysis_view.setReadOnly(True)
-        self.analysis_view.setFrameShape(QFrame.Shape.NoFrame)
-        self.analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.analysis_view.setOpenLinks(False)
-        self.analysis_view.anchorClicked.connect(self._on_reference_link_clicked)
+        # 2026-08-04改版：原本單一self.analysis_view拆成三個QTextBrowser——summary
+        # (📌總結分析，永遠可見，不包CollapsibleBox)＋tech(技術面)／chip(籌碼面)各自
+        # 包一層_CollapsibleBox(可獨立收合，跟「個股明細」5個區塊同一種UI慣例)。三個
+        # 都需要setOpenLinks(False)+anchorClicked，_build_analysis_text_view()統一
+        # 建構、避免3份幾乎一樣的設定程式碼重複。
+        self.analysis_summary_view = self._build_analysis_text_view()
+        self._analysis_tech_box = _CollapsibleBox("技術面")
+        self.analysis_tech_view = self._build_analysis_text_view()
+        self._analysis_tech_box.content_layout.addWidget(self.analysis_tech_view)
+        self._analysis_chip_box = _CollapsibleBox("籌碼面")
+        self.analysis_chip_view = self._build_analysis_text_view()
+        self._analysis_chip_box.content_layout.addWidget(self.analysis_chip_view)
 
         # ⚠️ 2026-08-02修正：原本靠setMinimumHeight(450)+stretch=1「猜」一個夠用的高度，
         # QWebEngineView的sizeHint()不會反映實際載入的Plotly圖表高度，_AutoHeightTabWidget
@@ -933,12 +987,24 @@ class MainWindow(QMainWindow):
 
         analysis_tab = QWidget()
         analysis_tab_layout = QVBoxLayout(analysis_tab)
-        analysis_tab_layout.addWidget(self.analysis_view)
+        analysis_tab_layout.addWidget(self.analysis_summary_view)
+        analysis_tab_layout.addWidget(self._analysis_tech_box)
+        analysis_tab_layout.addWidget(self._analysis_chip_box)
         self.detail_inner_tabs.addTab(analysis_tab, "個股分析")
+        self.analysis_summary_view.anchorClicked.connect(self._on_reference_link_clicked)
+        self.analysis_summary_view.anchorClicked.connect(
+            lambda url: self._on_analysis_jump_link_clicked(
+                url, detail_scroll, self._analysis_tech_box, self._analysis_chip_box,
+            )
+        )
+        for view in (self.analysis_tech_view, self.analysis_chip_view):
+            view.anchorClicked.connect(self._on_reference_link_clicked)
+            view.anchorClicked.connect(lambda url: self._on_analysis_top_link_clicked(url, detail_scroll))
 
         self._build_stock_overview_tab()
 
         self.detail_inner_tabs.currentChanged.connect(self._on_detail_inner_tab_changed)
+        _FloatingTopButton(detail_scroll)
         bottom_layout.addWidget(self.detail_inner_tabs)
 
     # 「個股明細」5個區塊的標題，同時是_build_stock_overview_tab()建立_CollapsibleBox
@@ -1605,8 +1671,8 @@ class MainWindow(QMainWindow):
         self._refresh_watchlist_tab()
 
     def _build_market_tab(self) -> None:
-        """「大盤分析」分頁：跟個股分析共用同一套規則比對渲染邏輯(_build_analysis_html())，
-        只是分析對象固定是大盤(TAIEX_STOCK_ID)，不是使用者目前選取的個股。
+        """「大盤分析」分頁：跟個股分析共用同一套規則比對渲染邏輯(_build_analysis_sections_
+        html())，只是分析對象固定是大盤(TAIEX_STOCK_ID)，不是使用者目前選取的個股。
 
         ⚠️ 2026-07-29修正：使用者反映不需要像個股分析那樣按鈕才展開——大盤只有一檔、
         資料量固定，不會像候選清單那樣「選了才知道要分析誰」，改成K線圖(含MACD/KD/SAR)
@@ -1645,16 +1711,18 @@ class MainWindow(QMainWindow):
 
         # ⚠️ 2026-07-29修正：使用者反映分析文字不要看起來像獨立的一個「框」——QTextEdit
         # 預設會畫外框(QFrame的StyledPanel樣式)，改成NoFrame讓它視覺上融入頁面，跟上面
-        # 的K線圖直接銜接，不是分頁裡另外圈出來的一塊。高度計算(_set_market_analysis_
-        # html()裡的setFixedHeight)維持不變——那是為了讓QTextEdit本身能顯示完整內容
-        # 不被截斷，不是「限縮」，是精準算出剛好的高度，跟這裡拿掉外框是两件事。
-        self.market_analysis_view = QTextBrowser()  # 見self.analysis_view建構處的說明
-        self.market_analysis_view.setReadOnly(True)
-        self.market_analysis_view.setFrameShape(QFrame.Shape.NoFrame)
-        self.market_analysis_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # 跟self.analysis_view同一套「原文與頁碼」連結點擊處理，見該處的說明。
-        self.market_analysis_view.setOpenLinks(False)
-        self.market_analysis_view.anchorClicked.connect(self._on_reference_link_clicked)
+        # 的K線圖直接銜接，不是分頁裡另外圈出來的一塊。高度計算(_set_autoheight_html()
+        # 裡的setFixedHeight)維持不變——那是為了讓QTextBrowser本身能顯示完整內容不被
+        # 截斷，不是「限縮」，是精準算出剛好的高度，跟這裡拿掉外框是两件事。
+        # 2026-08-04改版：跟self.analysis_summary_view/tech_view/chip_view同一種
+        # 「拆成技術面/籌碼面兩個可收合區塊」處理，見_build_stock_detail_tab()的說明。
+        self.market_analysis_summary_view = self._build_analysis_text_view()
+        self._market_analysis_tech_box = _CollapsibleBox("技術面")
+        self.market_analysis_tech_view = self._build_analysis_text_view()
+        self._market_analysis_tech_box.content_layout.addWidget(self.market_analysis_tech_view)
+        self._market_analysis_chip_box = _CollapsibleBox("籌碼面")
+        self.market_analysis_chip_view = self._build_analysis_text_view()
+        self._market_analysis_chip_box.content_layout.addWidget(self.market_analysis_chip_view)
 
         # 「資料更新至」：使用者反映大盤分頁看不出目前顯示的股價資料多新——這個時間戳
         # 原本只有「選股」分頁的status_label有顯示(股價更新至/候選清單算至/下次更新
@@ -1680,11 +1748,23 @@ class MainWindow(QMainWindow):
 
         market_analysis_tab = QWidget()
         market_analysis_tab_layout = QVBoxLayout(market_analysis_tab)
-        market_analysis_tab_layout.addWidget(self.market_analysis_view)
+        market_analysis_tab_layout.addWidget(self.market_analysis_summary_view)
+        market_analysis_tab_layout.addWidget(self._market_analysis_tech_box)
+        market_analysis_tab_layout.addWidget(self._market_analysis_chip_box)
         self.market_inner_tabs.addTab(market_analysis_tab, "大盤分析")
+        self.market_analysis_summary_view.anchorClicked.connect(self._on_reference_link_clicked)
+        self.market_analysis_summary_view.anchorClicked.connect(
+            lambda url: self._on_analysis_jump_link_clicked(
+                url, market_scroll, self._market_analysis_tech_box, self._market_analysis_chip_box,
+            )
+        )
+        for view in (self.market_analysis_tech_view, self.market_analysis_chip_view):
+            view.anchorClicked.connect(self._on_reference_link_clicked)
+            view.anchorClicked.connect(lambda url: self._on_analysis_top_link_clicked(url, market_scroll))
 
         self.market_inner_tabs.currentChanged.connect(self._on_market_inner_tab_changed)
         market_layout.addWidget(self.market_inner_tabs)
+        _FloatingTopButton(market_scroll)
         # ⚠️ 這裡不在建構時就呼叫_refresh_market_tab()：分頁2要等使用者實際切換過去才
         # 會有真正的layout(viewport寬度等於0或預設值)，document().size().height()算出來
         # 的高度會嚴重失真(實測只有個位數px)。改成在_on_tab_changed()裡、切到這個分頁時
@@ -1715,11 +1795,11 @@ class MainWindow(QMainWindow):
             html_content = render_chart_html(fig, price_df, stock_label=TAIEX_DISPLAY_NAME)
             self._market_chart_html_path.write_text(html_content, encoding="utf-8")
             self.market_chart_view.load(QUrl.fromLocalFile(str(self._market_chart_html_path)))
-        # 「大盤分析」內層tab還沒被切換過去顯示之前，QTextEdit沒有正確的layout寬度，
+        # 「大盤分析」內層tab還沒被切換過去顯示之前，QTextBrowser沒有正確的layout寬度，
         # document().size().height()算出來的高度會失真(見_on_market_inner_tab_changed()
         # 的說明)，只在使用者目前就停留在這個tab時才順便重算。
         if self.market_inner_tabs.currentIndex() == 1:
-            self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
+            self._refresh_market_analysis_sections()
 
     def _on_market_inner_tab_changed(self, index: int) -> None:
         """切到「大盤分析」tab(index==1)時才重新整理內容——沿用_on_tab_changed()/
@@ -1728,7 +1808,17 @@ class MainWindow(QMainWindow):
         說明)，不能在建構或背景重新整理時就無條件計算。
         """
         if index == 1 and self.conn is not None:
-            self._set_market_analysis_html(self._build_analysis_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}"))
+            self._refresh_market_analysis_sections()
+
+    def _refresh_market_analysis_sections(self) -> None:
+        """重新整理「大盤分析」的總結/技術面/籌碼面三個QTextBrowser，兩處呼叫點
+        (_refresh_market_tab()/_on_market_inner_tab_changed())共用，2026-08-04
+        新增，避免兩處各自重複「呼叫_build_analysis_sections_html()+設定3個view」
+        這段程式碼。"""
+        sections = self._build_analysis_sections_html(TAIEX_STOCK_ID, f"大盤分析：{TAIEX_DISPLAY_NAME}")
+        self._set_autoheight_html(self.market_analysis_summary_view, sections["summary"])
+        self._set_autoheight_html(self.market_analysis_tech_view, sections["tech"])
+        self._set_autoheight_html(self.market_analysis_chip_view, sections["chip"])
 
     def showEvent(self, event) -> None:
         """視窗第一次顯示時，補打一次目前分頁(預設是分頁0「大盤」)的_on_tab_changed()，
@@ -1927,7 +2017,10 @@ class MainWindow(QMainWindow):
             self.summary_view.setPlainText("")
             self.summary_view.setFixedHeight(30)
             if self.detail_inner_tabs.currentIndex() == 1:
-                self._set_analysis_html(f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>")
+                error_html = f"<p>查無股票代號 {self._current_stock_id} 的價格資料。</p>"
+                self._set_autoheight_html(self.analysis_summary_view, error_html)
+                self._set_autoheight_html(self.analysis_tech_view, "")
+                self._set_autoheight_html(self.analysis_chip_view, "")
             elif self.detail_inner_tabs.currentIndex() == 2:
                 self._refresh_stock_overview_view()
             return
@@ -2035,82 +2128,131 @@ class MainWindow(QMainWindow):
         elif index == 2:
             self._refresh_stock_overview_view()
 
-    def _set_analysis_html(self, html_content: str) -> None:
-        """設定「個股分析」面板內容，並依實際內容量重新算出剛好的高度(setFixedHeight)，
-        取代原本寫死的200px上限——訊號一多就會超過200px，QTextEdit自己的垂直捲軸(已在
-        _build_stock_detail_tab()關閉)原本就會被塞爆，變成使用者要在這個小框框裡另外
-        捲動一次；改成跟內容一樣高，多出來的部分交給最外層的detail_scroll(整個分頁)
-        捲動，只有一層捲軸，不是兩層。「個股清單」分頁用plain QVBoxLayout+QScrollArea
-        (不像候選清單/個股圖表過去共用同一分頁時包了一層QSplitter)，一般QVBoxLayout+
-        QScrollArea(setWidgetResizable(True))組合本來就能正確隨內容量調整捲軸範圍，
-        不需要額外的高度同步workaround(見2026-07-29大盤分析截斷bug的除錯記錄)。
+    @staticmethod
+    def _build_analysis_text_view() -> QTextBrowser:
+        """建構「個股分析」/「大盤分析」用的QTextBrowser，統一設定(唯讀/無外框/關閉
+        內部捲軸/不自動開連結)，供summary/tech/chip六個view共用，避免2026-08-04
+        拆成三個view後重複6遍幾乎一樣的設定程式碼。連結點擊處理(anchorClicked)由
+        呼叫端自行connect——summary跟tech/chip需要接不同的jump連結handler(見
+        _build_stock_detail_tab()/_build_market_tab())，這裡不預先幫忙連好。
         """
-        self.analysis_view.setHtml(html_content)
-        doc_height = self.analysis_view.document().size().height()
-        frame_width = self.analysis_view.frameWidth() * 2
-        self.analysis_view.setFixedHeight(int(doc_height) + frame_width + 8)
+        view = QTextBrowser()
+        view.setReadOnly(True)
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setOpenLinks(False)
+        return view
 
-    def _build_analysis_html(self, stock_id: str, header_label: str) -> str:
-        """組出「規則比對清單+總結分析」的HTML內容，供個股分析(_refresh_analysis_view())
-        與大盤分析(_refresh_market_analysis_view())共用同一套渲染邏輯——差別只在於分析
-        對象是哪一個stock_id、標題文字，判斷/顯示格式完全一致(大盤本身就是`stock_prices`
-        表裡的一筆特殊資料，`load_price_history()`/`analyze_stock_signals()`不需要知道
-        它是大盤還是個股，見src/data/yfinance_client.py的fetch_taiex_prices())。
+    @staticmethod
+    def _set_autoheight_html(view: QTextEdit, html_content: str) -> None:
+        """設定view的內容，並依實際內容量重新算出剛好的高度(setFixedHeight)，取代
+        寫死的高度上限——訊號一多就會超過寫死的高度，QTextBrowser自己的垂直捲軸
+        (已在建構時關閉)原本就會被塞爆，變成使用者要在這個小框框裡另外捲動一次；
+        改成跟內容一樣高，多出來的部分交給最外層的QScrollArea(整個分頁)捲動，只有
+        一層捲軸，不是兩層。「個股清單」/「大盤」分頁都是plain QVBoxLayout+
+        QScrollArea(setWidgetResizable(True))，本來就能正確隨內容量調整捲軸範圍，
+        不需要額外的高度同步workaround(見2026-07-29大盤分析截斷bug的除錯記錄)。
+
+        2026-08-04改版：原本是`_set_analysis_html()`/`_set_market_analysis_html()`
+        兩個近乎重複的方法，各自只服務`self.analysis_view`/`self.market_analysis_
+        view`一個QTextBrowser；拆成技術面/籌碼面兩個獨立可收合區塊後，個股分析＋
+        大盤分析各自變成3個QTextBrowser(總結/技術面/籌碼面)，改成這一個共用的
+        static method，呼叫端自己傳入要設定的view，不用維護6份幾乎一樣的程式碼。
         """
-        price_df = chart_data.load_price_history(self.conn, stock_id)
-        if price_df.empty:
-            return f"<p>查無股票代號 {html.escape(stock_id)} 的價格資料。</p>"
-        # trend_df：短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比price_df
-        # (預設120天顯示窗口)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明。
-        trend_df = chart_data.load_price_history(self.conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
-        matches = analyze_stock_signals(price_df, trend_df=trend_df)
-        header = f"<p><b>{html.escape(header_label)}</b></p>"
-        if not matches:
-            return header + "<p>目前沒有符合任何已接上規則庫的訊號。</p>"
-        # ⚠️ QTextEdit.setHtml()一定會把內容當HTML剖析，rule_scan.py的note文字裡常有
-        # "MA5<MA10<MA20"這種原始"<"/">"符號(見rule_scan.py)，不escape的話會被誤判成
-        # HTML標籤、內容被吃掉一截(實測"目前狀態：MA5<MA10<MA20..."只會顯示到"MA5"就斷掉)。
-        # Streamlit版沒有這個問題是因為st.write/st.caption預設unsafe_allow_html=False，
-        # 不會把文字內容當HTML剖析；這裡是QTextEdit本身的行為，只有桌面版需要escape。
-        #
-        # 2026-08-02改版：「總結分析」搬到最前面(header之後、逐條規則清單之前)——使用者
-        # 反映一長串規則清單太雜亂，希望先看到歸納重點，細節往下捲再看，不用等捲到最下面
-        # 才看得到總結。
-        summary = summarize_signal_matches(matches)
-        top = summary["top_match"]
-        top_note = (top.get("note") or "").split("\n")[0] if top else ""
-        summary_block = (
-            "<p><b>📌 總結分析</b><br>"
-            f"本次共觸發 {summary['total']} 條規則"
-            f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
-            f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。<br>"
-            f"信心最高的訊號：{html.escape(top['rule_id'])}　{html.escape(top['title'])}"
-            f"（{top['confidence']}%）"
-            + (f"<br>目前狀態：{html.escape(top_note)}" if top_note else "")
-            + "</p><hr>"
-        )
-        blocks = [header, summary_block]
+        view.setHtml(html_content)
+        doc_height = view.document().size().height()
+        frame_width = view.frameWidth() * 2
+        view.setFixedHeight(int(doc_height) + frame_width + 8)
+
+    @staticmethod
+    def _render_rule_match_blocks(matches: list[dict]) -> str:
+        """把analyze_stock_signals()/stock_detail_data.analyze_chip_signals()回傳
+        的規則清單逐條組成HTML——技術面／籌碼面共用同一套渲染邏輯，2026-08-04從
+        原本的_build_analysis_html()抽出來，避免兩邊各維護一份幾乎一樣的程式碼。
+        """
+        blocks = []
         for m in matches:
             block = f"<p><b>{html.escape(m['rule_id'])}　{html.escape(m['title'])}（信心{m['confidence']}%）</b><br>"
             # 「目前狀態」(這條規則今天為什麼觸發)排在規則名稱後第一個位置，跟dashboard/
             # app.py對齊——使用者最想先看到的是「現在是什麼情況」，解讀/原文頁碼是補充
-            # 說明。analyze_stock_signals()裡同一個rule_id若對應多筆觸發(例如R-TREND-03
-            # 短期/中期各自獨立判斷都是多頭)，note會是用換行接起來的多行文字，這裡逐行
-            # 各自加註「目前狀態：」/縮排顯示，不能假設note永遠是單行字串。
+            # 說明。同一個rule_id若對應多筆觸發，note會是用換行接起來的多行文字，這裡
+            # 逐行各自加註「目前狀態：」/縮排顯示，不能假設note永遠是單行字串。
             if m.get("note"):
                 note_lines = m["note"].split("\n")
                 block += f"目前狀態：{html.escape(note_lines[0])}<br>"
                 for extra_line in note_lines[1:]:
                     block += f"　　{html.escape(extra_line)}<br>"
-            if m["description"]:
+            if m.get("description"):
                 # 「分析：」明確標示這段是「為什麼」的解說(見dashboard/app.py同一處的說明)，
                 # 跟上面的「目前狀態：」分開標籤，不是延續文字。
                 block += f"分析：{html.escape(m['description'])}<br>"
             if m.get("reference"):
-                block += f"<i>原文與頁碼：{self._format_reference_html(m['reference'])}</i>"
+                block += f"<i>原文與頁碼：{MainWindow._format_reference_html(m['reference'])}</i>"
             block += "</p><hr>"
             blocks.append(block)
         return "".join(blocks)
+
+    def _build_analysis_sections_html(self, stock_id: str, header_label: str) -> dict[str, str]:
+        """組出「個股分析」/「大盤分析」面板的三段HTML內容：
+        {"summary": 📌總結分析(含跳轉連結), "tech": 技術面規則清單, "chip": 籌碼面
+        規則清單}，供個股分析(_refresh_analysis_view())與大盤分析
+        (_refresh_market_tab())共用同一套渲染邏輯——差別只在於分析對象是哪一個
+        stock_id、標題文字，判斷/顯示格式完全一致(大盤本身就是`stock_prices`表裡的
+        一筆特殊資料，`load_price_history()`/`analyze_stock_signals()`不需要知道
+        它是大盤還是個股，見src/data/yfinance_client.py的fetch_taiex_prices())。
+
+        2026-08-04改版：原本是單一`_build_analysis_html()`回傳一整段HTML(技術面
+        規則清單+總結)，使用者要求拆成「技術面」／「籌碼面」兩個可各自收合的區塊，
+        上方先有「📌 總結分析」列出兩個區塊各自的連結(點擊直接跳到下方對應區塊，見
+        _on_analysis_jump_link_clicked())。籌碼面內容來自stock_detail_data.
+        analyze_chip_signals()(R-SCREEN-06三大法人連續賣超/R-CHIP-01投信連續買超/
+        R-CHIP-02融資維持率規則，見ai/chen-rules/籌碼面/)——大盤(^TWII)沒有法人
+        籌碼資料，這裡不特別分支處理，讓它自然回傳空list、顯示「目前沒有符合任何
+        已接上的籌碼規則」，跟一般沒有觸發任何規則的個股一樣的文字，不是bug。
+        """
+        price_df = chart_data.load_price_history(self.conn, stock_id)
+        if price_df.empty:
+            error_html = f"<p>查無股票代號 {html.escape(stock_id)} 的價格資料。</p>"
+            return {"summary": error_html, "tech": "", "chip": ""}
+        # trend_df：短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比price_df
+        # (預設120天顯示窗口)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明。
+        trend_df = chart_data.load_price_history(self.conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        tech_matches = analyze_stock_signals(price_df, trend_df=trend_df)
+        chip_matches = stock_detail_data.analyze_chip_signals(self.conn, stock_id)
+
+        # ⚠️ QTextBrowser.setHtml()一定會把內容當HTML剖析，rule_scan.py的note文字裡常有
+        # "MA5<MA10<MA20"這種原始"<"/">"符號，不escape的話會被誤判成HTML標籤、內容被
+        # 吃掉一截(實測"目前狀態：MA5<MA10<MA20..."只會顯示到"MA5"就斷掉)。Streamlit版
+        # 沒有這個問題是因為st.write/st.caption預設unsafe_allow_html=False，這裡是
+        # QTextBrowser本身的行為，只有桌面版需要escape。
+        _EMPTY_TEASER = {"tech": "目前沒有符合任何已接上規則庫的訊號。", "chip": "目前沒有符合任何已接上的籌碼規則。"}
+
+        def section_teaser(label: str, matches: list[dict], anchor: str) -> str:
+            link = f'<a href="jumpto:///{anchor}">查看{label}↓</a>'
+            if not matches:
+                return f"{_EMPTY_TEASER[anchor]}{link}"
+            top = matches[0]
+            return (
+                f"共{len(matches)}條規則，信心最高：{html.escape(top['rule_id'])}　"
+                f"{html.escape(top['title'])}（{top['confidence']}%）　{link}"
+            )
+
+        summary_html = (
+            f"<p><b>{html.escape(header_label)}</b></p>"
+            '<p><b>📌 總結分析</b><br>'
+            f"1. 技術面（{section_teaser('技術面', tech_matches, 'tech')}）<br>"
+            f"2. 籌碼面（{section_teaser('籌碼面', chip_matches, 'chip')}）</p>"
+        )
+
+        def section_html(title: str, matches: list[dict], anchor: str) -> str:
+            body = self._render_rule_match_blocks(matches) if matches else f"<p>{_EMPTY_TEASER[anchor]}</p>"
+            return f"<p><b>{title}</b></p>" + body + '<p><a href="jumpto:///top">🔼 回頂部</a></p>'
+
+        return {
+            "summary": summary_html,
+            "tech": section_html("技術面", tech_matches, "tech"),
+            "chip": section_html("籌碼面", chip_matches, "chip"),
+        }
 
     @staticmethod
     def _format_reference_html(reference: str) -> str:
@@ -2155,6 +2297,35 @@ class MainWindow(QMainWindow):
             return
         self._open_rule_reference_window(path)
 
+    def _on_analysis_jump_link_clicked(
+        self, url: QUrl, scroll_area: QScrollArea, tech_box: "_CollapsibleBox", chip_box: "_CollapsibleBox",
+    ) -> None:
+        """「📌 總結分析」裡「1. 技術面」/「2. 籌碼面」連結的點擊處理：只接受
+        `_build_analysis_sections_html()`產生的`jumpto:///tech`／`jumpto:///chip`
+        連結，展開對應的可收合區塊並捲動scroll_area讓它進入可視範圍。2026-08-04
+        新增。個股分析/大盤分析各自呼叫時綁定各自的scroll_area跟box(見
+        _build_stock_detail_tab()/_build_market_tab()裡的連接程式碼)，這裡不用
+        知道目前是哪一個面板。
+        """
+        if url.scheme() != "jumpto":
+            return
+        target = {"tech": tech_box, "chip": chip_box}.get(url.path().lstrip("/"))
+        if target is None:
+            return
+        target.expand()
+        # expand()剛觸發的layout變化要等當前事件循環跑完才會反映正確幾何位置，
+        # 立即呼叫ensureWidgetVisible()算出來的位置可能還是收合前的舊高度——跟
+        # _build_market_tab()docstring裡「分頁要等使用者實際切換過去才會有真正的
+        # layout」是同一類「剛顯示的內容量高度算不準」情境，延後一拍處理。
+        QTimer.singleShot(0, lambda: scroll_area.ensureWidgetVisible(target, 0, 10))
+
+    def _on_analysis_top_link_clicked(self, url: QUrl, scroll_area: QScrollArea) -> None:
+        """技術面/籌碼面區塊結尾「🔼 回頂部」連結的點擊處理：只接受
+        `jumpto:///top`連結，捲動scroll_area回到最上方。2026-08-04新增。"""
+        if url.scheme() != "jumpto" or url.path().lstrip("/") != "top":
+            return
+        scroll_area.verticalScrollBar().setValue(0)
+
     def _open_rule_reference_window(self, path: Path) -> None:
         """開一個新的非模態視窗，把`path`這份ai/ebook-summary/筆記檔案轉成HTML顯示。
         2026-08-04新增，使用者要求「原文與頁碼」的引用真的能點開來讀，不用自己去
@@ -2193,11 +2364,16 @@ class MainWindow(QMainWindow):
         很低(SQL查詢+5條screen_*規則判斷)，不需要為了省這點重算而增加程式複雜度。
         """
         if self.conn is None or not self._current_stock_id:
-            self._set_analysis_html("<p>請先從候選清單點選或查詢一檔股票。</p>")
+            self._set_autoheight_html(self.analysis_summary_view, "<p>請先從候選清單點選或查詢一檔股票。</p>")
+            self._set_autoheight_html(self.analysis_tech_view, "")
+            self._set_autoheight_html(self.analysis_chip_view, "")
             return
         stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
         stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
-        self._set_analysis_html(self._build_analysis_html(self._current_stock_id, f"個股分析：{stock_label}"))
+        sections = self._build_analysis_sections_html(self._current_stock_id, f"個股分析：{stock_label}")
+        self._set_autoheight_html(self.analysis_summary_view, sections["summary"])
+        self._set_autoheight_html(self.analysis_tech_view, sections["tech"])
+        self._set_autoheight_html(self.analysis_chip_view, sections["chip"])
 
     @staticmethod
     def _colored_num(value, decimals: int = 0, signed: bool = False, suffix: str = "") -> str:
@@ -2234,13 +2410,11 @@ class MainWindow(QMainWindow):
             self._set_overview_block_html(title, builder(stock_id))
 
     def _set_overview_block_html(self, title: str, html_content: str) -> None:
-        """跟_set_analysis_html()同一套「依內容動態算高度」作法(理由見該處說明)，
-        套用到_STOCK_OVERVIEW_BLOCKS裡指定區塊自己的QTextEdit。"""
-        view = self._stock_overview_views[title]
-        view.setHtml(html_content)
-        doc_height = view.document().size().height()
-        frame_width = view.frameWidth() * 2
-        view.setFixedHeight(int(doc_height) + frame_width + 8)
+        """跟_set_autoheight_html()同一套「依內容動態算高度」作法，套用到
+        _STOCK_OVERVIEW_BLOCKS裡指定區塊自己的QTextEdit——這裡的view是QTextEdit
+        不是QTextBrowser，但_set_autoheight_html()用到的API(setHtml/document()/
+        frameWidth()/setFixedHeight())兩者共通，可以直接共用同一個方法。"""
+        self._set_autoheight_html(self._stock_overview_views[title], html_content)
 
     def _build_overview_quote_html(self, stock_id: str) -> str:
         """「交易資訊」區塊內容，對應temp/個股詳情-1.jpg。2026-08-03改版：均價/成交
@@ -2597,18 +2771,6 @@ class MainWindow(QMainWindow):
             "<tr><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr></table>"
         )
         return warning + table
-
-    def _set_market_analysis_html(self, html_content: str) -> None:
-        """設定「大盤分析」面板內容並依實際內容量重新算出剛好的高度，跟_set_analysis_html()
-        邏輯一致，但不需要呼叫_sync_central_height_to_content()——大盤分析分頁用的是
-        plain QVBoxLayout+QScrollArea(見_build_market_tab())，不像候選清單分頁那樣包了
-        一層QSplitter，一般QVBoxLayout+QScrollArea(setWidgetResizable(True))組合本來
-        就能正確隨內容量調整捲軸範圍。
-        """
-        self.market_analysis_view.setHtml(html_content)
-        doc_height = self.market_analysis_view.document().size().height()
-        frame_width = self.market_analysis_view.frameWidth() * 2
-        self.market_analysis_view.setFixedHeight(int(doc_height) + frame_width + 8)
 
     # ------------------------------------------------------------------
     # 按鈕

@@ -550,7 +550,6 @@ _SCREEN_FUNCTIONS = (
 
 
 _SIGNAL_NAME_PATTERN = re.compile(r"^(R-[A-Z]+-\d+)(.*)（(\d+)%）$")
-_CONFIDENCE_PREFIX_PATTERN = re.compile(r"^(\d+)/100")
 
 
 def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.DataFrame | None = None) -> list[dict]:
@@ -576,7 +575,7 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
     的完整清單，「候選清單」只是其中一個精選子集(附進場價/停損建議的SOP型規則)，兩者
     定位不同，不是bug。
     """
-    from src.rule_docs import load_rule_doc
+    from src.rule_docs import load_rule_doc, parse_confidence
     from src.screener.rule_scan import scan_golden_tier
 
     matches: list[dict] = []
@@ -600,13 +599,13 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
 
     for item in scan_golden_tier(df, trend_df=trend_df):
         doc = load_rule_doc(item["rule_id"])
-        confidence_match = _CONFIDENCE_PREFIX_PATTERN.match(doc["信心"]) if doc and "信心" in doc else None
-        if confidence_match is None:
+        confidence = parse_confidence(item["rule_id"])
+        if confidence is None:
             continue  # 理論上不會發生(rule_docs涵蓋全部246條)，查無信心分數就不列入
         matches.append({
             "rule_id": item["rule_id"],
             "title": doc.get("名稱", item["rule_id"]),
-            "confidence": int(confidence_match.group(1)),
+            "confidence": confidence,
             "note": item["note"],
             "description": doc.get("解讀"),
             "reference": doc.get("原文與頁碼"),
