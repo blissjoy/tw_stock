@@ -4982,3 +4982,44 @@ K棒本身反而被壓縮在中間一小段，其餘留白都是「切線外推�
 - ⚠️ 驗證過程中誤刪了使用者自己貼的參考截圖`temp/法人-1.jpg`/`temp/法人-2.jpg`
   (誤判成scratchpad裡自己產生的驗證截圖)，已經跟使用者說明並致歉，之後只清
   scratchpad目錄，不動`temp/`。
+
+## 新增17:00/21:00兩個排程，補抓當日法人及資券(2026-08-03)
+
+使用者要求「基於原本的排程，加上17:00及21:00，用來抓當日法人及資券」。查證
+`scripts/daily_pipeline.py`的`fetch_today_twse()`：三大法人買賣超
+(`institutional_investors`表)/融資融券(`margin_trading`表)是跟股價同一批
+從TWSE抓的，沒有獨立的「只抓法人/資券」指令，且這兩張表完全沒有TPEx資料
+來源(模組docstring原文：「目前daily_screener只用得到股價，法人與融資融券
+還沒有任何規則在用，所以TPEx仍然只抓股價」)。原有6個排程(10:00~14:30，見
+2026-07-24章節)都沒加`--dry-run`，每次執行都會照常發送LINE/Email通知——
+先跟使用者確認新增的這2個排程要不要也每次發通知，使用者選擇「不發通知，
+只實質更新資料」，理由：法人/資券資料TWSE有時比收盤價晚公布，14:30那次不
+一定抓得齊全，17:00/21:00只是想補抓最終數字，不是想要每天多收2次幾乎跟
+14:30重複的候選清單推播(目前選股規則都還沒用到法人/資券，候選清單內容不會
+因為法人/資券變化而改變)。
+
+- 用`schtasks /create`新增兩個Windows工作排程器工作(跟現有6個同一套command
+  pattern，只是多加`--dry-run --skip-tpex`兩個旗標)：
+  ```
+  tw_stock_pipeline_1700：週一~五17:00，daily_pipeline.py --local-db
+    D:\tw_stock\data\tw_stock.db --dry-run --skip-tpex
+  tw_stock_pipeline_2100：週一~五21:00，同上
+  ```
+  `--dry-run`跳過LINE/Email通知(但仍然照常寫入候選清單/均線SAR快取，只是
+  不送通知，通常內容會跟14:30那次相同，重算一次不影響正確性)；`--skip-tpex`
+  跳過TPEx股價重抓，加快這兩次執行(法人/資券本來就沒有TPEx資料，跳過不影響
+  這次排程的目的)。
+- `schtasks /query /fo LIST /v`確認兩個工作都成功建立、下一次執行時間分別是
+  今天17:00/21:00、指令內容正確(含`--local-db`/`--dry-run`/`--skip-tpex`
+  三個旗標)。
+- 更新`README.md`「本機每日排程」章節：8個排程的完整`schtasks /create`指令
+  清單(含新增這2個)、新增一段說明17:00/21:00這兩個排程的用途與為何加
+  `--dry-run --skip-tpex`、「這6個工作」改成「這8個工作」、移除指令的
+  「其餘5個」改成「其餘7個」。
+- ⚠️ Windows工作排程器指令有single-slash旗標(`/query`、`/fo`等)，用Bash
+  工具(Git Bash/MSYS)執行`schtasks`時，這類旗標會被MSYS路徑轉換規則誤判成
+  相對路徑、整個指令解析錯亂(實測`schtasks /query /fo CSV`跑出來是「找不到
+  磁碟機的資料夾/選項—'C:/Program Files/Git/query'」這種亂碼錯誤，不是
+  schtasks本身有問題)；改用PowerShell工具執行`schtasks`系列指令就正常，之後
+  遇到需要在這個環境跑Windows原生command-line工具(單斜線旗標)的情境，優先
+  用PowerShell工具而非Bash工具。

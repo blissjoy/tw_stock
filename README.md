@@ -93,8 +93,9 @@ python scripts/daily_pipeline.py --date 20260722 --local-db data/tw_stock.db
 (daily_data_status表會記錄某次結果是盤中即時價還是官方收盤價，兩個前端UI會標示
 「尚未收盤」)。
 
-✅ **這6個排程工作已經在本機建立好了**（2026-07-24，見`ai/PLAN.md`同日期章節）。以下指令
-留著給之後要在其他機器上重新設定、或排程被誤刪需要重建時參考：
+✅ **這8個排程工作已經在本機建立好了**（前6個2026-07-24建立，17:00/21:00這2個
+2026-08-03新增，見`ai/PLAN.md`同日期章節）。以下指令留著給之後要在其他機器上重新設定、
+或排程被誤刪需要重建時參考：
 
 ```powershell
 schtasks /create /tn "tw_stock_pipeline_1000" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 10:00
@@ -103,6 +104,8 @@ schtasks /create /tn "tw_stock_pipeline_1200" /tr "C:\path\to\python.exe D:\tw_s
 schtasks /create /tn "tw_stock_pipeline_1300" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:00
 schtasks /create /tn "tw_stock_pipeline_1330" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:30
 schtasks /create /tn "tw_stock_pipeline_1430" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:30
+schtasks /create /tn "tw_stock_pipeline_1700" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --skip-tpex" /sc weekly /d MON,TUE,WED,THU,FRI /st 17:00
+schtasks /create /tn "tw_stock_pipeline_2100" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --skip-tpex" /sc weekly /d MON,TUE,WED,THU,FRI /st 21:00
 ```
 
 `C:\path\to\python.exe`要換成`where python`查到的實際直譯器完整路徑（例如
@@ -110,19 +113,28 @@ schtasks /create /tn "tw_stock_pipeline_1430" /tr "C:\path\to\python.exe D:\tw_s
 不一定會套用互動式終端機的PATH設定，直接寫死完整路徑比較保險，用純`python`指令可能因為
 排程環境解析不到而靜默失敗。
 
+**17:00/21:00這兩個排程的用途**：三大法人買賣超／融資融券資料(`institutional_investors`/
+`margin_trading`表，`fetch_today_twse()`裡跟股價同一批抓)有時TWSE公布時間比收盤價晚，
+14:30那次不一定抓得齊全，所以晚上再補跑兩次盡量拿到當天最終的法人/資券數字。這兩個
+排程刻意加了`--dry-run --skip-tpex`：`--dry-run`是因為候選清單此時通常跟14:30那次
+完全一樣(目前選股規則都還沒用到法人/資券資料，見`scripts/daily_pipeline.py`模組
+docstring)，不用再發一次重複的LINE/Email通知；`--skip-tpex`是因為法人/資券資料
+本來就只有TWSE上市股票才有(TPEx這兩張表完全沒有抓取來源，見同一份docstring)，跳過
+TPEx股價重抓可以加快這兩次排程的執行時間。
+
 ⚠️ 實際建立時**拿掉了`/rl highest`**（原本以為要有這個旗標，但套用後`schtasks /create`
 會要求系統管理員權限、直接回`ERROR: Access is denied.`）——這支腳本只做HTTP請求跟寫自己
 目錄下的sqlite檔案，本來就不需要最高權限，不加這個旗標反而更安全(最小權限原則)，也不需要
 用系統管理員權限開終端機才能建立。
 
-或用工作排程器GUI（`taskschd.msc`）手動建立/檢視這6個工作，並記得都勾選：
+或用工作排程器GUI（`taskschd.msc`）手動建立/檢視這8個工作，並記得都勾選：
 - 「觸發程序」頁籤 → 進階設定 → **「如果錯過排定的啟動時間，儘快執行工作」**（涵蓋電腦當時
   剛好關機的情況，開機後會自動補跑）。
 - 「一般」頁籤 → **「不論使用者登入與否均執行」**（背景執行，不需要停留在登入畫面）。
 
 可以用 `schtasks /run /tn "tw_stock_pipeline_1000"` 手動觸發一次驗證是否正常執行，
 執行紀錄可以在工作排程器的「記錄」頁籤查看，或直接開啟`data/pipeline_status.json`確認。
-之後若要移除，逐一用`schtasks /delete /tn "tw_stock_pipeline_1000" /f`（其餘5個同理）。
+之後若要移除，逐一用`schtasks /delete /tn "tw_stock_pipeline_1000" /f`（其餘7個同理）。
 
 ⚠️ 每小時跑一次全市場批次下載(TWSE+TPEx合計約2000多檔)，實測約需1分鐘內，不會對
 TWSE/yfinance造成明顯負擔；但如果之後有更高頻率的需求(例如每15分鐘)，應該重新評估
