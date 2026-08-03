@@ -816,9 +816,11 @@ def build_candlestick_figure(
     欄位不存在時(例如舊呼叫端傳入的df沒有這些欄位)直接跳過不畫，不會crash。
     show_sar: 是否在價格子圖疊加每根K棒的SAR點位(對應df裡由load_price_history()算好的
     SAR/SAR_BULL欄位，見src.indicators.parabolic_sar引用來源說明)，多頭(SAR在K棒下方)用
-    綠點、空頭(SAR在K棒上方)用紅點——這是SAR圖表的通用畫法慣例，跟K棒本身「漲紅跌綠」的
-    配色是兩套獨立慣例(SAR的綠代表「多頭」、K棒的綠代表「收黑/陰線」，語意不同，只是剛好
-    都用了綠色，不是同一套規則)，不會互相衝突混淆。欄位不存在時直接跳過不畫，不會crash。
+    紅點、空頭(SAR在K棒上方)用綠點——2026-08-04修正：原本用「多頭綠、空頭紅」，理由是
+    「SAR圖表的通用畫法慣例、跟K棒漲紅跌綠是兩套獨立配色」，但使用者指出這樣不直覺，
+    改成跟K棒本身「漲紅跌綠」同一套配色慣例：多頭(偏多/看漲)用紅、空頭(偏空/看跌)用綠，
+    整張圖表(K棒/成交量/MACD/SAR)的紅綠語意全部一致，不再是「SAR另一套獨立規則」。
+    欄位不存在時直接跳過不畫，不會crash。
     """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -852,7 +854,7 @@ def build_candlestick_figure(
 
     if show_sar and {"SAR", "SAR_BULL"}.issubset(df.columns):
         sar_colors = [
-            "#27ae60" if pd.notna(bull) and bull else "#c0392b"
+            "#c0392b" if pd.notna(bull) and bull else "#27ae60"
             for bull in df["SAR_BULL"]
         ]
         fig.add_trace(go.Scatter(

@@ -1113,7 +1113,9 @@ def test_build_candlestick_figure_adds_sar_markers_when_enabled():
     sar_trace = next(t for t in fig.data if t.name == "SAR")
     assert sar_trace.mode == "markers"
     assert list(sar_trace.y) == [98.0, 98.5, 99.0]
-    assert list(sar_trace.marker.color) == ["#27ae60", "#27ae60", "#c0392b"]  # 多頭綠、空頭紅
+    # 2026-08-04修正：多頭(偏多/看漲)用紅、空頭(偏空/看跌)用綠，跟K棒本身「漲紅跌綠」
+    # 同一套配色慣例(使用者反映原本「多頭綠、空頭紅」不直覺)。
+    assert list(sar_trace.marker.color) == ["#c0392b", "#c0392b", "#27ae60"]  # 多頭紅、空頭綠
 
 
 def test_build_candlestick_figure_omits_sar_trace_when_columns_missing_or_disabled():

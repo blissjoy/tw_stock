@@ -266,9 +266,10 @@ def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id
             + '</span>&nbsp;&nbsp;量 ' + d[5].toLocaleString();
     }}
 
-    // MA5/10/20/120/240目前數值+方向(↑紅/↓綠/=灰，沿用本專案K棒漲紅跌綠的既有配色慣例，
-    // 跟SAR用的綠/紅是另一套獨立慣例，只是剛好也用到綠色，語意不同)。d是ma_customdata_
-    // json裡的一列，每個天期佔2個位置(數值, 方向)，資料不足時值是null，直接跳過不顯示。
+    // MA5/10/20/120/240目前數值+方向(↑紅/↓綠/=灰，沿用本專案「漲紅跌綠」的既有配色
+    // 慣例——2026-08-04起SAR的紅綠也改成同一套規則，不再是獨立慣例，見chart_data.py
+    // build_candlestick_figure()的說明)。d是ma_customdata_json裡的一列，每個天期
+    // 佔2個位置(數值, 方向)，資料不足時值是null，直接跳過不顯示。
     function fmtMa(d) {{
         var arrows = {{up: '<span style="color:#c0392b">↑</span>', down: '<span style="color:#27ae60">↓</span>', flat: '<span style="color:#888">=</span>'}};
         var parts = [];
