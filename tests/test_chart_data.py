@@ -2,7 +2,14 @@ import pandas as pd
 import pytest
 
 import src.presentation.chart_data as chart_data
-from src.data.storage import init_db, upsert_daily_candidates, upsert_daily_indicators, upsert_stock_prices, upsert_stocks
+from src.data.storage import (
+    init_db,
+    upsert_daily_candidates,
+    upsert_daily_indicators,
+    upsert_delisted_stocks,
+    upsert_stock_prices,
+    upsert_stocks,
+)
 from src.presentation.chart_data import (
     apply_candidate_filters,
     build_candlestick_figure,
@@ -170,6 +177,31 @@ def test_load_stock_universe_for_date_excludes_taiex_index():
     ])
 
     df, _, _ = load_stock_universe_for_date(conn)
+
+    assert set(df["stock_id"]) == {"2330"}
+
+
+def test_load_stock_universe_for_date_excludes_delisted_stocks():
+    """2026-08-04新增：delisted_stocks表(見scripts/daily_pipeline.py的fetch_today_
+    tpex()說明)記錄的已下市股票不該出現在候選清單/全市場掃描結果裡，跟排除大盤
+    INDEX的邏輯一致。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"},
+        {"stock_id": "8418", "name": "捷必勝-KY", "market": "TPEx", "industry": None, "updated_at": "2026-07-22"},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "8418", "date": "2026-07-22", "open": 50.0, "high": 51.0, "low": 49.0, "close": 50.5,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_delisted_stocks(conn, [
+        {"stock_id": "8418", "name": "捷必勝-KY", "delisted_date": "2024-01-31",
+         "reason": "私有化下市", "noted_at": "2026-08-04T00:00:00"},
+    ])
+
+    df, _, _ = load_stock_universe_for_date(conn, target_date="2026-07-22")
 
     assert set(df["stock_id"]) == {"2330"}
 
@@ -539,6 +571,22 @@ def test_resolve_stock_id_returns_none_when_no_match():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
     assert resolve_stock_id(conn, "不存在的股票") is None
+
+
+def test_resolve_stock_id_excludes_delisted_stocks():
+    """2026-08-04新增：已下市股票不該被搜尋(用股票代號/名稱/名稱片段)找到，避免使用者
+    誤以為這還是可以交易的標的——見scripts/daily_pipeline.py的fetch_today_tpex()
+    delisted_stocks說明。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "8418", "name": "捷必勝-KY", "market": "TPEx", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_delisted_stocks(conn, [
+        {"stock_id": "8418", "name": "捷必勝-KY", "delisted_date": "2024-01-31",
+         "reason": "私有化下市", "noted_at": "2026-08-04T00:00:00"},
+    ])
+
+    assert resolve_stock_id(conn, "8418") is None
+    assert resolve_stock_id(conn, "捷必勝-KY") is None
+    assert resolve_stock_id(conn, "捷必勝") is None
 
 
 def test_resolve_stock_id_returns_none_for_blank_query():

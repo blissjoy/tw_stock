@@ -266,6 +266,27 @@ def upsert_holder_shares_distribution(conn: sqlite3.Connection, rows: list[dict]
     conn.commit()
 
 
+def upsert_delisted_stocks(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """rows的每個dict需含 stock_id/name/delisted_date/reason/noted_at，見schema.sql的
+    delisted_stocks說明。ON CONFLICT時只更新reason/noted_at，不覆蓋已知的delisted_date
+    (第一次記錄時如果查得到確切日期就不該被之後「查不到」的重試覆蓋掉)。"""
+    conn.executemany(
+        """
+        INSERT INTO delisted_stocks (stock_id, name, delisted_date, reason, noted_at)
+        VALUES (:stock_id, :name, :delisted_date, :reason, :noted_at)
+        ON CONFLICT(stock_id) DO UPDATE SET
+            reason = excluded.reason, noted_at = excluded.noted_at
+        """,
+        rows,
+    )
+    conn.commit()
+
+
+def list_delisted_stock_ids(conn: sqlite3.Connection) -> set[str]:
+    """回傳目前已記錄下市的股票代號集合，供排程跳過重複下載嘗試、UI排除顯示用。"""
+    return {row[0] for row in conn.execute("SELECT stock_id FROM delisted_stocks").fetchall()}
+
+
 def get_daily_data_status(conn: sqlite3.Connection, iso_date: str) -> bool | None:
     """回傳指定日期是否為盤中即時價(True)/官方收盤價(False)；查無紀錄回傳None(例如這個
     功能上線前就存在的歷史資料，一律不特別標示，視為已收盤)。"""

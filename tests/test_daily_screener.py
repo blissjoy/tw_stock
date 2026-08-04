@@ -1,7 +1,7 @@
 import pandas as pd
 
 import src.screener.daily_screener as daily_screener
-from src.data.storage import init_db, upsert_stock_prices, upsert_stocks
+from src.data.storage import init_db, upsert_delisted_stocks, upsert_stock_prices, upsert_stocks
 
 
 def _build_uptrend_df(n_days: int = 70) -> pd.DataFrame:
@@ -674,6 +674,23 @@ def test_load_trailing_frames_excludes_index_market_rows():
         for d in range(70)
     ]
     upsert_stock_prices(conn, rows)
+
+    frames = daily_screener.load_trailing_frames(conn, min_days=60)
+
+    assert set(frames.keys()) == {"2330"}
+
+
+def test_load_trailing_frames_excludes_delisted_stocks():
+    """2026-08-04新增：delisted_stocks表(見scripts/daily_pipeline.py的fetch_today_
+    tpex()說明)記錄的已下市股票，歷史股價還在stock_prices裡，但不該再被screen_*
+    規則重新評估、產生一個實際上已經買不到的假候選標的。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+    _seed_stock_prices(conn, "8418", n_days=70)
+    upsert_delisted_stocks(conn, [
+        {"stock_id": "8418", "name": "捷必勝-KY", "delisted_date": "2024-01-31",
+         "reason": "私有化下市", "noted_at": "2026-08-04T00:00:00"},
+    ])
 
     frames = daily_screener.load_trailing_frames(conn, min_days=60)
 

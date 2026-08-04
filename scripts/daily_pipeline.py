@@ -139,8 +139,34 @@ def fetch_today_tpex(
     名稱/產業別（yfinance沒有這些基本資料，仍需要FinMind的名單來補stocks表的name/industry
     欄位）。只篩選純4碼的普通股票代號(排除ETF/債券/權證等，比照
     src.data.twse_client.STOCK_CODE_PATTERN 對TWSE的既有做法一致)。
+
+    ⚠️ **2026-08-04發現「下載錯誤」的真正root cause**：使用者回報14:30(TPEx早已收盤)
+    仍看到一長串「下載錯誤」，之前誤判成「上櫃還沒收盤」——直接把同一批股票代號拿去
+    真實查yfinance才發現：這些公司大多已經完成「轉上市」(從上櫃轉到上市)，Yahoo
+    Finance根本不認得`.TWO`(上櫃)這個ticker後綴、要改用`.TW`(上市)才查得到(29檔
+    實測失敗股票裡27檔用`.TW`查都有正常資料，錯誤訊息是`possibly delisted; no
+    timezone found`，代表Yahoo完全不認得這個ticker，不是「今天還沒收盤」那種
+    暫時性查無資料)。FinMind的`TaiwanStockInfo`分類資料本身會在稍晚才追上(事後
+    重查，27檔裡多數FinMind已經改標TWSE了)，但排程當下抓到的可能還是尚未更新的
+    舊分類，不能假設market欄位永遠即時正確。因此改成：TPEx批次下載(含內部重試)後
+    仍失敗的股票，再用`.TW`後綴查一次當作「轉上市」備援，查到的話用market="TWSE"
+    寫入(順便修正掉FinMind暫時落後的分類)，兩種後綴都查不到才是真正的「下載錯誤」
+    (例如剛IPO還沒被Yahoo收錄的股票)。
+
+    ⚠️ **同一天再追查剩餘的29-27=2檔「兩種後綴都查不到」**(4578/6813)+3檔第一版
+    修好後仍不定期出現的個案：直接上網查證實全部10檔都是真的下市/併購/終止興櫃買賣
+    (捷必勝-KY私有化下市、南璋停止買賣逾半年終止上櫃、金利被健策股份轉換、東元精電
+    併回母公司東元等)，不是誤判——代表「兩種市場後綴皆查無資料」這個條件本身就是
+    可靠的下市判斷依據。改成用`storage.delisted_stocks`表記錄下來(見schema.sql)，
+    下次排程直接跳過這些股票，不再每天重複浪費下載嘗試、也不再重複印出同樣的錯誤
+    訊息。已知下市的股票(`known_delisted_ids`)一開始就從`tpex_rows`篩掉，不會被
+    納入這次的下載清單。
     """
-    tpex_rows = [r for r in stock_info if r["market"] == "TPEx" and STOCK_CODE_PATTERN.match(r["stock_id"])]
+    known_delisted_ids = storage.list_delisted_stock_ids(conn)
+    tpex_rows = [
+        r for r in stock_info
+        if r["market"] == "TPEx" and STOCK_CODE_PATTERN.match(r["stock_id"]) and r["stock_id"] not in known_delisted_ids
+    ]
     if not tpex_rows:
         return 0
     info_by_id = {r["stock_id"]: r for r in tpex_rows}
@@ -157,12 +183,31 @@ def fetch_today_tpex(
         return 0
 
     # fetch_tpex_prices_batch()內部已經對失敗的股票重試過(見yfinance_client.py)，
-    # 這裡剩下的才是重試後依然沒有資料的，印出好懂的訊息取代yfinance原始的除錯輸出
+    # 這裡剩下的才是重試後依然沒有資料的——先當作「轉上市」用.TW後綴再查一次(見上方
+    # docstring)，兩種後綴都查不到才記錄成下市、印出訊息，取代yfinance原始的除錯輸出
     # (見2026-07-29的討論：不要把"possibly delisted...(1d 2026-07-27 -> 2026-07-28)"
     # 這種原始參數格式直接丟給使用者看)。
-    for stock_id in info_by_id:
-        if stock_id not in prices_by_stock:
-            print(f"{stock_id}{info_by_id[stock_id].get('name', '')} 下載錯誤")
+    remaining_ids = [sid for sid in info_by_id if sid not in prices_by_stock]
+    reclassified_to_twse: dict[str, list[dict]] = {}
+    if remaining_ids:
+        try:
+            reclassified_to_twse = yfinance_client.fetch_twse_prices_batch(remaining_ids, iso_date, next_day)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[TPEx轉上市備援/yfinance] 批次下載失敗，略過：{exc}")
+
+    newly_delisted = [sid for sid in remaining_ids if sid not in reclassified_to_twse]
+    if newly_delisted:
+        now_iso = datetime.now().isoformat()
+        storage.upsert_delisted_stocks(conn, [
+            {
+                "stock_id": sid, "name": info_by_id[sid].get("name", sid), "delisted_date": None,
+                "reason": "兩種市場後綴(.TWO/.TW)皆查無資料，可能已下市/併購/終止興櫃買賣",
+                "noted_at": now_iso,
+            }
+            for sid in newly_delisted
+        ])
+        for stock_id in newly_delisted:
+            print(f"{stock_id}{info_by_id[stock_id].get('name', '')} 下載錯誤（已記錄為疑似下市，之後排程不再嘗試）")
 
     for stock_id, prices in prices_by_stock.items():
         row = info_by_id[stock_id]
@@ -172,7 +217,15 @@ def fetch_today_tpex(
         }])
         storage.upsert_stock_prices(conn, prices)
 
-    return len(prices_by_stock)
+    for stock_id, prices in reclassified_to_twse.items():
+        row = info_by_id[stock_id]
+        storage.upsert_stocks(conn, [{
+            "stock_id": stock_id, "name": row.get("name", stock_id), "market": "TWSE",
+            "industry": row.get("industry"), "updated_at": datetime.now().isoformat(),
+        }])
+        storage.upsert_stock_prices(conn, prices)
+
+    return len(prices_by_stock) + len(reclassified_to_twse)
 
 
 def fetch_today_tpex_institutional(conn, stock_info_by_id: dict) -> int:

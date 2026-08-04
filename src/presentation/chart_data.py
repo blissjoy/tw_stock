@@ -509,7 +509,9 @@ def load_stock_universe_for_date(
     `stock_prices`(當天沒有價格資料的股票，MA/SAR/漲跌幅本來就無從算起，直接排除，不是
     LEFT JOIN留著全部NaN)，再合併當天`daily_candidates`裡「這檔股票有沒有觸發規則、
     觸發了哪些」的資訊(沒觸發的股票signal_name/entry_price/stop_loss是None，由
-    `apply_candidate_filters`視情況補上「符合條件本身」的描述文字)。
+    `apply_candidate_filters`視情況補上「符合條件本身」的描述文字)。也排除
+    `delisted_stocks`表裡已確認下市的股票(見src/screener/daily_screener.py的
+    load_trailing_frames()同一個理由)。
 
     is_intraday：這天的資料是否來自yfinance盤中即時價備援(True)而非TWSE官方最終收盤價
     (False)，讀daily_data_status表(見schema.sql與scripts/daily_pipeline.py的
@@ -569,7 +571,7 @@ def load_stock_universe_for_date(
         FROM stocks s
         JOIN stock_prices sp ON sp.stock_id = s.stock_id AND sp.date = ?
         LEFT JOIN daily_indicators di ON di.stock_id = s.stock_id AND di.date = sp.date
-        WHERE s.market != 'INDEX'{market_clause}
+        WHERE s.market != 'INDEX' AND s.stock_id NOT IN (SELECT stock_id FROM delisted_stocks){market_clause}
         """,
         params,
     )
@@ -688,18 +690,31 @@ def resolve_stock_id(conn, query: str) -> str | None:
     ②名稱完全相符 ③名稱片段(LIKE)相符，取第一筆(依stock_id排序)。都找不到回傳None，
     呼叫端可以退回用原始輸入當stock_id(維持既有「查無股票代號 X 的價格資料」錯誤訊息
     路徑，不特別區分「代號打錯」還是「這代號真的不存在」)。
+
+    2026-08-04新增：三個分支都排除`delisted_stocks`表裡已確認下市的股票，避免使用者
+    用公司名稱搜尋時，把已經下市/併購的舊股票誤認成還在交易的標的。這不影響「直接打對
+    的股票代號」的情境——呼叫端(_on_search())在resolve_stock_id()回傳None時會退回用
+    使用者原始輸入當stock_id，歷史股價圖表照樣看得到，只是不會被這裡「確認找到了」。
     """
     query = query.strip()
     if not query:
         return None
-    row = conn.execute("SELECT stock_id FROM stocks WHERE stock_id = ?", (query,)).fetchone()
-    if row:
-        return row[0]
-    row = conn.execute("SELECT stock_id FROM stocks WHERE name = ?", (query,)).fetchone()
+    row = conn.execute(
+        "SELECT stock_id FROM stocks WHERE stock_id = ? AND stock_id NOT IN (SELECT stock_id FROM delisted_stocks)",
+        (query,),
+    ).fetchone()
     if row:
         return row[0]
     row = conn.execute(
-        "SELECT stock_id FROM stocks WHERE name LIKE ? ORDER BY stock_id LIMIT 1", (f"%{query}%",)
+        "SELECT stock_id FROM stocks WHERE name = ? AND stock_id NOT IN (SELECT stock_id FROM delisted_stocks)",
+        (query,),
+    ).fetchone()
+    if row:
+        return row[0]
+    row = conn.execute(
+        "SELECT stock_id FROM stocks WHERE name LIKE ? AND stock_id NOT IN (SELECT stock_id FROM delisted_stocks) "
+        "ORDER BY stock_id LIMIT 1",
+        (f"%{query}%",)
     ).fetchone()
     return row[0] if row else None
 

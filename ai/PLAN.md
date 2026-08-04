@@ -5888,3 +5888,54 @@ today_twse()`現有的「TWSE股價+FinMind名稱/產業別合併成一列」是
   重測通過)，確認正確後直接套用到正式DB——2026-08-03的volume從0改成正確的
   11,427,047,935，OHLC維持不變；2026-08-04(今天)因為TWSE官方統計還沒公布，
   volume維持0是預期行為，下次排程執行TWSE公布後會自動補上。
+
+## TPEx「下載錯誤」root cause + 已下市股票追蹤（2026-08-04）
+
+使用者回報14:30(TPEx早已收盤)仍看到一長串「下載錯誤」，質疑「上櫃還沒收盤」這個
+先前的解釋——直接把同一批股票代號拿去真實查yfinance，發現絕大多數是因為公司已經
+「轉上市」(從上櫃轉到上市)，Yahoo Finance不認得`.TWO`後綴，要改用`.TW`才查得到
+(見上一則`fetch_today_tpex()`失敗股票用`.TW`後綴當「轉上市」備援的修正)。
+
+備援修好後，使用者接著追問：TWSE/TPEx是否有官方名冊可以「先確認」市場分類，不用
+等下載失敗才知道。查到TWSE`t187ap03_L`(上市公司基本資料)、TPEx`mopsfin_
+t187ap03_O`(上櫃)、`mopsfin_t187ap03_R`(興櫃)三個官方名冊，比FinMind的分類資料
+更準確即時(比對保瑞/泰博/藥華藥，TWSE官方名冊顯示這幾檔早在2023年底就已經轉上市，
+FinMind的分類落後超過一年)。但仍有10檔三個官方名冊都查不到，使用者要求直接上網
+查證——結果全部10檔證實真的下市/併購/終止興櫃買賣(捷必勝-KY私有化下市、南璋停止
+買賣逾半年終止上櫃、金利被健策股份轉換、東元精電正在併回母公司東元等)，證實「兩種
+市場後綴皆查無資料」這個條件本身就是可靠的下市判斷依據，不需要额外整合官方名冊
+查詢也能做到高準確度(官方名冊查詢留待未來有需要再考慮，這次先用現有的下載容錯
+機制當判斷依據)。
+
+使用者確認：①下市股票要記錄進DB，避免排程每天重複浪費下載嘗試；②候選清單/股票
+搜尋這些UI也要一併排除已下市股票，不要讓使用者誤以為還能交易。
+
+- `schema.sql`新增`delisted_stocks`表(stock_id/name/delisted_date/reason/
+  noted_at)，`stock_id`刻意不設外鍵——記錄下市時`stocks`表不一定還有這筆。
+  `src/data/storage.py`新增`upsert_delisted_stocks()`(ON CONFLICT只更新reason/
+  noted_at，不覆蓋已知的delisted_date，避免之後的自動偵測用None蓋掉查證過的
+  確切日期)、`list_delisted_stock_ids()`。
+- `scripts/daily_pipeline.py`的`fetch_today_tpex()`：一開始就把`delisted_stocks`
+  裡已知的股票從下載清單篩掉(不再浪費嘗試)；TPEx+轉上市備援兩種後綴都查不到的
+  股票，寫進`delisted_stocks`(reason記「兩種市場後綴皆查無資料，可能已下市/併購/
+  終止興櫃買賣」)，訊息從單純的「下載錯誤」改成註明「已記錄為疑似下市，之後排程
+  不再嘗試」。
+- UI排除：`src/screener/daily_screener.py`的`load_trailing_frames()`、
+  `src/presentation/chart_data.py`的`load_stock_universe_for_date()`/
+  `resolve_stock_id()`都加上`NOT IN (SELECT stock_id FROM delisted_stocks)`
+  排除條件，跟既有排除大盤`market='INDEX'`的邏輯一致——歷史股價資料保留，只是
+  不再出現在候選清單/全市場掃描/股票搜尋結果裡。`resolve_stock_id()`排除不影響
+  「直接打對股票代號」查歷史圖表的情境(呼叫端解析失敗會退回用原始輸入當stock_id)。
+- 新增/擴充測試：`tests/test_storage.py`新增`delisted_stocks`相關(3個)、
+  `tests/test_daily_pipeline.py`新增略過已知下市股票/記錄新下市股票(2個)、
+  `tests/test_daily_screener.py`/`tests/test_chart_data.py`各新增排除已下市股票
+  的測試(共3個)。`pytest tests/ -q`977個測試全數通過。
+- 真實驗證：先在正式DB手動記錄8檔已經上網查證過確切下市日期/原因的股票(用真實
+  資料，比自動偵測的通用理由更精確)；⚠️ 東元精電(8041)刻意先不手動記錄——查證
+  時發現它的合併尚未生效(法定合併基準日約8月下旬)，仍在正常交易中；但重新執行
+  `fetch_today_tpex()`時它還是被自動偵測成「兩種後綴皆查無資料」，直接重複測試
+  yfinance確認是真實、可重現的現象(不是這次執行的偶發問題)，代表Yahoo Finance
+  在法定下市日期之前就已經不提供資料，因此還是被自動記錄下市——如實記錄这个
+  發現，之後若有需要「人工排除已知的誤判」可以直接`DELETE FROM delisted_stocks`
+  移除。最終正式DB共記錄72檔已下市股票(比使用者一開始截圖看到的29檔多，主控台
+  當時應該只顯示了部分)。

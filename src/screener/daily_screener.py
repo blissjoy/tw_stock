@@ -695,9 +695,20 @@ def load_trailing_frames(conn, min_days: int = 60) -> dict[str, pd.DataFrame]:
     排除market='INDEX'的列(目前只有大盤`^TWII`，見src/data/yfinance_client.py的
     fetch_taiex_prices())——大盤不是一檔可以交易的股票，不該被個股適用的screen_*規則
     (進場價/停損建議等)誤判成候選標的、混進daily_candidates候選清單。
+
+    2026-08-04新增：一併排除`delisted_stocks`表裡已確認下市/併購/終止興櫃買賣的股票
+    (見scripts/daily_pipeline.py的fetch_today_tpex()說明)——這些股票不會再有新的
+    股價資料，但歷史資料還留在stock_prices裡，不明確排除的話，screen_*規則仍然會
+    對它們「最後一天」的舊資料重新評估，可能產生一個實際上已經買不到的假候選標的。
     """
     stock_ids = [
-        r[0] for r in conn.execute("SELECT stock_id FROM stocks WHERE market != 'INDEX' ORDER BY stock_id").fetchall()
+        r[0] for r in conn.execute(
+            """
+            SELECT stock_id FROM stocks
+            WHERE market != 'INDEX' AND stock_id NOT IN (SELECT stock_id FROM delisted_stocks)
+            ORDER BY stock_id
+            """
+        ).fetchall()
     ]
 
     frames: dict[str, pd.DataFrame] = {}

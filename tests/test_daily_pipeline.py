@@ -37,9 +37,16 @@ def _no_real_taiex_network_calls(monkeypatch):
     2026-08-04新增：fetch_today_taiex()同時也會呼叫twse_client.fetch_taiex_volume()
     (見_fetch_taiex_official_volume())覆蓋yfinance的volume欄位，同一個理由，一併
     擋住避免真的打到TWSE。
+
+    同一天再新增：fetch_today_tpex()對批次下載後仍失敗的股票，現在會呼叫
+    yfinance_client.fetch_twse_prices_batch()當「轉上市」備援(見fetch_today_tpex()
+    docstring)——這個檔案裡不少既有測試會故意讓TPEx批次下載對某些股票查無資料
+    (模擬剛下市/查無資料的情境)，觸發到這個新的備援呼叫，同一個理由一併擋住預設
+    回傳空dict，個別測試需要驗證這個備援行為時在測試函式主體內覆蓋即可。
     """
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda *args, **kwargs: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_volume", lambda *args, **kwargs: {})
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *args, **kwargs: {})
 
 
 def test_run_daily_pipeline_skips_when_twse_has_no_data(monkeypatch):
@@ -521,6 +528,97 @@ def test_run_daily_pipeline_continues_when_one_tpex_stock_has_no_data(monkeypatc
     row = conn.execute("SELECT market, name FROM stocks WHERE stock_id = '6488'").fetchone()
     assert row == ("TPEx", "環球晶")
     assert conn.execute("SELECT COUNT(*) FROM stocks WHERE stock_id = '9999'").fetchone()[0] == 0
+
+
+def test_fetch_today_tpex_falls_back_to_twse_suffix_for_transferred_listings(monkeypatch, capsys):
+    """2026-08-04發現的真正root cause：使用者回報14:30(TPEx早已收盤)仍看到一長串
+    「下載錯誤」，之前誤判成「上櫃還沒收盤」——直接用同一批代號查yfinance才發現這些
+    公司大多已經「轉上市」，Yahoo根本不認得.TWO這個後綴，要改用.TW才查得到。這裡驗證
+    TPEx批次下載失敗的股票會用.TW後綴再查一次，查到的話market要寫成TWSE(不是TPEx)，
+    不應該再印出「下載錯誤」。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "6472", "name": "保瑞", "market": "TPEx", "industry": "醫藥"}]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_twse_prices_batch",
+        lambda stock_ids, start_date, end_date: {"6472": [_price_row(stock_id="6472")]},
+    )
+
+    success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    assert success_count == 1
+    row = conn.execute("SELECT market, name FROM stocks WHERE stock_id = '6472'").fetchone()
+    assert row == ("TWSE", "保瑞")  # 修正掉FinMind暫時落後的TPEx分類，不是寫成TPEx
+    assert "下載錯誤" not in capsys.readouterr().out
+
+
+def test_fetch_today_tpex_prints_download_error_only_when_both_suffixes_fail(monkeypatch, capsys):
+    """兩種市場後綴都查不到才是真正查無資料——2026-08-04追查證實這種情況背後幾乎
+    都是真的下市/併購/終止興櫃買賣(不是誤判)，這時應該印出訊息、同時記錄進
+    delisted_stocks表，之後排程才不會每天重複浪費下載嘗試。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "9999", "name": "測試查無資料股", "market": "TPEx", "industry": None}]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *a, **k: {})
+
+    success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    assert success_count == 0
+    assert "9999測試查無資料股 下載錯誤" in capsys.readouterr().out
+    assert conn.execute("SELECT COUNT(*) FROM stocks WHERE stock_id = '9999'").fetchone()[0] == 0
+    row = conn.execute("SELECT name, delisted_date, reason FROM delisted_stocks WHERE stock_id = '9999'").fetchone()
+    assert row == ("測試查無資料股", None, "兩種市場後綴(.TWO/.TW)皆查無資料，可能已下市/併購/終止興櫃買賣")
+
+
+def test_fetch_today_tpex_skips_already_known_delisted_stocks(monkeypatch):
+    """已經記錄在delisted_stocks的股票，一開始就該從下載清單裡篩掉，不再浪費一次
+    嘗試(不管是TPEx還是轉上市備援都不應該被呼叫到這檔)。"""
+    conn = _fresh_conn()
+    storage.upsert_delisted_stocks(conn, [
+        {"stock_id": "8418", "name": "捷必勝-KY", "delisted_date": "2024-01-31",
+         "reason": "私有化下市", "noted_at": "2026-08-04T00:00:00"},
+    ])
+    stock_info = [
+        {"stock_id": "8418", "name": "捷必勝-KY", "market": "TPEx", "industry": None},
+        {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
+    ]
+    requested_ids = []
+
+    def _fake_batch(stock_ids, start_date, end_date, on_progress=None):
+        requested_ids.extend(stock_ids)
+        return {sid: [_price_row(stock_id=sid)] for sid in stock_ids}
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", _fake_batch)
+
+    success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    assert success_count == 1
+    assert requested_ids == ["6488"]  # 已知下市的8418不應該被納入下載清單
+
+
+def test_fetch_today_tpex_continues_when_twse_fallback_raises(monkeypatch):
+    """轉上市備援下載失敗(例如網路問題)不應該讓整條函式中斷——TPEx那批成功抓到的股票
+    依然要正常寫入。"""
+    conn = _fresh_conn()
+    stock_info = [
+        {"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"},
+        {"stock_id": "6472", "name": "保瑞", "market": "TPEx", "industry": "醫藥"},
+    ]
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
+        lambda *a, **k: {"6488": [_price_row(stock_id="6488")]},
+    )
+
+    def _raise(stock_ids, start_date, end_date):
+        raise RuntimeError("模擬yfinance網路逾時")
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", _raise)
+
+    success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    assert success_count == 1
+    row = conn.execute("SELECT market FROM stocks WHERE stock_id = '6488'").fetchone()
+    assert row == ("TPEx",)
 
 
 def test_fetch_today_tpex_returns_zero_and_does_not_raise_when_batch_download_fails(monkeypatch):

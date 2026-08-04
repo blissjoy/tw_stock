@@ -6,11 +6,13 @@ from src.data.storage import (
     get_daily_data_status,
     init_db,
     is_fetched,
+    list_delisted_stock_ids,
     mark_fetched,
     upsert_broker_chips,
     upsert_daily_candidates,
     upsert_daily_data_status,
     upsert_daily_indicators,
+    upsert_delisted_stocks,
     upsert_institutional_investors,
     upsert_margin_trading,
     upsert_securities_traders,
@@ -50,9 +52,48 @@ def test_init_db_creates_all_expected_tables():
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     expected = {
         "stocks", "stock_prices", "institutional_investors", "margin_trading",
-        "securities_traders", "broker_chips", "fetch_log",
+        "securities_traders", "broker_chips", "fetch_log", "delisted_stocks",
     }
     assert expected.issubset(tables)
+
+
+# ============================================================
+# delisted_stocks (2026-08-04新增)
+# ============================================================
+
+
+def test_upsert_delisted_stocks_then_list_ids():
+    conn = _fresh_db()
+    upsert_delisted_stocks(conn, [
+        {"stock_id": "8418", "name": "捷必勝-KY", "delisted_date": "2024-01-31",
+         "reason": "私有化下市", "noted_at": "2026-08-04T15:00:00"},
+        {"stock_id": "4578", "name": "總格精密", "delisted_date": None,
+         "reason": "兩種市場後綴皆查無資料", "noted_at": "2026-08-04T15:00:00"},
+    ])
+
+    assert list_delisted_stock_ids(conn) == {"8418", "4578"}
+
+
+def test_upsert_delisted_stocks_does_not_overwrite_existing_delisted_date():
+    """第一次記錄時如果查得到確切下市日期，之後重複執行(例如同一檔又再次下載失敗)
+    不應該把已知的日期覆蓋成None。"""
+    conn = _fresh_db()
+    upsert_delisted_stocks(conn, [
+        {"stock_id": "8418", "name": "捷必勝-KY", "delisted_date": "2024-01-31",
+         "reason": "私有化下市", "noted_at": "2026-08-04T15:00:00"},
+    ])
+    upsert_delisted_stocks(conn, [
+        {"stock_id": "8418", "name": "捷必勝-KY", "delisted_date": None,
+         "reason": "兩種市場後綴皆查無資料", "noted_at": "2026-08-05T15:00:00"},
+    ])
+
+    row = conn.execute("SELECT delisted_date, reason FROM delisted_stocks WHERE stock_id = '8418'").fetchone()
+    assert row == ("2024-01-31", "兩種市場後綴皆查無資料")
+
+
+def test_list_delisted_stock_ids_empty_when_none_recorded():
+    conn = _fresh_db()
+    assert list_delisted_stock_ids(conn) == set()
 
 
 def test_ensure_schema_adds_ma200_column_to_pre_existing_daily_indicators_table():

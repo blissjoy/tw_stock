@@ -197,3 +197,18 @@ CREATE TABLE IF NOT EXISTS holder_shares_distribution (
     PRIMARY KEY (stock_id, date, holding_shares_level)
 );
 CREATE INDEX IF NOT EXISTS idx_holder_shares_distribution_date ON holder_shares_distribution(date);
+
+-- 已確認下市/終止交易的股票(2026-08-04新增)：使用者回報大量「下載錯誤」股票代號，
+-- 追查發現FinMind的股票清單分類資料落後(甚至落後超過一年)，這些代號其實已經下市/
+-- 併購/終止興櫃買賣，Yahoo Finance兩種市場後綴(.TW/.TWO)都查不到——見
+-- scripts/daily_pipeline.py的fetch_today_tpex()說明。記下來避免排程每天重複浪費
+-- 下載嘗試，也讓UI(候選清單/股票搜尋)不要再把這些股票當成還在交易的標的顯示。
+-- stock_id刻意不設REFERENCES stocks(stock_id)外鍵——記錄下市這件事的時候，
+-- stocks表裡不一定還有這筆(可能從來沒成功抓過名稱、或本來就查無資料)。
+CREATE TABLE IF NOT EXISTS delisted_stocks (
+    stock_id        TEXT PRIMARY KEY,
+    name            TEXT,
+    delisted_date   TEXT,   -- 確認下市的日期(若已知)，不確定時為NULL
+    reason          TEXT,   -- 簡短原因，例如"兩種市場後綴皆查無資料"
+    noted_at        TEXT NOT NULL  -- 我們自己記錄下這件事的時間(不是真正下市當下)
+);
