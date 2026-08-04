@@ -1,11 +1,14 @@
-"""PySide6桌面版專用的圖表HTML產生：在共用的`src/presentation/chart_data.build_candlestick_figure()`
-回傳的Figure物件上，疊加「滑鼠十字線貫穿價格/成交量/MACD/KD子圖 + 左上角動態資訊框(取代預設
+"""圖表HTML產生：在共用的`src/presentation/chart_data.build_candlestick_figure()`回傳的
+Figure物件上，疊加「滑鼠十字線貫穿價格/成交量/MACD/KD子圖 + 左上角動態資訊框(取代預設
 浮動tooltip)」的效果，仿TradingView超級圖表的畫法。
 
-⚠️ 這裡的自訂JS(post_script)只有透過`QWebEngineView`直接載入原始HTML才會執行——Streamlit的
-`st.plotly_chart()`是用自己的React元件重新渲染Figure的JSON規格，不會執行任何額外注入的JS，
-所以這個模組只給`desktop/`使用，不動`src/presentation/chart_data.py`共用的部分（那邊維持
-Plotly原生的hover/spike設定，兩個前端都適用，只是效果沒有這裡完整）。
+2026-08-04起兩個前端共用：桌面版(`desktop/main_window.py`)透過`QWebEngineView`直接載入
+這裡回傳的原始HTML字串；web版(`dashboard/app.py`)透過Streamlit的`st.components.v1.html()`
+(同樣是把整段HTML丟進iframe執行，JS一樣會跑)。這裡回傳的是純HTML字串，不依賴任何一邊的
+UI框架，只用到`json`/`pandas`/`chart_data.MA_COLORS`。原本這個模組放在`desktop/`底下、
+docstring寫「只給desktop使用」，是因為當時以為`st.plotly_chart()`那種重繪方式沒辦法執行
+注入的JS——這個限制只存在於`st.plotly_chart()`，改用`st.components.v1.html()`就沒有這個
+問題，所以搬來這裡給兩邊共用。
 
 實測踩過的坑：
 - Plotly原生x軸spike line的"across"模式，在上下堆疊子圖(價格/成交量分屬不同y軸domain)的
@@ -13,14 +16,14 @@ Plotly原生的hover/spike設定，兩個前端都適用，只是效果沒有這
   `plotly_hover`時透過`Plotly.relayout()`動態畫一條`yref='paper'`(y0=0到y1=1，貫穿整張
   圖紙面高度)的shape線，才能真正同時穿過價格圖跟成交量圖。
 - `QWebEngineView.setHtml()`對內容大小有~2MB的隱性限制(Chromium的data: URL限制)，
-  這裡沿用desktop/main_window.py既有的做法，回傳HTML字串由呼叫端寫進暫存檔案再用
+  桌面版沿用`desktop/main_window.py`既有的做法，回傳HTML字串由呼叫端寫進暫存檔案再用
   `load(QUrl.fromLocalFile(...))`開啟，不在這個模組處理檔案I/O。
 
 ⚠️ 2026-07-25新增：使用者回報左上角的股票代號(Plotly title)跟上方legend重疊、且沒有顯示
 股票名稱。桌面版原本同時有①這裡注入的資訊框(日期/OHLCV)跟②Plotly自己的title(股票代號)
 兩層各自獨立定位的元素疊在同一塊區域——title用paper座標(跟整張圖高度成比例)定位，資訊框
 用固定CSS像素定位，兩者沒有對齊機制，圖表越高(疊MACD/KD子圖時)title的實際pixel位置就
-跟著飄動，容易撞在一起。改成桌面版乾脆不用Plotly自己的title(呼叫端不再需要傳title給
+跟著飄動，容易撞在一起。改成不用Plotly自己的title(呼叫端不再需要傳title給
 build_candlestick_figure，這裡也把它清空)，改成跟資訊框一樣的固定CSS像素定位，兩者用
 相同機制、高度用相同基準，才不會隨圖表高度改變而錯位——`stock_label`(股票代號+名稱)是
 新增的固定資訊框，畫在原本資訊框旁邊。
@@ -38,8 +41,8 @@ labelBox(股票標題，top:6px，固定不隨hover變化)、infoBox(日期/OHLC
 連續高度)取得游標在整個圖表容器裡的像素座標(`evt.offsetY`)，換算成價格子圖(row1)的資料
 座標：用`gd._fullLayout._size`(繪圖區域相對整個容器的像素邊界)與`gd._fullLayout.yaxis.domain`
 (row1的y軸在繪圖區域裡佔的比例)算出row1的像素上下界，再依`yaxis.range`線性內插得到價格。
-這裡用到的`_fullLayout`/`_size`是plotly.js內部(非公開文件化)的屬性，但這個模組本來就只給
-桌面版透過`include_plotlyjs=True`整包內嵌的固定版本使用(不會被外部CDN偷偷升級版本)，風險
+這裡用到的`_fullLayout`/`_size`是plotly.js內部(非公開文件化)的屬性，但這個模組透過
+`include_plotlyjs=True`整包內嵌的固定版本使用(不會被外部CDN偷偷升級版本)，風險
 可控；如果之後升級plotly套件版本導致這幾個內部屬性改名/消失，這個Y軸價格標籤會悄悄失效
 (不影響其他功能，因為包在try/catch裡)，屆時需要重新對照新版plotly.js原始碼調整。
 """
@@ -62,14 +65,15 @@ _MA_ROW_TRACE_NAMES = {f"MA{n}" for n in MA_ROW_PERIODS}
 
 def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id: str = "tw-stock-chart") -> str:
     """就地調整fig的hover/spike相關設定(呼叫端傳入的fig預期是每次重繪都新建的，這裡直接
-    修改不做防禦性複製)，回傳可以直接載入QWebEngineView的完整HTML字串。
+    修改不做防禦性複製)，回傳可以直接嵌入頁面的完整HTML字串——桌面版用`QWebEngineView`
+    載入，web版用`st.components.v1.html()`嵌入iframe。
 
     price_df: 對應fig畫的那份OHLCV(+DIF/MACD/OSC/K/D，若有)資料(index為日期)，用來組出
     hover時要顯示的customdata。
     stock_label: 股票代號+名稱(例如"2330 台積電")，顯示在資訊框正下方的固定第二列，取代
     Plotly自己的title機制(見模組docstring說明原因)。
     """
-    fig.update_layout(title=dict(text=""))  # 桌面版改用下面的固定CSS列顯示股票代號+名稱，不用Plotly自己的title
+    fig.update_layout(title=dict(text=""))  # 改用下面的固定CSS列顯示股票代號+名稱，不用Plotly自己的title
     fig.update_xaxes(showspikes=False)  # 關掉共用層的原生x軸spike，改用下面的JS自訂線
     fig.update_yaxes(
         showspikes=True, spikemode="across", spikesnap="cursor",

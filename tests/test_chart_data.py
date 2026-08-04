@@ -1467,8 +1467,8 @@ def test_build_candlestick_figure_row_count_unchanged_when_macd_kd_disabled():
 
 def test_build_candlestick_figure_macd_kd_add_parameter_and_hover_value_annotations():
     """使用者反映MACD/KD子圖看不出目前用的參數、hover也不會顯示當天數值——修法是右上角
-    標示固定參數(MACD(12,26,9)/KD(N=9,D=3))、左上角顯示「最新一天」的數值(desktop版
-    另外用JS在hover時動態覆寫成當天數值，見desktop/chart_render.py)。hover-value那則
+    標示固定參數(MACD(12,26,9)/KD(N=9,D=3))、左上角顯示「最新一天」的數值(另外用JS在
+    hover時動態覆寫成當天數值，見src/presentation/chart_render.py)。hover-value那則
     annotation要用name標記，讓JS能在不知道annotations清單實際順序的情況下找到它更新。"""
     dates = pd.date_range("2026-07-01", periods=3)
     df = pd.DataFrame(
@@ -1513,8 +1513,8 @@ def test_build_candlestick_figure_title_is_positioned_to_not_overlap_legend():
 
 
 def test_build_candlestick_figure_no_title_when_not_given():
-    """桌面版不傳title(改用固定CSS列顯示代號+名稱，見desktop/chart_render.py)，這裡要
-    確認預設維持空標題，不會意外印出None或其他字面值。"""
+    """呼叫端不傳title(改用固定CSS列顯示代號+名稱，見src/presentation/chart_render.py)，
+    這裡要確認預設維持空標題，不會意外印出None或其他字面值。"""
     dates = pd.date_range("2026-07-01", periods=2)
     df = pd.DataFrame(
         {"open": [100, 102], "high": [103, 104], "low": [99, 101], "close": [102, 101], "volume": [1000, 1200]},

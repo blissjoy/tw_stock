@@ -2,8 +2,8 @@ import json
 
 import pandas as pd
 
-from desktop.chart_render import render_chart_html
 from src.presentation import chart_data
+from src.presentation.chart_render import render_chart_html
 
 
 def _sample_df(n: int = 5) -> pd.DataFrame:

@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 from src.data.yfinance_client import TAIEX_STOCK_ID  # noqa: E402
 from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
-from src.presentation import chart_data  # noqa: E402
+from src.presentation import chart_data, portfolio_data  # noqa: E402
 from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_FILTER_DEFAULTS,
     CANDIDATE_FILTERS,
@@ -35,12 +35,19 @@ from src.presentation.chart_data import (  # noqa: E402
     get_latest_candidate_update_time,
     get_latest_update_time,
     list_candidate_dates,
+    list_industries,
     load_stock_universe_for_date,
     load_holidays_for_chart,
     load_price_history,
     resolve_stock_id,
 )
 from src.presentation import pipeline_status  # noqa: E402
+from src.presentation.chart_render import render_chart_html  # noqa: E402
+
+# 「市場」篩選下拉對應load_stock_universe_for_date()的market參數("TWSE"/"TPEx"/None)，
+# 照抄桌面版desktop/main_window.py的_MARKET_FILTER_VALUES；"全部"不在對照表裡，
+# get()查不到就維持None(不限制)。
+_MARKET_FILTER_VALUES = {"上市": "TWSE", "上櫃": "TPEx"}
 
 TAIEX_DISPLAY_NAME = "台股加權指數"
 
@@ -217,15 +224,21 @@ def main() -> None:
 
         stock_name = chart_data.get_stock_name(conn, stock_id)
         chart_title = f"{stock_id} {stock_name}" if stock_name else stock_id
-        st.plotly_chart(
-            build_candlestick_figure(
-                price_df, title=chart_title, holidays=holidays, ma_periods=selected_periods,
-                trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
-                sr_levels=sr_levels, show_support_resistance=show_sr,
-                show_macd=show_macd, show_kd=show_kd, show_sar=show_sar,
-            ),
-            use_container_width=True,
+        # 十字準星：2026-08-04起改用render_chart_html()+st.components.v1.html()(iframe
+        # 執行原始HTML+JS)取代st.plotly_chart()，才能疊加貫穿價格/成交量/MACD/KD子圖的
+        # 十字線＋左上角動態資訊框，跟桌面版效果一致，見src/presentation/chart_render.py。
+        # 不傳title給build_candlestick_figure(改用render_chart_html的stock_label固定列
+        # 顯示代號+名稱，見該模組docstring)。
+        fig = build_candlestick_figure(
+            price_df, holidays=holidays, ma_periods=selected_periods,
+            trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
+            sr_levels=sr_levels, show_support_resistance=show_sr,
+            show_macd=show_macd, show_kd=show_kd, show_sar=show_sar,
         )
+        html_str = render_chart_html(fig, price_df, stock_label=chart_title, div_id=f"tw-stock-chart-{widget_key}")
+        # +40px留給桌面版同款的固定資訊框/軸數值標籤疊加空間(見chart_render.py)，避免
+        # iframe高度剛好卡住把最上面幾列文字裁掉。
+        st.components.v1.html(html_str, height=int(fig.layout.height or 700) + 40, scrolling=False)
         st.dataframe(price_df.tail(20), use_container_width=True)
 
         summary = latest_day_summary.summarize_latest_day(price_df, trend_df=trend_df)
@@ -279,6 +292,12 @@ def main() -> None:
             # 一起顯示會讓使用者誤判「候選清單是不是也跟著更新了」，所以分開各顯示一行。
             st.caption(f"股價更新至　{_fmt(get_latest_update_time(conn))}")
             st.caption(f"候選清單算至　{_fmt(get_latest_candidate_update_time(conn))}")
+            # 2026-08-04新增：`.github/workflows/daily_pipeline.yml`的排程自2026-07-23起
+            # 被註解暫停(Turso帳號寫入額度用完，架構改成本機優先運作)，只留workflow_dispatch
+            # 可以手動觸發——web版現在其實沒有任何自動更新機制，不能沿用桌面版「下次更新
+            # 時間」那套邏輯(那是讀Windows工作排程器寫死的時間表，跟這裡的情境不同)，改成
+            # 明確提醒使用者目前是純手動更新，避免誤以為資料會自動保持最新。
+            st.caption("⚠️ 目前無自動排程更新中（GitHub Actions 排程已暫停，資料需手動觸發「▶ 手動抓取今日資料」更新）")
 
     # 三個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+個股
     # 分析)——原本候選清單跟個股圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選
@@ -321,6 +340,18 @@ def main() -> None:
         # 篩選"是可以自己控制的：改成勾選框只更新畫面上的UI狀態，實際套用篩選延後到
         # 按下「套用篩選」按鈕才發生，儲存進session_state["applied_filters"]，同一組
         # 條件不會因為連續調整而重算好幾次(見desktop/main_window.py同一天的對應修正)。
+        # 「候選股票池範圍」：市場/產業別/成交量門檻縮小候選股票池，跟下面「篩選條件」/
+        # 「篩選方法」同一套deferred-apply慣例(改完UI不會馬上生效，按「套用篩選」才套用)，
+        # 照抄桌面版desktop/main_window.py的market_filter_combo/industry_filter_combo/
+        # volume_filter_spin(main_window.py:2911-2928)。
+        st.caption("候選股票池範圍（市場/產業別/成交量門檻，同樣要按「套用篩選」才會生效）：")
+        pool_col1, pool_col2, pool_col3 = st.columns([1, 2, 1.3])
+        market_label = pool_col1.selectbox("市場", ["全部", "上市", "上櫃"], index=0, key="filter_market_label")
+        selected_industries = pool_col2.multiselect("產業別", list_industries(conn), key="filter_industries")
+        min_volume_lots_input = pool_col3.number_input(
+            "成交量 >= (張)", min_value=0, value=10, step=1, key="filter_min_volume_lots"
+        )
+
         st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件），改完後按「套用篩選」才會重新套用")
         filter_cols = st.columns(len(CANDIDATE_FILTERS))
         active_filters = [
@@ -362,13 +393,18 @@ def main() -> None:
         )
 
         if "applied_filters" not in st.session_state:
-            st.session_state["applied_filters"] = {"active_filters": [], "sar_flip_option": None, "zhu_rule_only": True}
+            st.session_state["applied_filters"] = {
+                "active_filters": [], "sar_flip_option": None, "zhu_rule_only": True,
+                "market": None, "industries": [], "min_volume_lots": 10,
+            }
         with apply_col:
             st.markdown("&nbsp;")  # 對齊上面其他欄位的label高度，讓按鈕跟輸入框大致同一條水平線
             if st.button("套用篩選"):
                 st.session_state["applied_filters"] = {
                     "active_filters": active_filters, "sar_flip_option": sar_flip_option,
                     "zhu_rule_only": zhu_rule_only,
+                    "market": _MARKET_FILTER_VALUES.get(market_label),
+                    "industries": selected_industries, "min_volume_lots": int(min_volume_lots_input),
                 }
 
         button_col1, button_col2 = st.columns([1, 1])
@@ -402,8 +438,17 @@ def main() -> None:
             st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
             if candidate_dates else None
         )
-        candidates_df, latest_date, is_intraday = load_stock_universe_for_date(conn, target_date=selected_date)
         applied = st.session_state["applied_filters"]
+        candidates_df, latest_date, is_intraday = load_stock_universe_for_date(
+            conn, target_date=selected_date, market=applied.get("market"),
+        )
+        # 產業別/成交量：跟市場篩選一樣是「候選股票池的範圍」，在均線/SAR等篩選條件套用
+        # 之前先縮小df，照抄桌面版_reload_candidates()的順序(main_window.py:2917-2928)。
+        if applied.get("industries"):
+            candidates_df = candidates_df[candidates_df["industry"].isin(applied["industries"])].reset_index(drop=True)
+        min_volume_lots = applied.get("min_volume_lots", 0)
+        if min_volume_lots > 0:
+            candidates_df = candidates_df[candidates_df["volume"] >= min_volume_lots * 1000].reset_index(drop=True)
         candidates_df = apply_candidate_filters(
             conn, candidates_df, applied["active_filters"], sar_flip_option=applied["sar_flip_option"],
             zhu_rule_only=applied.get("zhu_rule_only", True), as_of_date=latest_date,
@@ -415,19 +460,46 @@ def main() -> None:
             st.subheader(f"候選清單（{latest_date}，共 {len(candidates_df)} 檔）")
             if is_intraday:
                 st.markdown("**:red[⚠ 尚未收盤，本頁為盤中即時資料，收盤後數字可能改變]**")
+            # 候選清單內搜尋：純顯示層過濾，不透過「套用篩選」按鈕(不是資料查詢，即時生效)，
+            # 跟桌面版_on_candidate_search()「找到後自動選取捲動」的做法不同——Streamlit的
+            # dataframe沒有程式化捲動/選取特定列的API，改成直接篩掉不符合的列，達到同樣
+            # 「從一長串候選清單快速縮小範圍」的目的。
+            search_query = st.text_input("搜尋候選清單（代號或名稱）", key="candidate_search_query")
+            if search_query:
+                q = search_query.strip().lower()
+                candidates_df = candidates_df[
+                    candidates_df["stock_id"].str.lower().str.contains(q, na=False)
+                    | candidates_df["name"].str.lower().str.contains(q, na=False)
+                ].reset_index(drop=True)
             if candidates_df.empty:
-                st.write("這一天沒有符合條件的候選股。")
+                st.write("搜尋不到符合的股票。" if search_query else "這一天沒有符合條件的候選股。")
             else:
                 st.caption("點選任一列會自動切換到「個股資訊」分頁查看該檔股票的價格走勢")
+
+                def _style_name_by_listing_type(row: pd.Series) -> list[str]:
+                    # 依上市/上櫃/興櫃上色股票名稱，照抄桌面版main_window.py的listing_type_
+                    # color()慣例；只對"name"欄位回傳實際樣式，其他欄位回傳空字串不受影響。
+                    color = portfolio_data.listing_type_color(row.get("listing_type"))
+                    return [f"color: {color}" if col == "name" else "" for col in row.index]
+
                 event = st.dataframe(
-                    candidates_df, use_container_width=True, hide_index=True,
+                    candidates_df.style.apply(_style_name_by_listing_type, axis=1),
+                    use_container_width=True, hide_index=True,
                     on_select="rerun", selection_mode="single-row", key="candidates_table",
+                    column_order=[
+                        "stock_id", "name", "industry", "signal_name", "close", "entry_price",
+                        "stop_loss", "pct_change", "volume", "sar_value", "sar_status", "sar_distance_pct",
+                    ],
                     column_config={
                         "stock_id": "股票代號", "name": "名稱", "industry": "產業別",
                         "signal_name": "訊號(信心%)",  # 信心分數已經內含在signal_name字串裡(見daily_screener.py)，這裡只是把「(信心%)」這個提示放進欄位標題，不用每一列都重複寫「信心」兩個字
+                        "close": st.column_config.NumberColumn("收盤價", format="%.2f"),
                         "entry_price": "進場價", "stop_loss": "停損價",
                         "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%.2f%%"),
                         "volume": st.column_config.NumberColumn("成交量", format="%d"),
+                        "sar_value": st.column_config.NumberColumn("SAR值", format="%.2f"),
+                        "sar_status": "SAR狀態",
+                        "sar_distance_pct": st.column_config.NumberColumn("SAR距離%", format="%.2f%%"),
                     },
                 )
                 if event.selection.rows:

@@ -6216,3 +6216,56 @@ monkeypatch覆蓋即可(晚於這個fixture執行，會蓋過去)。手動把正
 2026-07-28/07-29/07-30三天寫入不同的結果(不是同一批「今天」資料重複貼
 標籤)，且候選清單日期下拉選單(`list_candidate_dates()`)正確能選到補回來
 的歷史日期。`pytest tests/ -q`1007個測試全數通過(新增7個)。
+
+## web/桌面版功能對齊 第1批：選股/大盤快速補齊＋十字準星（2026-08-04）
+
+使用者要求逐步把web版(`dashboard/app.py`)功能對齊到桌面版(`desktop/
+main_window.py`)。先做完整功能盤點：web只有3個分頁(大盤/選股/個股資訊)，
+桌面版有7個，落差很大，議定分批處理，第1批鎖定「選股/大盤的小型快速補齊」
+＋「十字準星」，理由是這批都只動`dashboard/app.py`、不需要新的資料層函式。
+
+過程中發現`.github/workflows/daily_pipeline.yml`的排程自2026-07-23起被
+註解暫停(Turso帳號寫入額度用完，架構改成本機優先運作)——web版現在其實
+沒有任何自動更新機制。使用者確認：狀態列還是要加提醒，但文字要講清楚
+「目前無自動排程」，不要沿用桌面版「下次更新時間」那套邏輯(那是讀Windows
+工作排程器寫死的時間表，跟web的情境不同)。
+
+十字準星原本以為是桌面版專屬能力(`desktop/chart_render.py`用`QWebEngineView`
+載入原始HTML執行注入JS，Streamlit的`st.plotly_chart()`不會執行注入JS)，
+使用者以奇摩股市/TradingView都有十字準星為由要求重新查證——查證後發現
+`chart_render.py`完全不依賴PySide6(只用`json`/`pandas`/`chart_data.
+MA_COLORS`)，回傳純HTML字串，改用Streamlit的`st.components.v1.html()`
+(iframe執行原始HTML+JS，跟`QWebEngineView`同一種機制)就能直接重用，不用
+重寫JS。順勢把這個模組搬到共用層`src/presentation/chart_render.py`(原本
+docstring寫「只給desktop使用」，這次移除這個過時的假設)。
+
+**改動的檔案**：
+- `desktop/chart_render.py` → 搬移成`src/presentation/chart_render.py`
+  (內容不變，docstring更新為兩前端共用)；`desktop/main_window.py`/
+  `tests/test_chart_render.py`匯入路徑同步更新；`README.md`/
+  `src/presentation/chart_data.py`/`tests/test_chart_data.py`裡提到
+  「只有桌面版能用」的過時註解一併修正。
+- `dashboard/app.py`：
+  - `render_price_chart()`改用`render_chart_html()`+
+    `st.components.v1.html()`取代`st.plotly_chart()`，兩前端十字線效果
+    (貫穿價格/成交量/MACD/KD子圖＋左上角動態資訊框＋Y軸游標價格標籤)完全
+    一致。已知取捨：`include_plotlyjs=True`整包內嵌plotly.js(~3-4MB)，
+    比`st.plotly_chart()`共用bundle重，先接受這個成本。
+  - 選股分頁新增「候選股票池範圍」(市場/產業別/成交量門檻)三個篩選，
+    跟既有「篩選條件」/「篩選方法」同一套deferred-apply慣例(按「套用
+    篩選」才生效)，`applied_filters`session_state dict擴充`market`/
+    `industries`/`min_volume_lots`三個key；新增候選清單內搜尋框(即時
+    生效，不透過套用篩選按鈕，純顯示層過濾)。
+  - 候選清單表格新增`column_order`＋`column_config`補上收盤價/SAR值/
+    SAR狀態/SAR距離%欄位；用`candidates_df.style.apply(...)`依上市/
+    上櫃/興櫃幫「名稱」欄位上色(重用`portfolio_data.listing_type_
+    color()`)，跟既有的`on_select`點列跳轉互動並存，實測確認沒有衝突。
+  - 狀態列新增「⚠️ 目前無自動排程更新中」提醒文字。
+
+真實驗證：本機啟動Streamlit(`LOCAL_DB_PATH`指向DB複本)+Playwright無頭
+瀏覽器操作：候選股票池範圍/搜尋框/表格新欄位都正確顯示；股票名稱依上市
+上櫃上色，點列仍正確跳轉個股資訊分頁(確認Styler沒有弄壞既有互動)；十字
+準星在大盤/個股資訊分頁的圖表上hover時，垂直線正確貫穿價格/成交量/MACD/
+KD四個子圖、左上角資訊框正確更新成當天數值、Y軸浮動價格標籤正確跟隨游標，
+跟桌面版效果一致；瀏覽器console確認0個JS錯誤。`pytest tests/ -q`1007個
+測試全數通過(這批純UI/渲染邏輯改動，沒有新增測試，跟現有慣例一致)。

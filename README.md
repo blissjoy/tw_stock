@@ -34,8 +34,8 @@ python desktop/main.py
   切換顯示，搭配下方最新交易日的K棒型態與量價訊號分析，以及「📊 個股分析」面板(顯示這檔
   股票目前符合規則庫中哪些訊號，依信心分數排序)。滑鼠移到圖表上會顯示淡灰色十字線（貫穿
   價格圖與成交量圖），左上角動態顯示滑鼠對應K棒的日期/OHLC/成交量，取代預設會跟著滑鼠跑的
-  浮動提示框，仿TradingView超級圖表的畫法（`desktop/chart_render.py`；這個完整效果只有
-  桌面版才有，Streamlit版因為渲染架構限制沒有對應機制）。
+  浮動提示框，仿TradingView超級圖表的畫法（`src/presentation/chart_render.py`；桌面版跟
+  Streamlit版共用，Streamlit版透過`st.components.v1.html()`嵌入原始HTML+JS）。
 - 「🔄 立即重新篩選」：只用資料庫現有資料重算候選清單，幾秒內完成。
 - 「▶ 手動抓取今日資料」：背景執行緒抓取當天TWSE/TPEx資料並重新選股（跟下面的排程共用
   同一份`run_daily_pipeline()`），下載過程中畫面右上角會顯示進度(例如「TPEx 500/1980檔」)，
@@ -277,7 +277,7 @@ FinMind抓）進來、又沿用同一個`stock_id`寫入，就會出現「均線
 - `src/notify/`：LINE/Email通知
 - `src/backtest/`：回測引擎
 - `scripts/`：一次性/排程用的進入點腳本
-- `desktop/`：PySide6桌面版（本機優先架構下的主要前端）；`chart_render.py`疊加桌面版專用的
-  滑鼠十字線＋左上角動態資訊框效果(仿TradingView)，只有桌面版能用
-- `dashboard/`：Streamlit 儀表板（可選，本機或之後上雲皆可）
+- `desktop/`：PySide6桌面版（本機優先架構下的主要前端）
+- `dashboard/`：Streamlit 儀表板（可選，本機或之後上雲皆可）；跟桌面版共用
+  `src/presentation/chart_render.py`疊加滑鼠十字線＋左上角動態資訊框效果(仿TradingView)
 - `ai/`：電子書逐章精讀筆記（`ebook-summary/`）、規則庫（`zhu-rules/`）、規劃文件（`PLAN.md`）

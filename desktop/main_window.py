@@ -65,7 +65,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
-from desktop.chart_render import render_chart_html
 from src.data import finmind_client, portfolio_storage, storage
 from src.data.connection import get_default_connection, get_default_portfolio_connection
 from src.data.yfinance_client import TAIEX_STOCK_ID
@@ -75,6 +74,7 @@ from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src import rule_docs
 from src.presentation import chart_data, huang_chip_data, pipeline_status, portfolio_data, stock_detail_data
+from src.presentation.chart_render import render_chart_html
 from src.screener.daily_screener import (
     analyze_stock_signals,
     recompute_indicators_for_range,
@@ -2030,6 +2030,14 @@ class MainWindow(QMainWindow):
         watchlist_layout.addWidget(self.watchlist_group_header_table)
         watchlist_layout.addWidget(self.watchlist_table, stretch=1)
 
+        # 2026-08-04新增：大戶/散戶持股分布(F/G)目前只有觀察清單裡的股票會自動更新
+        # (見_maybe_fetch_missing_holder_shares())，非觀察清單股票沒有排程/回補機制
+        # 補這塊資料(FinMind API token是朋友付費的，尚不可隨意擴大用量)——使用者要求
+        # 在這裡放一個常駐提醒，隨時看得到這個限制，不用等到忘記了才發現資料是空的。
+        holder_share_scope_hint = QLabel("ps: 大戶/散戶持股變化僅支持觀察清單")
+        holder_share_scope_hint.setStyleSheet("color: #666666;")
+        watchlist_layout.addWidget(holder_share_scope_hint)
+
         # Delete刪除快捷鍵：2026-08-04新增，比照庫存清單/ref-project的做法，重用
         # 「刪除選取」按鈕同一組handler。觀察清單目前只移植Delete(使用者這次沒有
         # 要求F2)，「編輯選取」維持只能點按鈕。
@@ -3145,8 +3153,9 @@ class MainWindow(QMainWindow):
             show_sar=self.sar_checkbox.isChecked(),
         )
         # render_chart_html()疊加滑鼠十字線(貫穿價格/成交量/MACD/KD子圖)+左上角動態資訊框，
-        # 取代Plotly預設會跟著滑鼠跑的浮動tooltip，仿TradingView的畫法(desktop/chart_render.py
-        # 有完整說明，這個效果只有桌面版能用，Streamlit版沒有對應機制)。include_plotlyjs=True
+        # 取代Plotly預設會跟著滑鼠跑的浮動tooltip，仿TradingView的畫法(src/presentation/
+        # chart_render.py有完整說明；2026-08-04起web版也透過st.components.v1.html()共用
+        # 同一個函式，不再是桌面版專屬效果)。include_plotlyjs=True
         # 把plotly.js整包內嵌，桌面版離線也能看圖。寫進暫存檔案再用load()開啟，理由見__init__裡
         # _chart_html_path的註解(setHtml對大內容會靜默失敗)。不傳title給build_candlestick_
         # figure(桌面版改用render_chart_html的stock_label固定列顯示代號+名稱，見那裡的說明)。

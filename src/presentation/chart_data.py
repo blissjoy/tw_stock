@@ -980,9 +980,9 @@ def build_candlestick_figure(
 
     # MACD/KD子圖各自右上角標示目前使用的參數(固定值，直接寫死跟load_price_history()
     # 呼叫compute_macd()/compute_kd()時完全沒有覆寫參數的事實一致)，左上角顯示「最新一天」
-    # 的實際數值(不hover時的預設狀態)——desktop/chart_render.py會在滑鼠hover時透過JS動態
-    # 覆寫這個文字改顯示「當天」數值，這裡先給的是靜態的初始/預設內容，Streamlit版沒有
-    # hover機制，這組數字就是它唯一、也足夠的呈現方式。annotation用name標記
+    # 的實際數值(不hover時的預設狀態)——src/presentation/chart_render.py會在滑鼠hover時
+    # 透過JS動態覆寫這個文字改顯示「當天」數值(桌面版/Streamlit版都共用這個效果，見該模組
+    # docstring)，這裡先給的是靜態的初始/預設內容。annotation用name標記
     # ("macd-hover-value"/"kd-hover-value")，讓chart_render.py的JS能在不知道實際
     # annotations清單順序的情況下，用name找到正確的index更新文字。
     annotations = list(fig.layout.annotations or ())
@@ -1033,8 +1033,8 @@ def build_candlestick_figure(
     # ⚠️ 2026-08-02修正「K線圖斷點」bug：使用者回報MA60/MA120/MA240這幾條線在特定日期
     # (查證是農曆春節這種連續多天的休市假期，rangebreaks把整段假期從x軸壓縮掉的位置)
     # 會出現一段線段完全消失的視覺斷點，MA5/10/20跟K棒本身則不受影響。查證方式：直接把
-    # 這裡產生的Figure分別用純Plotly(不透過desktop/chart_render.py的自訂JS)畫成HTML用
-    # headless瀏覽器截圖，同樣看得到斷點，排除是desktop那層JS造成的；而底層DataFrame
+    # 這裡產生的Figure分別用純Plotly(不透過src/presentation/chart_render.py的自訂JS)
+    # 畫成HTML用headless瀏覽器截圖，同樣看得到斷點，排除是那層JS造成的；而底層DataFrame
     # (chart_data.load_price_history()算出的MA60/120/240欄位)在整段期間完全沒有NaN，
     # 排除是資料本身的問題。純粹是Plotly.js的已知限制：Scatter線段trace預設
     # connectgaps=False，rangebreaks壓縮掉大段日期後，斜率越平緩(長天期均線)的線段
@@ -1074,10 +1074,10 @@ def build_candlestick_figure(
     # 淡灰色十字線(hover時顯示滑鼠對應的X/Y位置)，仿TradingView的畫法。這裡只設定Plotly
     # 原生的spike line，兩個前端(Streamlit/PySide6)都能用；但實測發現原生x軸spike的
     # "across"模式在上下堆疊子圖(價格/成交量)的情況下，垂直線只會畫在滑鼠所在那一格，
-    # 不會真的貫穿到另一個子圖——這是PySide6桌面版才需要的「垂直線貫穿兩個子圖」效果，
-    # desktop/chart_render.py會在桌面版另外用自訂JS覆蓋掉這裡的x軸spike設定來達成；
-    # Streamlit版沒有這個機制，維持這裡的原生效果(垂直線只在單一子圖內顯示)已經是不錯的
-    # 折衷，不需要為了它額外做什麼。
+    # 不會真的貫穿到另一個子圖——這裡的原生設定是保底效果，供不經過src/presentation/
+    # chart_render.py(例如還沒接上render_chart_html的呼叫路徑)的情境使用；桌面版/
+    # Streamlit版都已改用chart_render.py另外用自訂JS覆蓋掉這裡的x軸spike設定，達成真正
+    # 貫穿多個子圖的垂直線，見該模組docstring。
     spike_style = dict(
         showspikes=True, spikemode="across", spikesnap="cursor",
         spikecolor="rgba(120,120,120,0.6)", spikethickness=1, spikedash="solid",
