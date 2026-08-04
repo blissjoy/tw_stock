@@ -6375,3 +6375,58 @@ Streamlit/Styler的已知限制，不用重新踩一次坑。
 (正確顯示尚未串接資料來源提示)；過程中發現並修正「不適用」誤顯示"None"
 的bug，修正後重新驗證通過；瀏覽器console全程確認0個JS錯誤。`pytest
 tests/ -q`1007個測試全數通過(底層資料函式未改動，不需要新增測試)。
+
+## web/桌面版功能對齊 第5批：新增「庫存清單」分頁（2026-08-04）
+
+延續對齊計畫第5項「庫存清單＋觀察清單」，這次先做份量較單純的庫存清單，
+觀察清單留到下一批(多群組+黃豐凱籌碼14欄更複雜)。
+
+桌面版`_build_inventory_tab()`用`QTreeWidget`做master-detail(父列=每檔
+股票的加權平均彙總，子列=個別買入批次)，Streamlit沒有對應的樹狀元件，
+改成兩層表格：**庫存總覽**表格(`portfolio_data.load_inventory_summary()`，
+一列一檔股票，單選)點選一列後，下方顯示該股票的**批次明細**表格
+(`load_inventory_lots()`篩到該股票，原生多選)，多選直接用Streamlit
+`selection_mode="multi-row"`內建的checkbox，不用像候選清單那樣另外刻
+checkbox欄位。新增/編輯批次改用`st.dialog`(Streamlit原生modal，是
+`_StockEditDialog`最對應的web元件)；因為`st.dialog`的title在函式定義
+時就固定、沒辦法依「新增/編輯」動態換標題，改成dialog內用`st.subheader`
+顯示動態標題文字，新增/編輯共用同一個dialog函式。刪除批次採兩段式確認
+(session_state暫存待刪除id清單，第二次點擊才真的執行)，對應桌面版
+`QMessageBox.question`的確認機制，避免誤刪。
+
+底層資料/邏輯函式(`portfolio_data.py`的`load_inventory_lots`/`load_
+inventory_summary`/`estimate_buy_fee`/`listing_type_color`，`portfolio_
+storage.py`的`add_inventory_stock`/`update_inventory_stock`/`delete_
+inventory_stock`/`get_inventory_lot`/`list_watchlist_groups`/`add_
+stocks_to_watchlist`)本來就是frontend-agnostic共用層，這次沒有改動，
+只有桌面版UI組裝程式碼(`_StockEditDialog`/`_populate_inventory_tree()`
+等)是Qt專屬，維持前幾批的既定做法：不重構桌面版，web端照抄邏輯用
+Streamlit元件重新組版。摘要列公式(總成本=Σ成本價×股數+Σ手續費、總市值/
+累積損益/今日資產變動)逐項比對`desktop/main_window.py`的`_portfolio_
+summary_text()`，數字口徑完全一致。名稱欄位依上市/上櫃/興櫃上色是這次
+順手加上的(桌面版庫存清單本身沒有上色，只有觀察清單/選股清單有)，跟其他
+三處表格一致，不算功能回歸。
+
+新增可重用的`_watchlist_group_picker_dialog(stock_ids)`(勾選要加入的
+觀察清單群組)，之後觀察清單分頁本身/選股分頁的批次加入觀察清單也會直接
+重用這個函式，不用重寫。
+
+⚠️ **已知、非本次引入的限制**：`get_default_portfolio_connection()`
+目前硬編碼只能連本機sqlite，沒有Turso分支(該函式docstring已明講是刻意
+延後的限制)。之後如果要把web版部署回Streamlit Cloud，庫存清單資料不會
+跨環境同步(雲端檔案系統是ephemeral的)。目前專案是「本機優先」架構(見
+第1批紀錄，GitHub Actions雲端排程已暫停)，使用者驗證/使用web版也是
+本機執行，這個限制不影響現在，不在這次範圍內解決。
+
+真實驗證：本機啟動Streamlit(`LOCAL_DB_PATH`/`PORTFOLIO_DB_PATH`都指向
+DB複本)+Playwright無頭瀏覽器，用真實庫存資料(2317鴻海，3筆批次)驗證：
+摘要列數字(總持股成本49,531/總市值52,500/累積總損益+2,789(+5.63%)/
+今日資產變動-630)正確；庫存總覽表格正確顯示且名稱上色；點選一列正確
+展開批次明細表格(3筆批次逐筆數字都對)+出現「加入觀察清單」按鈕；選取
+一筆批次點「編輯選取批次」，dialog正確帶入該筆既有值(買入日期/成本價/
+持股數/預估手續費)；「新增批次」dialog輸入「2330」正確即時解析顯示
+「解析為：2330 台積電」。過程中發現Streamlit dataframe單一點擊有時只
+選取儲存格、不觸發列選取事件(跟第1批選股候選清單驗證時遇到的同一種
+glide-data-grid互動特性)，換個位置單擊即可正確觸發，不是bug，是驗證
+腳本的點擊座標問題。瀏覽器console全程確認0個JS錯誤。`pytest tests/ -q`
+1007個測試全數通過(底層資料函式未改動，不需要新增測試)。

@@ -57,7 +57,8 @@ TAB_MARKET = "大盤"
 TAB_SCREENER = "選股"
 TAB_STOCK_DETAIL = "個股資訊"
 TAB_INDUSTRY_ROTATION = "產業輪動"
-TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL, TAB_INDUSTRY_ROTATION]
+TAB_INVENTORY = "庫存清單"
+TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL, TAB_INDUSTRY_ROTATION, TAB_INVENTORY]
 
 
 def _format_month_day(date_str: str) -> str:
@@ -77,8 +78,8 @@ def main() -> None:
     from streamlit.errors import StreamlitSecretNotFoundError
 
     from scripts.daily_pipeline import run_daily_pipeline
-    from src.data import storage
-    from src.data.connection import get_default_connection
+    from src.data import portfolio_storage, storage
+    from src.data.connection import get_default_connection, get_default_portfolio_connection
     from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
     from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
@@ -109,6 +110,17 @@ def main() -> None:
         return conn
 
     conn = get_conn()
+
+    @st.cache_resource
+    def get_portfolio_conn():
+        # 庫存清單/觀察清單專用連線，跟主DB(conn)分開——見src/data/portfolio_storage.py
+        # 開頭的說明。⚠️ get_default_portfolio_connection()目前硬編碼只能連本機sqlite，
+        # 沒有Turso分支(該函式docstring已明講是刻意延後的限制)，這代表如果之後要把
+        # web版部署回Streamlit Cloud，庫存清單資料不會跨環境同步(雲端檔案系統是
+        # ephemeral的)。目前專案是「本機優先」架構，這裡先直接沿用，不在這次範圍內解決。
+        return get_default_portfolio_connection()
+
+    portfolio_conn = get_portfolio_conn()
 
     def render_price_chart(stock_id: str, widget_key: str, always_show_analysis: bool = False) -> None:
         price_df = load_price_history(conn, stock_id)
@@ -551,6 +563,191 @@ def main() -> None:
         with st.expander("大戶籌碼", expanded=True):
             st.caption("⚠️ 尚未串接資料來源（需要股權分散/大戶持股統計資料，目前資料庫schema還沒有對應的表）。")
 
+    def _portfolio_summary_text(df: pd.DataFrame, cost_label: str, value_label: str, profit_label: str) -> str:
+        """算庫存清單／觀察清單頂部的摘要文字：總成本/總市值/累積損益(含%)/今日資產
+        變動——照抄desktop/main_window.py的_portfolio_summary_text()，只加總「有算出值」
+        的列(pandas sum預設skipna=True)，成本價/持股數都沒填的列本來就不計入任何一個
+        加總數字，不是遺漏。總成本加上手續費加總，才會跟每一列profit/return_pct已經
+        計入手續費的算法基準一致。"""
+        total_fee = df["fee"].sum() if "fee" in df.columns else 0
+        total_cost = (df["cost_price"] * df["shares"]).sum() + total_fee
+        total_value = df["market_value"].sum()
+        total_profit = df["profit"].sum()
+        total_change = df["today_change_value"].sum()
+        return_pct_text = f"（{total_profit / total_cost * 100:+.2f}%）" if total_cost else ""
+        return (
+            f"{cost_label}：{total_cost:,.0f}　{value_label}：{total_value:,.0f}　"
+            f"{profit_label}：{total_profit:+,.0f}{return_pct_text}　"
+            f"今日資產變動：{total_change:+,.0f}"
+        )
+
+    def _style_name_by_listing_type_row(row: pd.Series) -> list[str]:
+        """依上市/上櫃/興櫃上色「名稱」欄位——跟選股分頁candidates_df用的_style_name_
+        by_listing_type()同一套邏輯，這裡獨立一份是因為欄位集合(index)不同，无法直接
+        共用同一個closure(選股那份綁定在選股分頁的區塊內)。"""
+        color = portfolio_data.listing_type_color(row.get("listing_type"))
+        return [f"color: {color}" if col == "name" else "" for col in row.index]
+
+    @st.dialog("庫存批次")
+    def _inventory_lot_dialog(initial: dict | None) -> None:
+        """新增/編輯庫存批次共用的表單——st.dialog裝飾器的title在函式定義時就固定，
+        沒辦法依initial是否有值動態換標題，改成用st.subheader顯示動態標題文字。
+        股票代號欄位：新增時可輸入(即時解析顯示名稱預覽)，編輯時disabled(不能改批次
+        所屬股票，照抄桌面版_StockEditDialog的規則——編輯是改一筆既有批次的內容，
+        不是把這筆批次移動到別檔股票)。成本價/持股數用0代表未填，照抄桌面版
+        QDoubleSpinBox/QSpinBox的「0=空白」慣例。"""
+        is_edit = initial is not None
+        st.subheader("編輯庫存批次" if is_edit else "新增庫存批次")
+
+        if is_edit:
+            st.text_input("股票代號", value=initial["stock_id"], disabled=True)
+            resolved_id = initial["stock_id"]
+        else:
+            query = st.text_input("股票代號或名稱", placeholder="例如 2330 或 台積電")
+            resolved_id = chart_data.resolve_stock_id(conn, query) or query.strip() if query else None
+            if query:
+                resolved_name = chart_data.get_stock_name(conn, resolved_id) if resolved_id else None
+                st.caption(f"解析為：{resolved_id} {resolved_name}" if resolved_name else "（查無此股票代號，仍可儲存）")
+
+        buy_date = st.text_input("買入日期(YYYY-MM-DD)", value=initial.get("buy_date") or "" if is_edit else "")
+        cost_price = st.number_input("成本價", min_value=0.0, step=0.01, value=float(initial.get("cost_price") or 0) if is_edit else 0.0)
+        shares = st.number_input("持股數", min_value=0, step=1000, value=int(initial.get("shares") or 0) if is_edit else 0)
+        fee = portfolio_data.estimate_buy_fee(cost_price or None, shares or None)
+        st.caption(f"預估買入手續費：{fee:,} 元（依成本價×股數自動估算，計入成本基礎）" if fee is not None else "（填成本價與持股數後自動估算）")
+        note = st.text_input("備註", value=initial.get("note") or "" if is_edit else "")
+
+        if st.button("確認", key="inventory_lot_dialog_confirm"):
+            if not resolved_id:
+                st.warning("請輸入股票代號。")
+                return
+            if is_edit:
+                portfolio_storage.update_inventory_stock(
+                    portfolio_conn, initial["id"], buy_date or None, cost_price or None, shares or None, fee, note,
+                )
+            else:
+                portfolio_storage.add_inventory_stock(
+                    portfolio_conn, resolved_id, buy_date or None, cost_price or None, shares or None, fee, note,
+                )
+            st.rerun()
+
+    @st.dialog("加入觀察清單")
+    def _watchlist_group_picker_dialog(stock_ids: list[str]) -> None:
+        """勾選要加入的觀察清單群組——跟桌面版_add_stocks_to_watchlist_via_dialog()
+        同一個功能，這個dialog之後觀察清單分頁本身/選股分頁批次動作也會重用。"""
+        groups = portfolio_storage.list_watchlist_groups(portfolio_conn)
+        if not groups:
+            st.info("目前沒有任何觀察清單群組，請先到「觀察清單」分頁建立群組。")
+            return
+        selected_ids = [g["id"] for g in groups if st.checkbox(g["group_name"], key=f"watchlist_group_{g['id']}")]
+        if st.button("確認加入", key="watchlist_group_picker_confirm"):
+            if not selected_ids:
+                st.warning("請至少勾選一個群組。")
+                return
+            portfolio_storage.add_stocks_to_watchlist(portfolio_conn, selected_ids, stock_ids)
+            st.success(f"已加入{len(stock_ids)}檔股票到{len(selected_ids)}個群組。")
+            st.rerun()
+
+    def render_inventory_tab() -> None:
+        """「庫存清單」分頁：使用者實際持有的股票，記錄成本價/持股數/手續費，算浮動
+        損益。桌面版用QTreeWidget做master-detail(父列=每檔股票的加權平均彙總，子列=
+        個別買入批次)，Streamlit沒有對應的樹狀元件，改成兩層表格：彙總表格(一列一檔
+        股票)可點選一列，選中後下方顯示該股票的批次明細表格(一列一筆批次，原生多選
+        用於批次刪除)。底層資料函式(portfolio_data.load_inventory_summary()/
+        load_inventory_lots())跟桌面版共用，未改動。
+        """
+        lots_df = portfolio_data.load_inventory_lots(conn, portfolio_conn)
+        summary_df = portfolio_data.load_inventory_summary(conn, portfolio_conn)
+
+        st.caption(_portfolio_summary_text(lots_df, "總持股成本", "總市值", "累積總損益") if not lots_df.empty else "尚無庫存資料。")
+
+        if st.button("➕ 新增批次"):
+            _inventory_lot_dialog(None)
+
+        if summary_df.empty:
+            st.info("目前沒有任何庫存股票，點上方「➕ 新增批次」開始記錄。")
+            return
+
+        st.subheader("庫存總覽")
+        summary_event = st.dataframe(
+            summary_df.style.apply(_style_name_by_listing_type_row, axis=1),
+            use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="single-row", key="inventory_summary_table",
+            column_order=["stock_id", "name", "close", "pct_change", "cost_price", "shares", "market_value", "profit", "return_pct", "sar_status", "sar_distance_pct", "lot_count"],
+            column_config={
+                "stock_id": "股票代號", "name": "名稱",
+                "close": st.column_config.NumberColumn("現價", format="%.2f"),
+                "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%.2f%%"),
+                "cost_price": st.column_config.NumberColumn("成本價", format="%.2f"),
+                "shares": st.column_config.NumberColumn("持股數", format="%d"),
+                "market_value": st.column_config.NumberColumn("市值", format="%.0f"),
+                "profit": st.column_config.NumberColumn("帳面損益", format="%+.0f"),
+                "return_pct": st.column_config.NumberColumn("報酬率(%)", format="%+.2f%%"),
+                "sar_status": "SAR狀態",
+                "sar_distance_pct": st.column_config.NumberColumn("SAR距離%", format="%.2f%%"),
+                "lot_count": st.column_config.NumberColumn("批次數", format="%d"),
+            },
+        )
+
+        if not summary_event.selection.rows:
+            return
+        selected_stock_id = str(summary_df.iloc[summary_event.selection.rows[0]]["stock_id"])
+        selected_name = summary_df.iloc[summary_event.selection.rows[0]]["name"]
+
+        st.subheader(f"批次明細：{selected_stock_id} {selected_name}")
+        if st.button("➕ 加入觀察清單", key="inventory_add_to_watchlist"):
+            _watchlist_group_picker_dialog([selected_stock_id])
+
+        stock_lots_df = lots_df[lots_df["stock_id"] == selected_stock_id].reset_index(drop=True)
+        lots_event = st.dataframe(
+            stock_lots_df, use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="multi-row", key="inventory_lots_table",
+            column_order=["buy_date", "cost_price", "shares", "fee", "market_value", "profit", "return_pct", "note"],
+            column_config={
+                "buy_date": "買入日期",
+                "cost_price": st.column_config.NumberColumn("成本價", format="%.2f"),
+                "shares": st.column_config.NumberColumn("持股數", format="%d"),
+                "fee": st.column_config.NumberColumn("手續費", format="%.0f"),
+                "market_value": st.column_config.NumberColumn("市值", format="%.0f"),
+                "profit": st.column_config.NumberColumn("帳面損益", format="%+.0f"),
+                "return_pct": st.column_config.NumberColumn("報酬率(%)", format="%+.2f%%"),
+                "note": "備註",
+            },
+        )
+        selected_lot_rows = lots_event.selection.rows
+
+        edit_col, delete_col = st.columns([1, 1])
+        with edit_col:
+            if st.button("✏️ 編輯選取批次"):
+                if len(selected_lot_rows) != 1:
+                    st.warning("請選取剛好一筆批次再編輯。")
+                else:
+                    lot_id = int(stock_lots_df.iloc[selected_lot_rows[0]]["id"])
+                    _inventory_lot_dialog(portfolio_storage.get_inventory_lot(portfolio_conn, lot_id))
+        with delete_col:
+            if st.button("🗑️ 刪除選取批次"):
+                if not selected_lot_rows:
+                    st.warning("請至少選取一筆批次再刪除。")
+                else:
+                    st.session_state["pending_delete_lot_ids"] = [int(stock_lots_df.iloc[i]["id"]) for i in selected_lot_rows]
+
+        # 兩段式確認刪除(跟桌面版QMessageBox.question的精神一致，避免誤刪)：
+        # 上面「刪除選取批次」按鈕只記錄「打算刪除哪些id」，這裡才是真正執行刪除，
+        # 使用者要再點一次「確認刪除」才會真的動到DB。
+        pending_ids = st.session_state.get("pending_delete_lot_ids")
+        if pending_ids:
+            st.warning(f"確定要刪除{len(pending_ids)}筆批次嗎？此動作無法復原。")
+            confirm_col, cancel_col = st.columns([1, 1])
+            with confirm_col:
+                if st.button("確認刪除", key="inventory_delete_confirm"):
+                    for lot_id in pending_ids:
+                        portfolio_storage.delete_inventory_stock(portfolio_conn, lot_id)
+                    st.session_state["pending_delete_lot_ids"] = None
+                    st.rerun()
+            with cancel_col:
+                if st.button("取消", key="inventory_delete_cancel"):
+                    st.session_state["pending_delete_lot_ids"] = None
+                    st.rerun()
+
     title_col, status_col = st.columns([4, 1])
     with title_col:
         st.title("📈 台股每日選股")
@@ -860,6 +1057,9 @@ def main() -> None:
                     "stock_count": st.column_config.NumberColumn("股票數", format="%d"),
                 },
             )
+
+    elif active_tab == TAB_INVENTORY:
+        render_inventory_tab()
 
 
 if __name__ == "__main__":
