@@ -6430,3 +6430,56 @@ DB複本)+Playwright無頭瀏覽器，用真實庫存資料(2317鴻海，3筆批
 glide-data-grid互動特性)，換個位置單擊即可正確觸發，不是bug，是驗證
 腳本的點擊座標問題。瀏覽器console全程確認0個JS錯誤。`pytest tests/ -q`
 1007個測試全數通過(底層資料函式未改動，不需要新增測試)。
+
+## web/桌面版功能對齊 第6批：新增「觀察清單」分頁（2026-08-04）
+
+延續對齊計畫第5項「庫存清單＋觀察清單」，這次做後半段——觀察清單，也是
+目前份量最大的一批：多群組管理＋黃豐凱籌碼分析法14個額外欄位。大量基礎
+設施重用上一批(庫存清單)已經建好的：`get_portfolio_conn()`、
+`_portfolio_summary_text()`、`_style_name_by_listing_type_row()`、
+`_watchlist_group_picker_dialog()`(當初就是為了這批先做的通用函式)。
+
+**相對桌面版的4點刻意簡化**(理由詳見上次規劃紀錄，這裡摘要)：①欄位
+顯示/隱藏改用Streamlit表格原生的欄位控制，不自己刻下拉選單；②不做雙列
+表頭的4色分類標籤(Streamlit表格不支援分組表頭)；③黃豐凱籌碼14欄裡只有
+「法人買賣超（張數）」8個數字欄位依正負值上紅/綠色，其餘6個文字欄位
+(投信/外資/大戶散戶週變化/均線狀態/週K型態)只顯示文字，不逐儲存格套用
+桌面版那種每列各自不同的自訂顏色；④不做F/G(大戶/散戶持股)背景自動補抓
+(`load_huang_chip_row()`對缺資料的股票會優雅回傳None、UI顯示"-"，且
+排程本來就暫停中，新股票的F/G本來就要等手動觸發或排程恢復)。
+
+**意外發現並修正的既有bug(影響範圍波及上一批的庫存清單)**：驗證觀察清單
+時發現「參考成本價/參考股數/市值/帳面損益/報酬率(%)」整欄都是`None`的
+群組(沒有任何股票填過參考成本價)，表格顯示Python的"None"字面字串，不是
+預期的"-"——這是`st.dataframe`搭配`pandas.Styler`(這裡是`.style.apply()`
+上色，不是先前踩過的`.style.format(na_rep=...)`)的**新一種**組合觸發同一
+類已知限制：一整欄全部是`None`時該欄dtype停在`object`(不會自動升級成
+`float64`+`NaN`)，`column_config.NumberColumn`的數字格式化對這種欄位的
+`None`一樣會顯示"None"字面字串。修法延續「個股明細」那批已經建立的原則
+(不依賴Styler/column_config處理缺值)，新增共用函式`_fmt_or_dash(value,
+decimals, signed, suffix)`，庫存總覽/批次明細/觀察清單3張表格的數字欄位
+都改成**建DataFrame前**先轉成「已格式化字串」("-"代表缺值)，不再依賴
+`column_config.NumberColumn`；原始數值DataFrame保留給「編輯選取」/
+「刪除選取」等需要真數字的邏輯使用，只有傳給`st.dataframe`顯示的是格式化
+過的字串版本。庫存清單那批因為驗證時用的測試股票(2317鴻海)所有欄位都
+剛好有填值，沒有觸發到這個bug，這次一併回頭修正。
+
+`dashboard/app.py`：`TAB_OPTIONS`新增`TAB_WATCHLIST`；新增`_watchlist_
+stock_dialog()`(新增/編輯觀察股票，比`_inventory_lot_dialog()`少買入
+日期/預估手續費兩個欄位)、`_watchlist_group_name_dialog()`(新增/重新
+命名群組共用表單，`sqlite3.IntegrityError`時顯示「群組名稱重複」不關閉
+dialog)、`render_watchlist_tab()`(群組選單+新增/重新命名/刪除群組(兩段式
+確認)+黃豐凱籌碼逐股查詢組表+25欄表格+編輯/刪除選取(兩段式確認)+固定
+提示文字)。共用層(`portfolio_data.py`/`portfolio_storage.py`/
+`huang_chip_data.py`)未改動。
+
+真實驗證：本機啟動Streamlit(`LOCAL_DB_PATH`/`PORTFOLIO_DB_PATH`都指向
+DB複本)+Playwright無頭瀏覽器，用真實觀察清單資料(預設觀察清單群組，
+8檔股票)驗證：群組選單/新增群組/重新命名群組/刪除群組(兩段式確認)、
+25欄表格正確顯示(黃豐凱籌碼14欄含法人買賣超正確紅綠上色)、修正bug後
+原本顯示"None"的5個欄位正確改顯示"-"、選取一檔股票點「編輯選取」dialog
+正確帶入(股票代號disabled，參考成本價/參考股數正確顯示0.00/0，不是
+crash)、底部固定提示文字存在。瀏覽器console全程確認0個JS錯誤。`pytest
+tests/ -q`1007個測試全數通過(共用層未改動，不需要新增測試)。
+
+至此「庫存清單＋觀察清單」(對齊計畫第5項)全部完成。

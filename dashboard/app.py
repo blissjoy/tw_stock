@@ -58,7 +58,28 @@ TAB_SCREENER = "選股"
 TAB_STOCK_DETAIL = "個股資訊"
 TAB_INDUSTRY_ROTATION = "產業輪動"
 TAB_INVENTORY = "庫存清單"
-TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL, TAB_INDUSTRY_ROTATION, TAB_INVENTORY]
+TAB_WATCHLIST = "觀察清單"
+TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL, TAB_INDUSTRY_ROTATION, TAB_INVENTORY, TAB_WATCHLIST]
+
+# 黃豐凱籌碼分析法(見src/presentation/huang_chip_data.py)接在觀察清單表格既有欄位
+# 之後的額外欄位——照抄desktop/main_window.py的_HUANG_CHIP_HEADERS，J欄(大量K參考)
+# 原始方法論裡沒有邏輯(手動欄位)，不顯示。
+_HUANG_CHIP_HEADERS = [
+    "invest_streak", "foreign_streak", "holder_whale", "holder_retail",
+    "ma_price_position", "weekly_volume_pattern",
+    "foreign_40d", "invest_40d", "foreign_20d", "invest_20d",
+    "foreign_10d", "invest_10d", "foreign_5d", "invest_5d",
+]
+_HUANG_CHIP_LABELS = {
+    "invest_streak": "投信", "foreign_streak": "外資",
+    "holder_whale": "大戶週變化", "holder_retail": "散戶週變化",
+    "ma_price_position": "均線狀態", "weekly_volume_pattern": "週K型態",
+    "foreign_40d": "40日外資", "invest_40d": "40日投信",
+    "foreign_20d": "20日外資", "invest_20d": "20日投信",
+    "foreign_10d": "10日外資", "invest_10d": "10日投信",
+    "foreign_5d": "5日外資", "invest_5d": "5日投信",
+}
+_HUANG_CHIP_FLOW_COLUMNS = ["foreign_40d", "invest_40d", "foreign_20d", "invest_20d", "foreign_10d", "invest_10d", "foreign_5d", "invest_5d"]
 
 
 def _format_month_day(date_str: str) -> str:
@@ -77,10 +98,14 @@ def main() -> None:
     import streamlit as st
     from streamlit.errors import StreamlitSecretNotFoundError
 
+    import sqlite3
+
     from scripts.daily_pipeline import run_daily_pipeline
     from src.data import portfolio_storage, storage
     from src.data.connection import get_default_connection, get_default_portfolio_connection
+    from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL
     from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
+    from src.presentation import huang_chip_data
     from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
     try:
@@ -581,6 +606,20 @@ def main() -> None:
             f"今日資產變動：{total_change:+,.0f}"
         )
 
+    def _fmt_or_dash(value, decimals: int = 0, signed: bool = False, suffix: str = "") -> str:
+        """數字轉成顯示字串，None/NaN顯示"-"——⚠️ 庫存清單/觀察清單表格都要用這個
+        預先把數字欄位轉成字串，不能依賴st.dataframe的column_config.NumberColumn
+        自動格式化再交給Styler：實測發現一整欄全部是None的情況(例如某個觀察清單
+        群組完全沒有任何一檔股票填過參考成本價)，該欄dtype會停在object而不是自動
+        升級成float64+NaN，column_config的數字格式化對這種object欄位裡的None
+        會直接顯示Python的"None"字面字串，不會呈現"-"。跟「個股明細」那批踩過的
+        坑同一個成因(Styler+缺值儲存格的顯示邏輯有已知限制)，統一用這個函式預先
+        轉成字串繞開，不依賴column_config處理缺值。"""
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return "-"
+        sign = "+" if signed and value > 0 else ""
+        return f"{sign}{value:,.{decimals}f}{suffix}"
+
     def _style_name_by_listing_type_row(row: pd.Series) -> list[str]:
         """依上市/上櫃/興櫃上色「名稱」欄位——跟選股分頁candidates_df用的_style_name_
         by_listing_type()同一套邏輯，這裡獨立一份是因為欄位集合(index)不同，无法直接
@@ -668,23 +707,31 @@ def main() -> None:
             return
 
         st.subheader("庫存總覽")
+        # ⚠️ 數字欄位先轉成「已格式化好的字串」("-"代表缺值)，不依賴column_config.
+        # NumberColumn自動格式化——見_fmt_or_dash()的說明，一整欄全部是None時
+        # column_config對object dtype的None會顯示"None"字面字串。summary_df(含
+        # listing_type等其他欄位)保留給後面selection查詢用，只有display版本套用
+        # 字串轉換。
+        summary_display = summary_df.copy()
+        summary_display["close"] = summary_df["close"].apply(lambda v: _fmt_or_dash(v, 2))
+        summary_display["pct_change"] = summary_df["pct_change"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
+        summary_display["cost_price"] = summary_df["cost_price"].apply(lambda v: _fmt_or_dash(v, 2))
+        summary_display["shares"] = summary_df["shares"].apply(lambda v: _fmt_or_dash(v, 0))
+        summary_display["market_value"] = summary_df["market_value"].apply(lambda v: _fmt_or_dash(v, 0))
+        summary_display["profit"] = summary_df["profit"].apply(lambda v: _fmt_or_dash(v, 0, signed=True))
+        summary_display["return_pct"] = summary_df["return_pct"].apply(lambda v: _fmt_or_dash(v, 2, signed=True, suffix="%"))
+        summary_display["sar_distance_pct"] = summary_df["sar_distance_pct"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
+        summary_display["lot_count"] = summary_df["lot_count"].apply(lambda v: _fmt_or_dash(v, 0))
         summary_event = st.dataframe(
-            summary_df.style.apply(_style_name_by_listing_type_row, axis=1),
+            summary_display.style.apply(_style_name_by_listing_type_row, axis=1),
             use_container_width=True, hide_index=True,
             on_select="rerun", selection_mode="single-row", key="inventory_summary_table",
             column_order=["stock_id", "name", "close", "pct_change", "cost_price", "shares", "market_value", "profit", "return_pct", "sar_status", "sar_distance_pct", "lot_count"],
             column_config={
-                "stock_id": "股票代號", "name": "名稱",
-                "close": st.column_config.NumberColumn("現價", format="%.2f"),
-                "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%.2f%%"),
-                "cost_price": st.column_config.NumberColumn("成本價", format="%.2f"),
-                "shares": st.column_config.NumberColumn("持股數", format="%d"),
-                "market_value": st.column_config.NumberColumn("市值", format="%.0f"),
-                "profit": st.column_config.NumberColumn("帳面損益", format="%+.0f"),
-                "return_pct": st.column_config.NumberColumn("報酬率(%)", format="%+.2f%%"),
-                "sar_status": "SAR狀態",
-                "sar_distance_pct": st.column_config.NumberColumn("SAR距離%", format="%.2f%%"),
-                "lot_count": st.column_config.NumberColumn("批次數", format="%d"),
+                "stock_id": "股票代號", "name": "名稱", "close": "現價", "pct_change": "漲跌幅(%)",
+                "cost_price": "成本價", "shares": "持股數", "market_value": "市值",
+                "profit": "帳面損益", "return_pct": "報酬率(%)", "sar_status": "SAR狀態",
+                "sar_distance_pct": "SAR距離%", "lot_count": "批次數",
             },
         )
 
@@ -698,18 +745,20 @@ def main() -> None:
             _watchlist_group_picker_dialog([selected_stock_id])
 
         stock_lots_df = lots_df[lots_df["stock_id"] == selected_stock_id].reset_index(drop=True)
+        lots_display = stock_lots_df.copy()
+        lots_display["cost_price"] = stock_lots_df["cost_price"].apply(lambda v: _fmt_or_dash(v, 2))
+        lots_display["shares"] = stock_lots_df["shares"].apply(lambda v: _fmt_or_dash(v, 0))
+        lots_display["fee"] = stock_lots_df["fee"].apply(lambda v: _fmt_or_dash(v, 0))
+        lots_display["market_value"] = stock_lots_df["market_value"].apply(lambda v: _fmt_or_dash(v, 0))
+        lots_display["profit"] = stock_lots_df["profit"].apply(lambda v: _fmt_or_dash(v, 0, signed=True))
+        lots_display["return_pct"] = stock_lots_df["return_pct"].apply(lambda v: _fmt_or_dash(v, 2, signed=True, suffix="%"))
         lots_event = st.dataframe(
-            stock_lots_df, use_container_width=True, hide_index=True,
+            lots_display, use_container_width=True, hide_index=True,
             on_select="rerun", selection_mode="multi-row", key="inventory_lots_table",
             column_order=["buy_date", "cost_price", "shares", "fee", "market_value", "profit", "return_pct", "note"],
             column_config={
-                "buy_date": "買入日期",
-                "cost_price": st.column_config.NumberColumn("成本價", format="%.2f"),
-                "shares": st.column_config.NumberColumn("持股數", format="%d"),
-                "fee": st.column_config.NumberColumn("手續費", format="%.0f"),
-                "market_value": st.column_config.NumberColumn("市值", format="%.0f"),
-                "profit": st.column_config.NumberColumn("帳面損益", format="%+.0f"),
-                "return_pct": st.column_config.NumberColumn("報酬率(%)", format="%+.2f%%"),
+                "buy_date": "買入日期", "cost_price": "成本價", "shares": "持股數",
+                "fee": "手續費", "market_value": "市值", "profit": "帳面損益", "return_pct": "報酬率(%)",
                 "note": "備註",
             },
         )
@@ -747,6 +796,223 @@ def main() -> None:
                 if st.button("取消", key="inventory_delete_cancel"):
                     st.session_state["pending_delete_lot_ids"] = None
                     st.rerun()
+
+    @st.dialog("觀察清單股票")
+    def _watchlist_stock_dialog(group_id: int, initial: dict | None) -> None:
+        """新增/編輯觀察清單股票——跟_inventory_lot_dialog()同一個結構，但沒有買入
+        日期/預估手續費欄位(觀察清單不是真的持股，add_watchlist_stock()/update_
+        watchlist_stock()本來就沒有這兩個參數)。"""
+        is_edit = initial is not None
+        st.subheader("編輯觀察股票" if is_edit else "新增觀察股票")
+
+        if is_edit:
+            st.text_input("股票代號", value=initial["stock_id"], disabled=True)
+            resolved_id = initial["stock_id"]
+        else:
+            query = st.text_input("股票代號或名稱", placeholder="例如 2330 或 台積電")
+            resolved_id = chart_data.resolve_stock_id(conn, query) or query.strip() if query else None
+            if query:
+                resolved_name = chart_data.get_stock_name(conn, resolved_id) if resolved_id else None
+                st.caption(f"解析為：{resolved_id} {resolved_name}" if resolved_name else "（查無此股票代號，仍可儲存）")
+
+        cost_price = st.number_input("參考成本價", min_value=0.0, step=0.01, value=float(initial.get("cost_price") or 0) if is_edit else 0.0)
+        shares = st.number_input("參考股數", min_value=0, step=1000, value=int(initial.get("shares") or 0) if is_edit else 0)
+        note = st.text_input("備註", value=initial.get("note") or "" if is_edit else "")
+
+        if st.button("確認", key="watchlist_stock_dialog_confirm"):
+            if not resolved_id:
+                st.warning("請輸入股票代號。")
+                return
+            if is_edit:
+                portfolio_storage.update_watchlist_stock(portfolio_conn, group_id, resolved_id, cost_price or None, shares or None, note)
+            else:
+                portfolio_storage.add_watchlist_stock(portfolio_conn, group_id, resolved_id, cost_price or None, shares or None, note)
+            st.rerun()
+
+    @st.dialog("觀察清單群組")
+    def _watchlist_group_name_dialog(mode: str, group_id: int | None, current_name: str) -> None:
+        """新增/重新命名群組共用的表單。群組名稱有DB層唯一約束，重複時捕捉
+        sqlite3.IntegrityError顯示錯誤訊息、不關閉dialog，讓使用者原地修改重試
+        (跟桌面版QMessageBox.warning後dialog繼續開著的行為一致)。"""
+        st.subheader("新增群組" if mode == "add" else "重新命名群組")
+        name = st.text_input("群組名稱", value=current_name)
+        if st.button("確認", key="watchlist_group_name_dialog_confirm"):
+            name = name.strip()
+            if not name:
+                st.warning("請輸入群組名稱。")
+                return
+            try:
+                if mode == "add":
+                    portfolio_storage.add_watchlist_group(portfolio_conn, name)
+                else:
+                    portfolio_storage.rename_watchlist_group(portfolio_conn, group_id, name)
+            except sqlite3.IntegrityError:
+                st.error("群組名稱重複，請換一個名稱。")
+                return
+            st.rerun()
+
+    def render_watchlist_tab() -> None:
+        """「觀察清單」分頁：想追蹤但還沒買的股票，支援多個群組，額外接上黃豐凱籌碼
+        分析法14個欄位。跟桌面版desktop/main_window.py的_build_watchlist_tab()比，
+        這次刻意簡化3點(理由見ai/PLAN.md對應批次的紀錄)：①欄位顯示/隱藏改用
+        Streamlit原生的表格欄位右鍵選單，不自己刻下拉選單；②不做雙列表頭的4色分類
+        標籤(Streamlit表格不支援分組表頭)；③黃豐凱籌碼欄位只對「法人買賣超（張數）」
+        8個數字欄位依正負值上紅/綠色，其餘6個文字欄位(投信/外資/大戶散戶週變化/
+        均線狀態/週K型態)只顯示文字，不逐儲存格套用桌面版那種每列各自不同的自訂
+        顏色。也不做F/G背景自動補抓(Streamlit沒有背景執行緒模型，且目前排程本來就
+        暫停中，新股票的F/G本來就要等手動觸發或排程恢復)。
+        """
+        groups = portfolio_storage.list_watchlist_groups(portfolio_conn)
+        if not groups:
+            portfolio_storage.add_watchlist_group(portfolio_conn, "預設觀察清單")
+            groups = portfolio_storage.list_watchlist_groups(portfolio_conn)
+
+        group_names = [g["group_name"] for g in groups]
+        selected_group_name = st.selectbox("群組", group_names, key="watchlist_group_select")
+        group_id = next(g["id"] for g in groups if g["group_name"] == selected_group_name)
+
+        group_col1, group_col2, group_col3 = st.columns([1, 1, 1])
+        with group_col1:
+            if st.button("➕ 新增群組"):
+                _watchlist_group_name_dialog("add", None, "")
+        with group_col2:
+            if st.button("✏️ 重新命名群組"):
+                _watchlist_group_name_dialog("rename", group_id, selected_group_name)
+        with group_col3:
+            if st.button("🗑️ 刪除群組"):
+                st.session_state["pending_delete_group_id"] = group_id
+
+        pending_group_id = st.session_state.get("pending_delete_group_id")
+        if pending_group_id:
+            st.warning(f"確定要刪除群組「{selected_group_name}」嗎？裡面的股票也會一併刪除，此動作無法復原。")
+            confirm_col, cancel_col = st.columns([1, 1])
+            with confirm_col:
+                if st.button("確認刪除群組", key="watchlist_group_delete_confirm"):
+                    portfolio_storage.delete_watchlist_group(portfolio_conn, pending_group_id)
+                    st.session_state["pending_delete_group_id"] = None
+                    st.rerun()
+            with cancel_col:
+                if st.button("取消", key="watchlist_group_delete_cancel"):
+                    st.session_state["pending_delete_group_id"] = None
+                    st.rerun()
+
+        if st.button("➕ 新增股票", key="watchlist_add_stock"):
+            _watchlist_stock_dialog(group_id, None)
+
+        watchlist_df = portfolio_data.load_watchlist(conn, portfolio_conn, group_id)
+        if watchlist_df.empty:
+            st.info("這個群組還沒有任何股票，點上方「➕ 新增股票」開始追蹤。")
+            st.caption("ps: 大戶/散戶持股變化僅支持觀察清單")
+            return
+
+        st.caption(_portfolio_summary_text(watchlist_df, "總參考成本", "總觀察市值", "累積預估損益"))
+
+        # 逐股查詢黃豐凱籌碼分析法欄位(照抄桌面版_populate_huang_chip_columns()，
+        # 觀察清單股票數量少，成本可忽略，不需要背景執行緒)。label-dict欄位/流量
+        # 欄位都在建DataFrame前就轉成「已格式化好的字串」("-"或+/-千分位數字字串)，
+        # 不留原始None/NaN——跟「個股明細」那批踩過的坑一樣，st.dataframe搭配
+        # Styler對None/NaN儲存格會顯示"None"字面字串，不會套用自訂格式化邏輯。
+        chip_rows = []
+        for stock_id in watchlist_df["stock_id"]:
+            chip = huang_chip_data.load_huang_chip_row(conn, stock_id)
+            flow = chip.get("flow") or {}
+            ma = chip.get("ma_price_position")
+            weekly = chip.get("weekly_volume_pattern")
+            holder = chip.get("holder_change") or {}
+            row = {
+                "invest_streak": (chip.get("invest_streak") or {}).get("text", "-"),
+                "foreign_streak": (chip.get("foreign_streak") or {}).get("text", "-"),
+                "holder_whale": (holder.get("whale") or {}).get("text", "-"),
+                "holder_retail": (holder.get("retail") or {}).get("text", "-"),
+                "ma_price_position": "\n".join(line["text"] for line in ma["lines"]) if ma else "-",
+                "weekly_volume_pattern": f"{weekly['pattern']}\n（{weekly['reference_week_start']}）" if weekly else "-",
+            }
+            for key in _HUANG_CHIP_FLOW_COLUMNS:
+                value = flow.get(key)
+                row[key] = f"{value:+,.0f}" if value is not None else "-"
+            chip_rows.append(row)
+        chip_df = pd.DataFrame(chip_rows, columns=_HUANG_CHIP_HEADERS)
+        watchlist_df = pd.concat([watchlist_df.reset_index(drop=True), chip_df], axis=1)
+
+        # ⚠️ 數字欄位先轉成「已格式化好的字串」("-"代表缺值)，不依賴column_config.
+        # NumberColumn自動格式化(理由見_fmt_or_dash()的說明)。watchlist_df保留原始
+        # 數值給後面「編輯選取」/「刪除選取」查詢用(編輯dialog需要真的數字才能帶入
+        # number_input預設值)，只有watchlist_display套用字串轉換、傳給st.dataframe。
+        watchlist_display = watchlist_df.copy()
+        watchlist_display["close"] = watchlist_df["close"].apply(lambda v: _fmt_or_dash(v, 2))
+        watchlist_display["pct_change"] = watchlist_df["pct_change"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
+        watchlist_display["cost_price"] = watchlist_df["cost_price"].apply(lambda v: _fmt_or_dash(v, 2))
+        watchlist_display["shares"] = watchlist_df["shares"].apply(lambda v: _fmt_or_dash(v, 0))
+        watchlist_display["market_value"] = watchlist_df["market_value"].apply(lambda v: _fmt_or_dash(v, 0))
+        watchlist_display["profit"] = watchlist_df["profit"].apply(lambda v: _fmt_or_dash(v, 0, signed=True))
+        watchlist_display["return_pct"] = watchlist_df["return_pct"].apply(lambda v: _fmt_or_dash(v, 2, signed=True, suffix="%"))
+        watchlist_display["sar_distance_pct"] = watchlist_df["sar_distance_pct"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
+
+        def _style_watchlist_row(row: pd.Series) -> list[str]:
+            styles = []
+            name_color = portfolio_data.listing_type_color(row.get("listing_type"))
+            for col in row.index:
+                if col == "name":
+                    styles.append(f"color: {name_color}")
+                elif col in _HUANG_CHIP_FLOW_COLUMNS:
+                    text = str(row[col])
+                    if text.startswith("-"):
+                        styles.append(f"color: {COLOR_SELL}")
+                    elif text.startswith("+") and not text.startswith("+0"):
+                        styles.append(f"color: {COLOR_BUY}")
+                    else:
+                        styles.append("")
+                else:
+                    styles.append("")
+            return styles
+
+        watchlist_event = st.dataframe(
+            watchlist_display.style.apply(_style_watchlist_row, axis=1),
+            use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="multi-row", key="watchlist_table",
+            column_order=["stock_id", "name", "close", "pct_change", "cost_price", "shares", "market_value", "profit", "return_pct", "sar_status", "sar_distance_pct"] + _HUANG_CHIP_HEADERS,
+            column_config={
+                "stock_id": "股票代號", "name": "名稱", "close": "現價", "pct_change": "漲跌幅(%)",
+                "cost_price": "參考成本價", "shares": "參考股數", "market_value": "市值",
+                "profit": "帳面損益", "return_pct": "報酬率(%)", "sar_status": "SAR狀態",
+                "sar_distance_pct": "SAR距離%",
+                **{key: label for key, label in _HUANG_CHIP_LABELS.items()},
+            },
+        )
+        selected_rows = watchlist_event.selection.rows
+
+        edit_col, delete_col = st.columns([1, 1])
+        with edit_col:
+            if st.button("✏️ 編輯選取"):
+                if len(selected_rows) != 1:
+                    st.warning("請選取剛好一檔股票再編輯。")
+                else:
+                    stock_row = watchlist_df.iloc[selected_rows[0]]
+                    initial = {"stock_id": stock_row["stock_id"], "cost_price": stock_row["cost_price"], "shares": stock_row["shares"], "note": stock_row["note"]}
+                    _watchlist_stock_dialog(group_id, initial)
+        with delete_col:
+            if st.button("🗑️ 刪除選取"):
+                if not selected_rows:
+                    st.warning("請至少選取一檔股票再刪除。")
+                else:
+                    st.session_state["pending_delete_watchlist_stock_ids"] = [str(watchlist_df.iloc[i]["stock_id"]) for i in selected_rows]
+
+        pending_stock_ids = st.session_state.get("pending_delete_watchlist_stock_ids")
+        if pending_stock_ids:
+            st.warning(f"確定要刪除{len(pending_stock_ids)}檔股票嗎？此動作無法復原。")
+            confirm_col, cancel_col = st.columns([1, 1])
+            with confirm_col:
+                if st.button("確認刪除", key="watchlist_delete_confirm"):
+                    for stock_id in pending_stock_ids:
+                        portfolio_storage.delete_watchlist_stock(portfolio_conn, group_id, stock_id)
+                    st.session_state["pending_delete_watchlist_stock_ids"] = None
+                    st.rerun()
+            with cancel_col:
+                if st.button("取消", key="watchlist_delete_cancel"):
+                    st.session_state["pending_delete_watchlist_stock_ids"] = None
+                    st.rerun()
+
+        st.caption("ps: 大戶/散戶持股變化僅支持觀察清單")
 
     title_col, status_col = st.columns([4, 1])
     with title_col:
@@ -1060,6 +1326,9 @@ def main() -> None:
 
     elif active_tab == TAB_INVENTORY:
         render_inventory_tab()
+
+    elif active_tab == TAB_WATCHLIST:
+        render_watchlist_tab()
 
 
 if __name__ == "__main__":
