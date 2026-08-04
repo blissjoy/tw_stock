@@ -6133,3 +6133,35 @@ Delete刪除；選股清單的勾選欄表頭也要能一鍵全選/取消全選�
 直接讀取`item.foreground().color().name()`確認名稱欄顏色正確對應
 listing_type(`#0000cc`=twse多數股票、`#000000`=8111立碁這檔tpex)。`pytest
 tests/ -q`1000個測試全數通過(純UI顯示邏輯，跟其餘三處同一種驗證方式)。
+
+## 兩起自己造成的測試/驗證污染真實環境事故 + 修正（2026-08-04）
+
+同一天連續發現兩起「驗證動作不小心寫到真實環境」的事故，都已經修正：
+
+**①QSettings污染**：為了測試選股清單名稱上色，debug script直接呼叫
+`cb.setChecked(False)`關掉篩選勾選框，沒注意到這些勾選框的`toggled`訊號會
+即時寫回Windows系統層級的QSettings(`QSettings("tw_stock","desktop")`，不是
+跟隔離測試DB一樣可以丟棄的東西)，導致使用者的正式設定被覆蓋成「均線多頭
+排列/SAR翻轉/朱家泓技術分析」全部關閉——候選清單暴增到2048檔，連帶讓表格
+最左邊的原生列號欄位(要容納4位數列號)變寬，整個畫面版面跟著跑掉。使用者
+回報「畫面被調動了」才發現。已經用`QSettings.remove()`清掉這3個被污染的
+key，讓app下次讀取時退回程式內建的正確預設值。
+
+**②`pipeline_status.json`測試污染**：`tests/`裡多數呼叫`run_daily_pipeline()`
+的測試沒有隔離`pipeline_status.STATUS_PATH`(只有少數測試自己手動
+monkeypatch)，這個session反覆執行`pytest tests/ -q`很多次，每次都真的寫到
+`data/pipeline_status.json`，最終留下明顯是測試資料的內容(`date="2026-07-22"`、
+`candidate_count=0`)，讓桌面版狀態列顯示錯誤的排程狀態。新增
+`tests/conftest.py`：全域autouse fixture把`STATUS_PATH`隔離到每個測試各自的
+`tmp_path`，一次性解決所有「忘記手動隔離」的測試，個別測試需要驗證真正的
+STATUS_PATH行為(例如`test_pipeline_status.py`)時，在測試函式主體內
+monkeypatch覆蓋即可(晚於這個fixture執行，會蓋過去)。手動把正式的
+`pipeline_status.json`還原成反映今天17:00那次真實排程結果的正確內容
+(`date="2026-08-04"`、`candidate_count=714`，查`daily_candidates`表當天實際
+筆數重建)。`pytest tests/ -q`1000個測試全數通過，且確認執行前後
+`data/pipeline_status.json`的mtime完全沒變(不再被寫入)。
+
+之後做PySide6實際視窗驗證時，要避免用會直接寫回真實QSettings/檔案系統的
+方式操作UI元件(例如programmatically setChecked()真實widget)，優先用「讀取
+狀態確認」而不是「操作真實widget再讀回」的驗證方式，或至少確保操作完會
+還原成原狀態。
