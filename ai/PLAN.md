@@ -6014,3 +6014,29 @@ TPEx二分類(興櫃被併進TPEx)，這次要真正區分出興櫃，需要保�
 - 真實驗證：用D:\temp_claude的DB複本，PySide6實際視窗截圖確認「個股資訊」
   查詢2330後右上角正確顯示「資料更新至：2026-08-04 14:30」、「產業輪動」分頁
   右上角正確顯示「資料更新至：2026-08-04 16:01」。
+
+## 大盤成交量歷史單位不一致修正（2026-08-04）
+
+使用者發現大盤圖表的成交量紅綠色柱狀圖「只從7/1開始有顯示」，追查發現是上面
+TAIEX成交量修正(FMTQIK取代yfinance)自己造成的新問題：`fetch_today_taiex()`
+只處理`TAIEX_REFETCH_WINDOW_DAYS`天的滾動窗口，但FMTQIK整月回傳、當時window
+剛好跨到7月，連帶把整個7月修好，7月以前的歷史資料完全沒被碰到。實測比對同一天
+(2026-06-30)：DB裡舊值7,182,400 vs TWSE官方13,140,347,237，差了約1829倍——
+yfinance來源的volume單位/量級跟schema其餘欄位(原始股數)不一致，圖表y軸依7月
+以後的百億級數字自動縮放，7月以前百萬級的舊數字柱狀圖幾乎壓成看不見的高度，
+才會看起來「沒有顏色」。
+
+- `src/data/twse_client.py`把`scripts/daily_pipeline.py`原本內部私有的
+  `_month_starts()`/`_fetch_taiex_official_volume()`搬過來，改名/公開成
+  `_month_starts()`(仍私有，模組內部用)＋`fetch_taiex_volume_range()`(公開)，
+  讓一次性回補腳本也能重用同一份邏輯，不用複製貼上；`fetch_today_taiex()`
+  改呼叫`twse_client.fetch_taiex_volume_range()`。
+- 新增`scripts/backfill_taiex_volume.py`：只覆蓋volume欄位(OHLC完全不動，
+  TWSE沒有大盤開高低、這部分繼續信任yfinance)，預設處理DB裡大盤全部歷史
+  日期範圍，一次性回補成TWSE官方原始股數單位。
+- 測試搬遷：`tests/test_daily_pipeline.py`的`_month_starts`測試搬到
+  `tests/test_twse_client.py`，新增`fetch_taiex_volume_range()`跨月合併測試。
+  `pytest tests/ -q`992個測試全數通過。
+- 真實驗證：先用D:\temp_claude的DB複本執行回補腳本，確認2023-01-03~2026-08-04
+  共864筆全部更新成功、6月底到7月初交界處的數字量級變得連續一致(不再有1829倍
+  的斷層)；確認正確後對正式DB執行同一次回補，864筆全部成功。

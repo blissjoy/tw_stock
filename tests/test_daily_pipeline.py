@@ -34,9 +34,9 @@ def _no_real_taiex_network_calls(monkeypatch):
     test_yfinance_client.py測的是這個函式本身，不應該被這個安全網擋住。個別測試需要驗證
     真正行為時，在測試函式主體內用monkeypatch覆蓋即可(晚於這個fixture執行，會蓋過去)。
 
-    2026-08-04新增：fetch_today_taiex()同時也會呼叫twse_client.fetch_taiex_volume()
-    (見_fetch_taiex_official_volume())覆蓋yfinance的volume欄位，同一個理由，一併
-    擋住避免真的打到TWSE。
+    2026-08-04新增：fetch_today_taiex()同時也會呼叫twse_client.fetch_taiex_volume_
+    range()(內部逐月呼叫fetch_taiex_volume())覆蓋yfinance的volume欄位，同一個理由，
+    一併擋住避免真的打到TWSE。
 
     同一天再新增：fetch_today_tpex()對批次下載後仍失敗的股票，現在會呼叫
     yfinance_client.fetch_twse_prices_batch()當「轉上市」備援(見fetch_today_tpex()
@@ -940,12 +940,6 @@ def test_fetch_today_taiex_skips_date_with_twse_volume_but_no_ohlc_anywhere(monk
         "SELECT COUNT(*) FROM stock_prices WHERE stock_id = ? AND date = ?", (stock_id, "2026-08-03"),
     ).fetchone()
     assert row == (0,)
-
-
-def test_month_starts_covers_month_boundary_including_year_rollover():
-    assert daily_pipeline._month_starts("2026-07-28", "2026-08-04") == ["20260701", "20260801"]
-    assert daily_pipeline._month_starts("2026-08-01", "2026-08-04") == ["20260801"]
-    assert daily_pipeline._month_starts("2025-12-20", "2026-01-05") == ["20251201", "20260101"]
 
 
 def test_fetch_today_taiex_returns_false_when_no_data(monkeypatch):

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import date as _date
 
 import requests
 
@@ -194,3 +195,27 @@ def fetch_taiex_volume(date: str) -> dict[str, int]:
     數字本身被忽略、回傳整個月份的資料)。查無資料(例如還沒收盤公布)回傳空dict。"""
     raw = _get_json(TAIEX_VOLUME_URL, {"date": date, "response": "json"})
     return parse_taiex_volume(raw)
+
+
+def _month_starts(start_date: str, end_date: str) -> list[str]:
+    """回傳start_date~end_date(含)涵蓋到的每個月份第一天，格式'YYYYMM01'(西元年)，
+    供fetch_taiex_volume_range()逐月查詢FMTQIK用(這個端點以「月」為單位回傳整月
+    資料)。"""
+    cur = _date.fromisoformat(start_date).replace(day=1)
+    end = _date.fromisoformat(end_date).replace(day=1)
+    months = []
+    while cur <= end:
+        months.append(cur.strftime("%Y%m01"))
+        cur = _date(cur.year + 1, 1, 1) if cur.month == 12 else _date(cur.year, cur.month + 1, 1)
+    return months
+
+
+def fetch_taiex_volume_range(start_date: str, end_date: str) -> dict[str, int]:
+    """呼叫FMTQIK，合併start_date~end_date(含，'YYYY-MM-DD'西元年格式)涵蓋到的每個
+    月份，回傳{date: 成交股數}對照表。2026-08-04新增，從scripts/daily_pipeline.py
+    的fetch_today_taiex()抽出來(原本是該檔案內部的私有函式)，讓一次性回補整段歷史
+    volume的`scripts/backfill_taiex_volume.py`也能重用同一份邏輯，不用複製貼上。"""
+    result: dict[str, int] = {}
+    for month_str in _month_starts(start_date, end_date):
+        result.update(fetch_taiex_volume(month_str))
+    return result

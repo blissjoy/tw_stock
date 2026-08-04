@@ -1,4 +1,6 @@
+from src.data import twse_client
 from src.data.twse_client import (
+    _month_starts,
     _parse_roc_slash_date,
     format_date,
     parse_institutional_investors,
@@ -156,3 +158,26 @@ def test_parse_taiex_volume_returns_date_to_volume_map():
 def test_parse_taiex_volume_empty_when_stat_not_ok():
     # 查詢還沒有任何交易日資料的月份時的實際回應型態
     assert parse_taiex_volume({"stat": "查詢無資料"}) == {}
+
+
+def test_month_starts_covers_month_boundary_including_year_rollover():
+    assert _month_starts("2026-07-28", "2026-08-04") == ["20260701", "20260801"]
+    assert _month_starts("2026-08-01", "2026-08-04") == ["20260801"]
+    assert _month_starts("2025-12-20", "2026-01-05") == ["20251201", "20260101"]
+
+
+def test_fetch_taiex_volume_range_merges_multiple_months(monkeypatch):
+    """2026-08-04新增：從scripts/daily_pipeline.py抽出來的共用邏輯，
+    scripts/backfill_taiex_volume.py也會重用同一個函式回補整段歷史。"""
+    calls = []
+
+    def _fake_fetch(month):
+        calls.append(month)
+        return {f"{month[:4]}-{month[4:6]}-15": 1000}
+
+    monkeypatch.setattr(twse_client, "fetch_taiex_volume", _fake_fetch)
+
+    result = twse_client.fetch_taiex_volume_range("2026-07-28", "2026-08-04")
+
+    assert calls == ["20260701", "20260801"]
+    assert result == {"2026-07-15": 1000, "2026-08-15": 1000}

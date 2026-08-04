@@ -291,29 +291,6 @@ TAIEX_REFETCH_WINDOW_DAYS = 10
 INDICATOR_REFRESH_WINDOW_DAYS = 10
 
 
-def _month_starts(start_date: str, end_date: str) -> list[str]:
-    """回傳start_date~end_date(含)涵蓋到的每個月份第一天，格式'YYYYMM01'(西元年)，
-    供_fetch_taiex_official_volume()逐月查詢TWSE FMTQIK用(這個端點以「月」為單位
-    回傳整月資料)。"""
-    cur = date.fromisoformat(start_date).replace(day=1)
-    end = date.fromisoformat(end_date).replace(day=1)
-    months = []
-    while cur <= end:
-        months.append(cur.strftime("%Y%m01"))
-        cur = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
-    return months
-
-
-def _fetch_taiex_official_volume(start_date: str, end_date: str) -> dict[str, int]:
-    """呼叫TWSE官方FMTQIK，合併start_date~end_date(含)涵蓋到的每個月份，回傳
-    {date: 成交股數}對照表。見fetch_today_taiex()說明：這是用來覆蓋掉yfinance
-    ^TWII不可靠的volume欄位。"""
-    result: dict[str, int] = {}
-    for month_str in _month_starts(start_date, end_date):
-        result.update(twse_client.fetch_taiex_volume(month_str))
-    return result
-
-
 def fetch_today_taiex(conn, date_str: str) -> bool:
     """更新大盤(台股加權指數，`yfinance_client.TAIEX_STOCK_ID`)的OHLCV資料。
 
@@ -359,7 +336,7 @@ def fetch_today_taiex(conn, date_str: str) -> bool:
     rows_by_date = {row["date"]: row for row in rows}
 
     try:
-        volume_by_date = _fetch_taiex_official_volume(start_date, iso_date)
+        volume_by_date = twse_client.fetch_taiex_volume_range(start_date, iso_date)
     except Exception as exc:  # noqa: BLE001
         print(f"大盤官方成交量(TWSE FMTQIK)更新失敗（略過，volume欄位維持yfinance原始值）：{exc}")
         volume_by_date = {}
