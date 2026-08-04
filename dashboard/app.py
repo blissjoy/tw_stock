@@ -1233,6 +1233,21 @@ def main() -> None:
                     color = portfolio_data.listing_type_color(row.get("listing_type"))
                     return [f"color: {color}" if col == "name" else "" for col in row.index]
 
+                # ⚠️ 數字欄位先轉成「已格式化好的字串」("-"代表缺值)，不依賴column_config.
+                # NumberColumn自動格式化——見_fmt_or_dash()的說明。entry_price/stop_loss/
+                # sar_value/sar_distance_pct對「全市場但沒觸發過任何朱家泓規則」或「還沒
+                # 回補到daily_indicators」的股票可能是None，候選池改成全市場(見上面
+                # apply_candidate_filters的說明)後這種情況比只顯示daily_candidates時
+                # 更常見。candidates_df後面只用stock_id這個未受影響的欄位做選取查詢，
+                # 直接原地覆寫不需要另外保留原始數值版本。
+                candidates_df["close"] = candidates_df["close"].apply(lambda v: _fmt_or_dash(v, 2))
+                candidates_df["entry_price"] = candidates_df["entry_price"].apply(lambda v: _fmt_or_dash(v, 2))
+                candidates_df["stop_loss"] = candidates_df["stop_loss"].apply(lambda v: _fmt_or_dash(v, 2))
+                candidates_df["pct_change"] = candidates_df["pct_change"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
+                candidates_df["volume"] = candidates_df["volume"].apply(lambda v: _fmt_or_dash(v, 0))
+                candidates_df["sar_value"] = candidates_df["sar_value"].apply(lambda v: _fmt_or_dash(v, 2))
+                candidates_df["sar_distance_pct"] = candidates_df["sar_distance_pct"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
+
                 event = st.dataframe(
                     candidates_df.style.apply(_style_name_by_listing_type, axis=1),
                     use_container_width=True, hide_index=True,
@@ -1244,13 +1259,9 @@ def main() -> None:
                     column_config={
                         "stock_id": "股票代號", "name": "名稱", "industry": "產業別",
                         "signal_name": "訊號(信心%)",  # 信心分數已經內含在signal_name字串裡(見daily_screener.py)，這裡只是把「(信心%)」這個提示放進欄位標題，不用每一列都重複寫「信心」兩個字
-                        "close": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                        "entry_price": "進場價", "stop_loss": "停損價",
-                        "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%.2f%%"),
-                        "volume": st.column_config.NumberColumn("成交量", format="%d"),
-                        "sar_value": st.column_config.NumberColumn("SAR值", format="%.2f"),
-                        "sar_status": "SAR狀態",
-                        "sar_distance_pct": st.column_config.NumberColumn("SAR距離%", format="%.2f%%"),
+                        "close": "收盤價", "entry_price": "進場價", "stop_loss": "停損價",
+                        "pct_change": "漲跌幅(%)", "volume": "成交量",
+                        "sar_value": "SAR值", "sar_status": "SAR狀態", "sar_distance_pct": "SAR距離%",
                     },
                 )
                 if event.selection.rows:
@@ -1267,6 +1278,29 @@ def main() -> None:
                     # 執行到radio建立"之前"再轉寫進active_tab，見上面的說明。
                     st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
                     st.rerun()
+
+                # 批次動作(加入庫存/加入觀察清單)：桌面版是表格左側勾選欄+全選表頭，
+                # Streamlit的st.dataframe一次只能選單一種selection_mode，這裡的表格已經
+                #用single-row做「點列跳轉個股資訊」，改用獨立的multiselect做批次目標
+                # 選擇，不跟表格本身的點選互相干擾，是兩種不同的互動、各自獨立運作。
+                bulk_options = candidates_df["stock_id"] + "　" + candidates_df["name"]
+                bulk_label_to_id = dict(zip(bulk_options, candidates_df["stock_id"]))
+                bulk_selected_labels = st.multiselect("批次動作：勾選要處理的股票", bulk_options.tolist(), key="candidates_bulk_select")
+                bulk_selected_ids = [bulk_label_to_id[label] for label in bulk_selected_labels]
+                bulk_col1, bulk_col2 = st.columns([1, 1])
+                with bulk_col1:
+                    if st.button("➕ 加入庫存", key="candidates_add_to_inventory"):
+                        if not bulk_selected_ids:
+                            st.warning("請至少勾選一檔股票。")
+                        else:
+                            added = portfolio_storage.add_stocks_to_inventory(portfolio_conn, bulk_selected_ids)
+                            st.success(f"已加入{added}檔股票到庫存清單(空白批次，之後可自行填入成本價/持股數)；{len(bulk_selected_ids) - added}檔已有既存批次，未重複加入。")
+                with bulk_col2:
+                    if st.button("➕ 加入觀察清單", key="candidates_add_to_watchlist"):
+                        if not bulk_selected_ids:
+                            st.warning("請至少勾選一檔股票。")
+                        else:
+                            _watchlist_group_picker_dialog(bulk_selected_ids)
 
     elif active_tab == TAB_STOCK_DETAIL:
         query_col, source_col = st.columns([3, 1])

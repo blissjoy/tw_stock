@@ -6483,3 +6483,34 @@ crash)、底部固定提示文字存在。瀏覽器console全程確認0個JS錯�
 tests/ -q`1007個測試全數通過(共用層未改動，不需要新增測試)。
 
 至此「庫存清單＋觀察清單」(對齊計畫第5項)全部完成。
+
+## web/桌面版功能對齊 第7批：選股分頁批次動作（2026-08-05）
+
+對齊計畫第6項：選股分頁候選清單表格補上「加入庫存」/「加入觀察清單」
+批次動作——桌面版是表格最左側勾選欄+表頭全選checkbox(`_CheckableHeaderView`)，
+Streamlit的`st.dataframe`一次只能設定一種`selection_mode`，這個表格已經
+用`selection_mode="single-row"`做「點列自動跳轉個股資訊」(既有功能，
+不能為了批次勾選犧牲掉)，改成在表格下方新增一個獨立的`st.multiselect`
+(選項是「股票代號　名稱」，內建"Select all"對應桌面版的全選表頭)，兩種
+互動(點列跳轉／多選批次動作)彼此獨立，不互相干擾。「加入庫存」呼叫
+`portfolio_storage.add_stocks_to_inventory()`(上一批「庫存清單」就已經
+確認存在的共用函式)；「加入觀察清單」直接重用`_watchlist_group_picker_
+dialog()`(第5批就是為了這裡先做的通用函式)。
+
+**順手修正候選清單表格同一類None顯示bug**：候選池自從2026-08-04改成
+「全市場」(不只是`daily_candidates`裡已觸發規則的股票，見`apply_
+candidate_filters()`那次改版)後，`entry_price`/`stop_loss`/`sar_value`/
+`sar_distance_pct`這幾欄對「沒觸發過任何朱家泓規則」或「還沒回補到
+`daily_indicators`」的股票經常是`None`，套用`_fmt_or_dash()`(上一批
+「觀察清單」新增的共用函式)預先格式化，避免顯示"None"字面字串。
+
+真實驗證：本機啟動Streamlit(`LOCAL_DB_PATH`/`PORTFOLIO_DB_PATH`都指向
+DB複本)+Playwright無頭瀏覽器：multiselect的"Select all"選項正確選中
+全部378檔候選股票，點「加入庫存」正確顯示「已加入378檔股票到庫存清單
+...；0檔已有既存批次」；選取單一股票點「加入觀察清單」正確開啟群組
+選擇dialog。瀏覽器console全程確認0個JS錯誤。`pytest tests/ -q`1007個
+測試全數通過(共用層未改動，不需要新增測試)。
+
+對齊計畫進度：第1~6項全部完成，剩「回補資料」(是否要上web需要先跟
+使用者確認，有資源濫用疑慮)、「產出報表PDF匯出」(技術風險最大，桌面版
+用Qt的printToPdf，web需要換一套做法)兩項。
