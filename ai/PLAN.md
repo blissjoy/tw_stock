@@ -6292,3 +6292,39 @@ price_dates()`，不受`daily_candidates`限制，只要有股價資料就能選
 (產業別/成交量合計(張)/平均漲跌幅(%)/股票數)都正確顯示，且預設依平均
 漲跌幅由高到低排序；瀏覽器console確認0個JS錯誤。`pytest tests/ -q`1007
 個測試全數通過(共用層函式沒有改動，不需要新增測試)。
+
+## web/桌面版功能對齊 第3批：大盤分析／個股分析拆技術面/籌碼面（2026-08-04）
+
+延續對齊計畫第3項：web版的「📊 大盤分析」/「📊 個股分析」原本是單一區塊
+列完所有規則+總結，桌面版早前已經拆成「技術面」/「籌碼面」兩個可收合區塊
++📌總結分析(各自一句話摘要+跳轉連結)+🔼回頂部連結(見`desktop/main_window.py`
+的`_build_analysis_sections_html()`/`_render_rule_match_blocks()`)，這次
+把同樣的版面結構搬到web。底層規則掃描函式(`analyze_stock_signals()`/
+`stock_detail_data.analyze_chip_signals()`)兩前端共用，不用改動。
+
+跳轉/回頂部機制刻意不沿用桌面版那套`jumpto:///`自訂scheme+Qt
+`anchorClicked`訊號攔截(那是`QTextBrowser`專屬機制)，改用瀏覽器原生錨點
+連結(`<a href="#id">`+`<div id="id">`，透過`st.markdown(...,
+unsafe_allow_html=True)`插入)——Streamlit沒有對應的訊號攔截架構，原生
+錨點導覽是web環境本來就有、不需要額外JS的做法，實測確認瀏覽器會正確捲動
+到對應區塊(不管是巢狀在Streamlit的`stMain`捲動容器裡)。兩個內層區塊改用
+`st.expander(expanded=True)`(預設展開，跟桌面版`_CollapsibleBox`預設展開
+一致)取代桌面版的`QTextBrowser`+`_CollapsibleBox`。
+
+`dashboard/app.py`：`render_price_chart()`內的`_render_analysis_body()`
+拆成`_render_rule_matches()`(逐條規則渲染，技術面/籌碼面共用)+
+`_section_teaser()`(總結分析的一句話摘要文字，比照桌面版格式)+
+`_render_analysis_panel()`(組出📌總結分析+兩個expander的完整版面)，
+`always_show_analysis`(大盤)/個股分析toggle按鈕兩種情境都呼叫同一個
+`_render_analysis_panel()`，只是外層包裝不同(大盤直接顯示，個股包一層
+可收合的`st.expander("📊 個股分析")`)。新增`from src.presentation import
+stock_detail_data`匯入。
+
+真實驗證：本機啟動Streamlit(`LOCAL_DB_PATH`指向DB複本)+Playwright無頭
+瀏覽器，切到「大盤」分頁確認📌總結分析正確顯示技術面/籌碼面各自的一句話
+摘要(大盤籌碼面正確顯示「目前沒有符合任何已接上的籌碼規則」，不是bug)；
+點擊「查看技術面 ↓」確認畫面正確捲動到技術面expander(展開狀態，內容為
+完整規則清單含目前狀態/分析/原文與頁碼)；點擊「🔼 回頂部」確認正確捲回
+📌總結分析區塊頂端(用`stMain.scrollTop`數值變化交叉驗證捲動確實發生，
+不只是視覺上看起來像)；瀏覽器console確認0個JS錯誤。`pytest tests/ -q`
+1007個測試全數通過(純UI版面重組，底層函式未改動，不需要新增測試)。

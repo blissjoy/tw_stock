@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 from src.data.yfinance_client import TAIEX_STOCK_ID  # noqa: E402
 from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
-from src.presentation import chart_data, portfolio_data  # noqa: E402
+from src.presentation import chart_data, portfolio_data, stock_detail_data  # noqa: E402
 from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_FILTER_DEFAULTS,
     CANDIDATE_FILTERS,
@@ -158,19 +158,29 @@ def main() -> None:
         # 「個股分析」面板與「最新交易日分析」摘要都要用，這裡只查一次共用。
         trend_df = load_price_history(conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
 
-        def _render_analysis_body() -> None:
-            signal_matches = analyze_stock_signals(price_df, trend_df=trend_df)
-            if not signal_matches:
-                st.write("目前沒有符合任何已接上規則庫的訊號。")
+        # 2026-08-04起改成「技術面」/「籌碼面」兩個可收合區塊(照抄desktop/main_window.py
+        # 的_build_analysis_sections_html()/_render_rule_match_blocks())：上方先有
+        # 📌總結分析列出兩區塊各自的一句話摘要+跳轉連結，下方兩個st.expander各自展開
+        # (預設展開，跟桌面版_CollapsibleBox預設展開一致)顯示完整規則清單，區塊結尾
+        # 附「🔼回頂部」連結。跳轉/回頂部改用瀏覽器原生錨點連結(<a href="#id">+
+        # <div id="id">)，不是桌面版那套`jumpto:///`+anchorClicked的Qt專屬機制——
+        # Streamlit沒有對應的訊號攔截架構，錨點連結是web原生就有、不需要額外JS的做法。
+        # 籌碼面資料來自stock_detail_data.analyze_chip_signals()，大盤(^TWII)沒有
+        # 法人籌碼資料，讓它自然回傳空list、顯示「目前沒有符合任何已接上的籌碼規則」，
+        # 跟桌面版一致，不是bug。
+        _EMPTY_TEASER = {"tech": "目前沒有符合任何已接上規則庫的訊號。", "chip": "目前沒有符合任何已接上的籌碼規則。"}
+
+        def _render_rule_matches(matches: list[dict]) -> None:
+            if not matches:
+                st.write(_EMPTY_TEASER["tech"])
                 return
-            for m in signal_matches:
+            for m in matches:
                 st.markdown(f"**{m['rule_id']}　{m['title']}（信心{m['confidence']}%）**")
                 # 「目前狀態」(這條規則今天為什麼觸發)排在規則名稱後第一個位置，
                 # 使用者最想先看到的是「現在是什麼情況」，解讀/原文頁碼是補充說明，
-                # 排序上應該讓位。analyze_stock_signals()裡同一個rule_id若對應多筆
-                # 觸發(例如R-TREND-03短期/中期各自獨立判斷都是多頭)，note會是用
-                # 換行接起來的多行文字，這裡逐行各自加註「目前狀態：」/縮排顯示，
-                # 不能假設note永遠是單行字串。
+                # 排序上應該讓位。同一個rule_id若對應多筆觸發(例如R-TREND-03短期/
+                # 中期各自獨立判斷都是多頭)，note會是用換行接起來的多行文字，這裡
+                # 逐行各自加註「目前狀態：」/縮排顯示，不能假設note永遠是單行字串。
                 if m.get("note"):
                     note_lines = m["note"].split("\n")
                     st.caption(f"目前狀態：{note_lines[0]}")
@@ -186,35 +196,57 @@ def main() -> None:
                 if m.get("reference"):
                     st.caption(f"原文與頁碼：{m['reference']}")
                 st.divider()
-            # 「總結分析」放在列完所有規則之後——使用者反映一長串規則清單太雜亂，
-            # 這裡用summarize_signal_matches()統計出的多頭/空頭傾向數量+信心最高的
-            # 規則，讓使用者不用自己從落落長的清單裡歸納重點。
-            summary = summarize_signal_matches(signal_matches)
+
+        def _section_teaser(matches: list[dict], anchor: str) -> str:
+            if not matches:
+                return _EMPTY_TEASER[anchor]
+            summary = summarize_signal_matches(matches)
             top = summary["top_match"]
             top_note = (top.get("note") or "").split("\n")[0] if top else ""
-            st.markdown("**📌 總結分析**")
-            st.write(
+            text = (
                 f"本次共觸發 {summary['total']} 條規則"
                 f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
-                f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。"
+                f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。  \n"
+                f"信心最高的訊號：{top['rule_id']}　{top['title']}（{top['confidence']}%）"
             )
-            st.write(f"信心最高的訊號：{top['rule_id']}　{top['title']}（{top['confidence']}%）")
             if top_note:
-                st.caption(f"目前狀態：{top_note}")
+                text += f"  \n目前狀態：{top_note}"
+            return text
+
+        def _render_analysis_panel() -> None:
+            tech_matches = analyze_stock_signals(price_df, trend_df=trend_df)
+            chip_matches = stock_detail_data.analyze_chip_signals(conn, stock_id)
+            top_anchor, tech_anchor, chip_anchor = f"{widget_key}-analysis-top", f"{widget_key}-tech-section", f"{widget_key}-chip-section"
+
+            st.markdown(f'<div id="{top_anchor}"></div>', unsafe_allow_html=True)
+            st.markdown("**📌 總結分析**")
+            st.markdown(f"**1. 技術面**  \n{_section_teaser(tech_matches, 'tech')}")
+            st.markdown(f'<a href="#{tech_anchor}">查看技術面 ↓</a>', unsafe_allow_html=True)
+            st.markdown(f"**2. 籌碼面**  \n{_section_teaser(chip_matches, 'chip')}")
+            st.markdown(f'<a href="#{chip_anchor}">查看籌碼面 ↓</a>', unsafe_allow_html=True)
+
+            st.markdown(f'<div id="{tech_anchor}"></div>', unsafe_allow_html=True)
+            with st.expander("技術面", expanded=True):
+                _render_rule_matches(tech_matches)
+            st.markdown(f'<a href="#{top_anchor}">🔼 回頂部</a>', unsafe_allow_html=True)
+
+            st.markdown(f'<div id="{chip_anchor}"></div>', unsafe_allow_html=True)
+            with st.expander("籌碼面", expanded=True):
+                _render_rule_matches(chip_matches)
+            st.markdown(f'<a href="#{top_anchor}">🔼 回頂部</a>', unsafe_allow_html=True)
 
         if always_show_analysis:
-            # 大盤分析：直接顯示在K線圖下方，不用st.expander的邊框「盒子」外觀，
+            # 大盤分析：直接顯示在K線圖下方，不用外層st.expander的邊框「盒子」外觀，
             # 也不限制高度，全部展開——大盤只有一檔、位置夠大，不需要像候選清單那樣
-            # 收合節省空間。
+            # 收合節省空間(內層技術面/籌碼面兩個小區塊還是各自可收合)。
             st.markdown("### 📊 大盤分析")
-            _render_analysis_body()
+            _render_analysis_panel()
         elif st.session_state.get(analysis_state_key, False):
             with st.expander("📊 個股分析", expanded=True):
-                _render_analysis_body()
+                _render_analysis_panel()
                 # 面板展開後可能撐得很長(訊號一多)，使用者反映展開後要收合得捲回最上面
-                # 重新點一次上面col6的按鈕很麻煩——在展開內容最下方(不管有沒有符合任何
-                # 規則都顯示)再放一個「收合」按鈕，點了直接把狀態設回False並rerun，
-                # 不用捲動頁面。
+                # 重新點一次上面col6的按鈕很麻煩——在展開內容最下方再放一個「收合」按鈕，
+                # 點了直接把狀態設回False並rerun，不用捲動頁面。
                 if st.button("🔼 收合個股分析", key=f"{widget_key}_analysis_collapse_btn"):
                     st.session_state[analysis_state_key] = False
                     st.rerun()
