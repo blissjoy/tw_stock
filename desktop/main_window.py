@@ -20,8 +20,8 @@ from pathlib import Path
 
 import markdown
 import pandas as pd
-from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QEvent, QRect, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -47,6 +47,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStyle,
+    QStyleOptionButton,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -446,6 +448,57 @@ class _CheckableComboBox(QComboBox):
         else:
             text = f"已選{len(selected)}項：" + "、".join(selected)
         self.lineEdit().setText(text)
+
+
+class _CheckableHeaderView(QHeaderView):
+    """表頭第0欄顯示一個checkbox，點擊切換「全選/取消全選」——2026-08-04新增，供
+    「選股」分頁候選清單表格的勾選欄(見_build_screener_tab())使用。QHeaderView
+    本身沒有原生的checkbox支援，這裡用最小的自訂繪製(paintSection)+點擊判斷
+    (mousePressEvent)達成，不用整合第三方套件；其餘欄位(logical_index != 0)
+    完全交回父類別處理，不影響既有的排序/欄寬調整行為。
+    """
+
+    toggled = Signal(bool)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self._checked = False
+
+    @staticmethod
+    def _checkbox_rect(section_rect: QRect) -> QRect:
+        size = 16
+        x = section_rect.x() + (section_rect.width() - size) // 2
+        y = section_rect.y() + (section_rect.height() - size) // 2
+        return QRect(x, y, size, size)
+
+    def paintSection(self, painter, rect, logical_index) -> None:
+        super().paintSection(painter, rect, logical_index)
+        if logical_index != 0:
+            return
+        painter.save()
+        option = QStyleOptionButton()
+        option.rect = self._checkbox_rect(rect)
+        option.state = QStyle.StateFlag.State_Enabled
+        option.state |= QStyle.StateFlag.State_On if self._checked else QStyle.StateFlag.State_Off
+        self.style().drawControl(QStyle.ControlElement.CE_CheckBox, option, painter)
+        painter.restore()
+
+    def mousePressEvent(self, event) -> None:
+        if self.logicalIndexAt(event.pos()) == 0:
+            self._checked = not self._checked
+            self.updateSection(0)
+            self.toggled.emit(self._checked)
+            return
+        super().mousePressEvent(event)
+
+    def set_checked_silently(self, checked: bool) -> None:
+        """外部同步狀態用(例如_reload_candidates()重新整理表格後，勾選欄全部重置成
+        未勾選，表頭checkbox要跟著反映)——不透過setChecked這種會觸發toggled訊號的
+        命名，避免呼叫端不小心接成迴圈(重新整理→重置表頭→又觸發一次全選/全不選)。
+        """
+        if self._checked != checked:
+            self._checked = checked
+            self.updateSection(0)
 
 
 class _StockEditDialog(QDialog):
@@ -988,6 +1041,11 @@ class MainWindow(QMainWindow):
 
         self.candidates_table = QTableWidget()
         self.candidates_table.setColumnCount(13)
+        # 表頭第0欄用_CheckableHeaderView取代預設的QHeaderView，讓表頭本身就是一個
+        # 「全選/取消全選」的checkbox——2026-08-04新增，必須在setHorizontalHeaderLabels()
+        # 之前設定(晚一步取得的header變數才會是這個自訂類別)。
+        self._candidates_header = _CheckableHeaderView(self.candidates_table)
+        self.candidates_table.setHorizontalHeader(self._candidates_header)
         # 第0欄是勾選欄(見下面_reload_candidates())，2026-08-04新增，供「加入庫存」/
         # 「加入觀察清單」批次動作使用；其餘欄位順序不變，只是索引整體+1。
         self.candidates_table.setHorizontalHeaderLabels([
@@ -1023,6 +1081,7 @@ class MainWindow(QMainWindow):
         # 資料後還要呼叫resizeRowsToContents()讓列高跟著撐開，不然多行內容會被壓在
         # 原本單行的列高裡看不全。
         self.candidates_table.setWordWrap(True)
+        self._candidates_header.toggled.connect(self._on_candidates_select_all_toggled)
         self.candidates_table.itemSelectionChanged.connect(self._on_candidate_selected)
         # 點欄位標題可以排序(股票代號/名稱/產業別/訊號用預設字串排序；進場價/停損價/
         # 漲跌幅/成交量用_NumericTableWidgetItem依實際數值排序，見該類別說明)。
@@ -1501,6 +1560,17 @@ class MainWindow(QMainWindow):
         # 點「批次數」欄位的數字展開/收合該股票明細——原生展開箭頭(點第0欄前面的
         # 小三角)還是照常可以用，這是額外多一個可以點的地方，不是取代原生行為。
         self.inventory_tree.itemClicked.connect(self._on_inventory_tree_item_clicked)
+        # F2編輯/Delete刪除快捷鍵：2026-08-04新增，比照ref-project(ui/widgets/
+        # inventory_list.py)的既有慣例，直接重用「編輯選取」/「刪除選取」按鈕
+        # 同一組handler，不是另外寫一套邏輯。綁在inventory_tree這個widget本身
+        # (不是self/MainWindow)、context設WidgetShortcut，只有這個表格有focus
+        # (使用者點過某一列)時按鍵才生效，不會跟其他分頁的表格互相干擾。
+        self.inventory_edit_shortcut = QShortcut(QKeySequence("F2"), self.inventory_tree)
+        self.inventory_edit_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.inventory_edit_shortcut.activated.connect(self._on_inventory_edit_selected)
+        self.inventory_delete_shortcut = QShortcut(QKeySequence("Delete"), self.inventory_tree)
+        self.inventory_delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.inventory_delete_shortcut.activated.connect(self._on_inventory_delete_selected)
         inventory_layout.addWidget(self.inventory_tree, stretch=1)
 
     def _build_portfolio_table(self, headers: list[str], stretch_column: str | None = None) -> QTableWidget:
@@ -1796,6 +1866,13 @@ class MainWindow(QMainWindow):
         self.watchlist_group_header_table = self._build_watchlist_group_header_table()
         watchlist_layout.addWidget(self.watchlist_group_header_table)
         watchlist_layout.addWidget(self.watchlist_table, stretch=1)
+
+        # Delete刪除快捷鍵：2026-08-04新增，比照庫存清單/ref-project的做法，重用
+        # 「刪除選取」按鈕同一組handler。觀察清單目前只移植Delete(使用者這次沒有
+        # 要求F2)，「編輯選取」維持只能點按鈕。
+        self.watchlist_delete_shortcut = QShortcut(QKeySequence("Delete"), self.watchlist_table)
+        self.watchlist_delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.watchlist_delete_shortcut.activated.connect(self._on_watchlist_delete_selected)
 
         self._restore_watchlist_column_visibility()
         self._reload_watchlist_groups()
@@ -2440,6 +2517,9 @@ class MainWindow(QMainWindow):
             zhu_rule_only=self.zhu_rule_checkbox.isChecked(), as_of_date=latest_date,
         )
         self.candidates_table.setRowCount(0)
+        # 重新整理表格後，勾選欄全部重置成未勾選，表頭的「全選」checkbox要跟著重置，
+        # 不然重篩選後表頭還顯示上一批資料的勾選狀態。
+        self._candidates_header.set_checked_silently(False)
         self.intraday_label.setVisible(is_intraday)
         if latest_date is None:
             self.setWindowTitle("台股每日選股（本機版）— 尚無候選清單")
@@ -2553,6 +2633,15 @@ class MainWindow(QMainWindow):
                 if stock_id_item is not None:
                     stock_ids.append(stock_id_item.text())
         return stock_ids
+
+    def _on_candidates_select_all_toggled(self, checked: bool) -> None:
+        """候選清單表頭的勾選欄checkbox(見_CheckableHeaderView)：切換目前顯示的
+        所有列全選/取消全選。"""
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for row in range(self.candidates_table.rowCount()):
+            item = self.candidates_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
 
     def _on_candidates_add_to_inventory(self) -> None:
         """選股清單「加入庫存」：把勾選的股票各自新增一筆空白批次(成本價/股數留空，

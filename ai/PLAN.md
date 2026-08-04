@@ -6089,3 +6089,32 @@ yfinance來源的volume單位/量級跟schema其餘欄位(原始股數)不一致
   (表頭×2+1檔候選股票)，欄位資料跟桌面版畫面一致；PySide6實際視窗截圖確認
   勾選欄正確顯示、勾選後點「加入庫存」正確寫入一筆空白批次(已有庫存的股票
   正確略過不重複新增)。
+
+## 庫存/觀察清單F2編輯・Delete刪除快捷鍵＋候選清單表頭全選checkbox（2026-08-04）
+
+使用者要求比照`ref-project/tw_stock_analyzer`(ui/widgets/inventory_list.py)
+既有的F2編輯/Delete刪除快捷鍵，移植到本專案的庫存清單；觀察清單只要移植
+Delete刪除；選股清單的勾選欄表頭也要能一鍵全選/取消全選。
+
+- 快捷鍵：`desktop/main_window.py`新增`QShortcut`綁在`inventory_tree`(F2→
+  `_on_inventory_edit_selected`、Delete→`_on_inventory_delete_selected`)跟
+  `watchlist_table`(Delete→`_on_watchlist_delete_selected`)，直接重用既有
+  按鈕的handler，不是另外寫一套邏輯。刻意綁在該表格widget本身(不是self/
+  MainWindow)、context設`Qt.ShortcutContext.WidgetShortcut`，只有該表格有
+  focus(使用者點過某一列)時按鍵才生效，避免多個分頁的表格互相搶快捷鍵。
+- 表頭全選checkbox：新增`_CheckableHeaderView(QHeaderView)`——Qt原生
+  QHeaderView沒有checkbox支援，這裡用最小的自訂繪製(`paintSection`用
+  `QStyle.drawControl(CE_CheckBox, ...)`畫checkbox圖示)+點擊判斷
+  (`mousePressEvent`判斷`logicalIndexAt()`是否為第0欄)達成，其餘欄位完全
+  交回父類別處理、不影響既有排序/欄寬調整行為。`candidates_table`的
+  `setHorizontalHeader()`換成這個自訂類別(要在`setHorizontalHeaderLabels()`
+  之前設定)，`toggled`訊號接`_on_candidates_select_all_toggled()`(全選/
+  取消全選目前顯示的所有列)；`_reload_candidates()`重新整理表格後呼叫
+  `set_checked_silently(False)`把表頭checkbox一併重置，不然重篩選後表頭
+  還顯示上一批資料的勾選狀態。
+- 真實驗證：PySide6實際視窗+`QTest.keyClick()`模擬按鍵，確認F2正確觸發庫存
+  編輯handler、Delete正確觸發庫存/觀察清單刪除handler；直接觸發表頭
+  `toggled`訊號驗證全選邏輯正確勾選所有可見列，並截圖確認表頭checkbox本身
+  正確繪製成勾選狀態。`pytest tests/ -q`1000個測試全數通過(這批純UI快捷鍵/
+  繪製邏輯沒有新增pytest測試，跟表格填值/按鈕點擊等既有UI程式碼一致，用
+  PySide6實際視窗驗證取代)。
