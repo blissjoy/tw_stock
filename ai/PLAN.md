@@ -5820,12 +5820,24 @@ PowerShell `Get-ScheduledTask`查證)，法人資料17:00才公布，但沒有�
 - 真實驗證：用D:\tmp下的DB複本(不動正式DB)測試F/G即時補抓端到端流程——手動清空
   `6488`的F/G資料模擬「剛加入觀察清單的新股票」，用PySide6實際視窗截圖確認切到
   觀察清單分頁後背景自動偵測、呼叫FinMind補回221筆資料、畫面自動重繪出正確的
-  「大戶週變化+0.88%／散戶週變化+0.22%」。⚠️ **TPEx官方OpenAPI端點目前實際打不通**：
-  `requests.get()`對`www.tpex.org.tw`回傳`SSLCertVerificationError: Missing
-  Subject Key Identifier`，用`verify=False`測試證實是TPEx伺服器端憑證本身缺少
-  Subject Key Identifier擴充欄位(不是本機環境或程式碼問題，Google/TWSE/FinMind
-  等其他https站台在同一台機器上都正常)，推測是Python 3.14的OpenSSL更嚴格驗證
-  下才被擋下來。程式碼本身正確處理(`verify=True`保持安全、外層try/except吞下
-  失敗只印訊息，不會讓pipeline中斷)，但這代表TPEx法人買賣超這個新資料來源目前
-  實際上抓不到資料，需要TPEx修好他們的憑證，或retreat改回FinMind逐股抓法。已經
-  告知使用者，尚待決定。
+  「大戶週變化+0.88%／散戶週變化+0.22%」。
+
+## TPEx OpenAPI TLS憑證問題修正（2026-08-04）
+
+上面驗證時發現`requests.get()`對`www.tpex.org.tw`回傳`SSLCertVerificationError:
+Missing Subject Key Identifier`，用`verify=False`測試證實是TPEx伺服器端憑證本身
+缺少Subject Key Identifier擴充欄位(不是本機環境或程式碼問題，Google/TWSE/FinMind
+等其他https站台在同一台機器上都正常)，推測是Python 3.14的OpenSSL更嚴格驗證下才
+被擋下來。使用者提供了`ssl.OP_LEGACY_SERVER_CONNECT`(掛在自訂`HTTPAdapter`的
+SSLContext上)的解法，實測確認可以正常連通。
+
+⚠️ **先驗證這不是「關掉憑證驗證」的變相做法**：用`badssl.com`的憑證/主機名不符
+測試站台實測，掛了這個adapter後依然正確擋下`SSLError`；`ssl_context.verify_mode`
+仍是`CERT_REQUIRED`、`check_hostname`仍是`True`——確認`OP_LEGACY_SERVER_CONNECT`
+只是放寬一個舊式TLS renegotiation相容性選項，不影響憑證鏈/主機名的驗證強度，才
+採用進`src/data/tpex_client.py`的`_LegacyCompatSSLAdapter`(模組層級共用`requests.
+Session`)。真實驗證：用D:\tmp的DB複本呼叫`fetch_today_tpex_institutional()`，
+780檔全部成功寫入(先前因為憑證問題是0檔)。`tests/test_tpex_client.py`新增
+`test_legacy_compat_ssl_adapter_keeps_strict_certificate_verification()`，直接
+檢查adapter建出來的`ssl_context`屬性，鎖定這個安全前提之後不會被意外改掉。
+`pytest tests/ -q`958個測試全數通過。

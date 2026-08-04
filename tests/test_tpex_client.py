@@ -1,4 +1,20 @@
+import ssl
+
 from src.data import tpex_client
+
+
+def test_legacy_compat_ssl_adapter_keeps_strict_certificate_verification():
+    """2026-08-04發現：TPEx的憑證缺少Subject Key Identifier，較新版OpenSSL會拋出
+    SSLCertVerificationError，_LegacyCompatSSLAdapter用OP_LEGACY_SERVER_CONNECT
+    繞過這個特定問題——這裡驗證這個adapter沒有連帶把憑證/主機名驗證整個關掉
+    (那樣會變成verify=False等級的安全降級，不能接受)。"""
+    adapter = tpex_client._LegacyCompatSSLAdapter()
+    adapter.init_poolmanager(connections=10, maxsize=10)
+
+    ctx = adapter.poolmanager.connection_pool_kw["ssl_context"]
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+    assert ctx.options & ssl.OP_LEGACY_SERVER_CONNECT
 
 
 def _fake_response(rows: list[dict]):
@@ -43,7 +59,7 @@ def _raw_row(stock_id: str) -> dict:
 
 
 def test_fetch_institutional_investors_maps_fields_and_avoids_buggy_dealers_key(monkeypatch):
-    monkeypatch.setattr(tpex_client.requests, "get", lambda url, timeout: _fake_response([_raw_row("1264")]))
+    monkeypatch.setattr(tpex_client._session, "get", lambda url, timeout: _fake_response([_raw_row("1264")]))
 
     rows = tpex_client.fetch_institutional_investors()
 
@@ -57,7 +73,7 @@ def test_fetch_institutional_investors_maps_fields_and_avoids_buggy_dealers_key(
 
 def test_fetch_institutional_investors_filters_non_4digit_codes(monkeypatch):
     rows_raw = [_raw_row("1264"), _raw_row("00679B"), _raw_row("6488A")]
-    monkeypatch.setattr(tpex_client.requests, "get", lambda url, timeout: _fake_response(rows_raw))
+    monkeypatch.setattr(tpex_client._session, "get", lambda url, timeout: _fake_response(rows_raw))
 
     rows = tpex_client.fetch_institutional_investors()
 

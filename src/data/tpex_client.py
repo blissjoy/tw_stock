@@ -26,6 +26,18 @@
   「避險」兩欄，因此`fetch_institutional_investors()`把這個合計數整個寫進我們schema的
   `Dealer_self`，`Dealer_Hedging`對TPEx來源的資料列刻意不寫（呼叫端/查詢端要注意這點，
   跟TWSE來源的資料列規則不同）。
+
+⚠️ **TLS憑證問題(2026-08-04發現)**：`www.tpex.org.tw`的憑證缺少Subject Key
+Identifier擴充欄位，較新版本的OpenSSL(這台機器是Python 3.14)會拋出
+`SSLCertVerificationError: Missing Subject Key Identifier`——這是TPEx伺服器端
+憑證本身的問題(用`verify=False`測試過確認站台本身可以連通，且Google/TWSE/FinMind
+等其他https站台在同一台機器都正常，不是本機環境或程式碼問題)。`_build_session()`
+掛上`CustomSSLAdapter`(`ssl.OP_LEGACY_SERVER_CONNECT`，允許不安全的舊式TLS
+renegotiation相容模式)繞過這個特定的鏈結建置問題——**已實測確認`verify_mode`
+仍是`CERT_REQUIRED`、`check_hostname`仍是`True`，且對憑證/主機名真的錯誤的網站
+(`wrong.host.badssl.com`)依然正確擋下`SSLError`，不是變相關掉憑證驗證**，只是放寬
+這一個相容性選項讓建鏈演算法能通過TPEx這個有瑕疵的憑證鏈。之後若TPEx修好自己的
+憑證，這個adapter可以移除，但保留著也不影響其他正常憑證站台的驗證強度。
 """
 
 from __future__ import annotations
@@ -33,9 +45,33 @@ from __future__ import annotations
 import re
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
 
 BASE_URL = "https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading"
 STOCK_CODE_PATTERN = re.compile(r"^\d{4}$")
+
+
+class _LegacyCompatSSLAdapter(HTTPAdapter):
+    """見模組docstring的TLS憑證問題說明——只放寬`OP_LEGACY_SERVER_CONNECT`這一個
+    相容性選項，`cert_reqs`/`check_hostname`維持`create_urllib3_context()`的安全
+    預設值(CERT_REQUIRED/True)不變。"""
+
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context()
+        ctx.load_default_certs()
+        ctx.options |= 0x4  # ssl.OP_LEGACY_SERVER_CONNECT
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+
+def _build_session() -> requests.Session:
+    session = requests.Session()
+    session.mount("https://", _LegacyCompatSSLAdapter())
+    return session
+
+
+_session = _build_session()
 
 _FIELD_MAP = {
     "Foreign_Investor": (
@@ -60,7 +96,7 @@ def fetch_institutional_investors() -> list[dict]:
     """回傳TPEx全市場最新一個交易日的三大法人買賣超，格式對齊`institutional_investors`
     schema(stock_id/date/investor_type/buy/sell)，每檔股票展開成4筆(對應`_FIELD_MAP`的
     4種investor_type)。只保留4碼數字股票代號，過濾掉ETF/債券/基金等非個股列。"""
-    resp = requests.get(BASE_URL, timeout=15)
+    resp = _session.get(BASE_URL, timeout=15)
     resp.raise_for_status()
     raw_rows = resp.json()
 
