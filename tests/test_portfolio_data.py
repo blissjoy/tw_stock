@@ -45,7 +45,7 @@ def test_load_inventory_lots_empty_when_no_holdings():
 
     assert df.empty
     assert list(df.columns) == [
-        "stock_id", "name", "id", "buy_date", "cost_price", "shares", "fee", "note",
+        "stock_id", "name", "listing_type", "id", "buy_date", "cost_price", "shares", "fee", "note",
         "close", "pct_change", "market_value", "sell_fee", "profit", "return_pct", "today_change_value",
         "sar_value", "sar_status", "sar_distance_pct",
     ]
@@ -202,7 +202,7 @@ def test_load_inventory_summary_empty_when_no_holdings():
 
     assert df.empty
     assert list(df.columns) == [
-        "stock_id", "name", "cost_price", "shares", "fee", "lot_count",
+        "stock_id", "name", "listing_type", "cost_price", "shares", "fee", "lot_count",
         "close", "pct_change", "market_value", "sell_fee", "profit", "return_pct", "today_change_value",
         "sar_value", "sar_status", "sar_distance_pct",
     ]
@@ -284,6 +284,30 @@ def test_load_watchlist_returns_only_stocks_in_given_group():
 
     assert df_a["stock_id"].tolist() == ["2330"]
     assert df_b["stock_id"].tolist() == ["2454"]
+
+
+def test_listing_type_color_maps_twse_tpex_emerging_and_defaults_to_black():
+    assert portfolio_data.listing_type_color("twse") == "#0000CC"
+    assert portfolio_data.listing_type_color("tpex") == "#000000"
+    assert portfolio_data.listing_type_color("emerging") == "#555555"
+    assert portfolio_data.listing_type_color(None) == "#000000"
+    assert portfolio_data.listing_type_color("unknown") == "#000000"
+
+
+def test_load_watchlist_includes_listing_type():
+    """2026-08-04新增：listing_type("twse"/"tpex"/"emerging")供觀察清單依市場別
+    顯示不同字體顏色用(藍/黑/灰)，見src/data/finmind_client.py的fetch_stock_
+    info()說明。"""
+    main_conn = _main_conn()
+    portfolio_conn = _portfolio_conn()
+    _seed_stock(main_conn, "2330", "台積電", [{"date": "2026-07-31", "close": 910.0}])
+    upsert_stocks(main_conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "測試業", "listing_type": "twse", "updated_at": "2026-08-02T00:00:00"}])
+    group_id = portfolio_storage.add_watchlist_group(portfolio_conn, "半導體")
+    portfolio_storage.add_watchlist_stock(portfolio_conn, group_id, "2330")
+
+    df = portfolio_data.load_watchlist(main_conn, portfolio_conn, group_id)
+
+    assert df.iloc[0]["listing_type"] == "twse"
 
 
 def test_load_watchlist_without_cost_price_has_none_derived_fields_but_has_price():

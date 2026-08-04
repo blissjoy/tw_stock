@@ -5939,3 +5939,58 @@ FinMind的分類落後超過一年)。但仍有10檔三個官方名冊都查不�
   發現，之後若有需要「人工排除已知的誤判」可以直接`DELETE FROM delisted_stocks`
   移除。最終正式DB共記錄72檔已下市股票(比使用者一開始截圖看到的29檔多，主控台
   當時應該只顯示了部分)。
+
+## 觀察清單依市場別(上市/上櫃/興櫃)上色＋Google Sheet匯出加上更新時間（2026-08-04）
+
+使用者提供友人原始Google Apps Script的參考程式碼，要求：①Google Sheet匯出時
+A1加上這次匯出的時間；②觀察清單股票名稱依市場別上色(上市藍`#0000CC`/上櫃黑
+`#000000`/興櫃灰`#555555`)，桌面版跟Google Sheet都要套用。跟上面「下載錯誤」
+root cause調查是同一條線——`finmind_client.fetch_stock_info()`原本只有TWSE/
+TPEx二分類(興櫃被併進TPEx)，這次要真正區分出興櫃，需要保留FinMind`TaiwanStockInfo`
+的原始`type`欄位。
+
+**額外發現一個真實bug**：參考程式碼提醒「TaiwanStockInfo可能回傳多筆歷史紀錄，
+必須依date排序取最新一筆」——實測我們自己批次抓的4300筆原始資料裡，有1048筆
+股票代號重複(公司市場別曾經變更)，`fetch_stock_info()`原本沒有處理這個情況，
+直接依賴API回傳順序、靠字典覆蓋「湊巧」拿到最新值，沒有明確排序保證，是潛在
+的資料品質風險。這次一併修正。
+
+- `src/data/finmind_client.py`的`fetch_stock_info()`：明確依date由新到舊排序、
+  每個stock_id只留最新一筆；新增`listing_type`欄位(保留原始值"twse"/"tpex"/
+  "emerging")，`market`欄位維持既有TWSE/TPEx二分類語意不變，不影響既有篩選邏輯。
+- `schema.sql`的`stocks`表新增`listing_type`欄位(nullable)，`storage.py`的
+  `_migrate_schema()`补ALTER TABLE；`upsert_stocks()`把`listing_type`當成可選
+  欄位(`.get()`正規化)，`ON CONFLICT`用`COALESCE(excluded.listing_type,
+  stocks.listing_type)`，避免「不知道listing_type」的呼叫(例如只更新股價的
+  路徑)把之前已經記錄過的值覆蓋成NULL。
+- `scripts/daily_pipeline.py`的`fetch_today_twse()`/`fetch_today_tpex()`把
+  `listing_type`從FinMind資料傳進`upsert_stocks()`；「轉上市」備援成功的分支
+  刻意寫死`listing_type="twse"`(不沿用可能過期的FinMind"tpex"分類)，避免跟同時
+  修正的`market="TWSE"`矛盾。
+- `src/presentation/portfolio_data.py`新增`LISTING_TYPE_COLORS`/
+  `listing_type_color()`共用對照表；`_load_price_and_sar_snapshot()`/
+  `_merge_holdings_with_snapshot()`/`load_inventory_summary()`都補上
+  `listing_type`欄位，讓`load_watchlist()`/`load_inventory_lots()`/
+  `load_inventory_summary()`都帶得到這個欄位。
+- `desktop/main_window.py`的`_populate_portfolio_table()`(庫存清單／觀察清單
+  共用)：名稱欄用`listing_type_color()`設定文字顏色。
+- `src/presentation/watchlist_export.py`：`build_group_table()`的A1
+  (header_row0第一欄，跟`_GROUP_LABEL_SPANS`從第11欄開始不衝突)寫入
+  `f"更新時間：{now}"`；名稱欄比照桌面版用同一份`listing_type_color()`上色。
+  順便修掉`export_all_watchlist_groups()`結尾重複兩次`return len(groups)`的
+  無效死碼。
+- 新增/擴充測試：`tests/test_finmind_client.py`(去重複+listing_type，3個)、
+  `tests/test_storage.py`(欄位migration+COALESCE保留，3個)、
+  `tests/test_daily_pipeline.py`(兩條路徑寫入listing_type，2個)、
+  `tests/test_portfolio_data.py`(色彩對照表+load_watchlist欄位，2個，另外
+  修正2個既有測試的欄位順序斷言)、`tests/test_watchlist_export.py`(A1時間戳+
+  名稱上色，2個)；`tests/test_turso_client.py`兩處手刻的最小stocks schema
+  補上listing_type欄位才不會因為新增的NOT NULL-free欄位而SQL執行失敗。
+  `pytest tests/ -q`989個測試全數通過。
+- 真實驗證：用D:\temp_claude的DB複本測試完整流程(FinMind抓取→backfill既有
+  2495檔stocks的listing_type→PySide6實際視窗截圖)，確認觀察清單9檔股票的
+  名稱顏色跟資料庫裡的listing_type完全對應(3037/3532/4958/8046/8261=twse
+  顯示藍色，3675/6182/6488/6693=tpex顯示黑色)；確認正確後直接對正式DB做同一次
+  backfill(2495檔)。Google Sheet匯出的A1時間戳/名稱上色邏輯有對應的單元測試
+  覆蓋，沒有額外觸發真實的Sheets API寫入(下次17:00排程執行`--chip-refresh`時
+  會自然套用)。

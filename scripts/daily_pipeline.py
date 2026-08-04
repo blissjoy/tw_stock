@@ -110,6 +110,7 @@ def fetch_today_twse(
         {
             "stock_id": sid, "name": stock_info_by_id.get(sid, {}).get("name", sid),
             "market": "TWSE", "industry": stock_info_by_id.get(sid, {}).get("industry"),
+            "listing_type": stock_info_by_id.get(sid, {}).get("listing_type"),
             "updated_at": datetime.now().isoformat(),
         }
         for sid in stock_ids
@@ -213,7 +214,8 @@ def fetch_today_tpex(
         row = info_by_id[stock_id]
         storage.upsert_stocks(conn, [{
             "stock_id": stock_id, "name": row.get("name", stock_id), "market": "TPEx",
-            "industry": row.get("industry"), "updated_at": datetime.now().isoformat(),
+            "industry": row.get("industry"), "listing_type": row.get("listing_type"),
+            "updated_at": datetime.now().isoformat(),
         }])
         storage.upsert_stock_prices(conn, prices)
 
@@ -221,7 +223,11 @@ def fetch_today_tpex(
         row = info_by_id[stock_id]
         storage.upsert_stocks(conn, [{
             "stock_id": stock_id, "name": row.get("name", stock_id), "market": "TWSE",
-            "industry": row.get("industry"), "updated_at": datetime.now().isoformat(),
+            # listing_type刻意寫死"twse"、不沿用row.get("listing_type")：這個分支代表
+            # FinMind的分類(可能是"tpex"，已經過期)被.TW後綴的下載成功結果推翻，見上方
+            # docstring的「轉上市」說明，不該讓過期的原始分類值蓋掉這裡剛驗證過的結果。
+            "industry": row.get("industry"), "listing_type": "twse",
+            "updated_at": datetime.now().isoformat(),
         }])
         storage.upsert_stock_prices(conn, prices)
 

@@ -29,7 +29,7 @@ def test_turso_connection_executemany_with_named_params_round_trips():
     """驗證storage.py既有的具名參數SQL透過TursoConnection轉接後，行為與直接用sqlite3一致。"""
     raw = sqlite3.connect(":memory:")
     raw.execute(
-        "CREATE TABLE stocks (stock_id TEXT PRIMARY KEY, name TEXT, market TEXT, industry TEXT, updated_at TEXT)"
+        "CREATE TABLE stocks (stock_id TEXT PRIMARY KEY, name TEXT, market TEXT, industry TEXT, listing_type TEXT, updated_at TEXT)"
     )
     raw.execute(
         "CREATE TABLE stock_prices (stock_id TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, "
@@ -51,7 +51,7 @@ def test_turso_connection_executemany_with_named_params_round_trips():
 def test_turso_connection_executemany_falls_back_to_loop_when_raw_lacks_executemany():
     """模擬底層client沒有executemany的情況(逐列呼叫execute)，確認具名參數仍正確轉換。"""
     raw = sqlite3.connect(":memory:")
-    raw.execute("CREATE TABLE stocks (stock_id TEXT PRIMARY KEY, name TEXT, market TEXT, industry TEXT, updated_at TEXT)")
+    raw.execute("CREATE TABLE stocks (stock_id TEXT PRIMARY KEY, name TEXT, market TEXT, industry TEXT, listing_type TEXT, updated_at TEXT)")
 
     class _NoExecuteMany:
         def __init__(self, inner):

@@ -18,6 +18,23 @@ import pandas as pd
 
 from src.data import portfolio_storage
 
+# 依市場別(stocks.listing_type，見src/data/finmind_client.py的fetch_stock_info()
+# 說明)決定股票名稱的字體顏色：上市藍/上櫃黑/興櫃灰。2026-08-04新增，desktop/
+# main_window.py的庫存/觀察清單表格、src/presentation/watchlist_export.py的
+# Google Sheet匯出都共用這份對照表，確保兩邊顏色一致。
+LISTING_TYPE_COLORS = {
+    "twse": "#0000CC",
+    "tpex": "#000000",
+    "emerging": "#555555",
+}
+DEFAULT_LISTING_TYPE_COLOR = "#000000"
+
+
+def listing_type_color(listing_type: str | None) -> str:
+    """回傳股票名稱字體顏色；查無分類(listing_type是None，例如還沒被daily_
+    pipeline.py更新過的股票)或不認得的值一律用預設黑色，不特別標示錯誤。"""
+    return LISTING_TYPE_COLORS.get(listing_type, DEFAULT_LISTING_TYPE_COLOR)
+
 # 台股手續費：政府公告(牌告)上限費率0.1425%(買賣雙邊都收)，實際收取金額是券商
 # 自訂折扣後的結果，不是政府規定的固定金額——折數依券商/帳戶等級而不同，沒有
 # 統一答案。這裡的折扣依使用者實際持有的鴻海庫存反推校準：3筆分批買入
@@ -77,13 +94,13 @@ def _load_price_and_sar_snapshot(main_conn, stock_ids: list[str]) -> pd.DataFram
     回補)。查無資料的股票不會出現在回傳的DataFrame裡，呼叫端(load_inventory()/
     load_watchlist())用pandas merge(how="left")保留這些股票、缺值欄位為NaN。
     """
-    empty_columns = ["stock_id", "name", "close", "prev_close", "pct_change", "sar_value", "sar_status", "sar_distance_pct"]
+    empty_columns = ["stock_id", "name", "listing_type", "close", "prev_close", "pct_change", "sar_value", "sar_status", "sar_distance_pct"]
     if not stock_ids:
         return pd.DataFrame(columns=empty_columns)
     placeholders = ",".join("?" * len(stock_ids))
     cur = main_conn.execute(
         f"""
-        SELECT s.stock_id, s.name, sp.close AS today_close,
+        SELECT s.stock_id, s.name, s.listing_type, sp.close AS today_close,
                (SELECT sp2.close FROM stock_prices sp2
                 WHERE sp2.stock_id = s.stock_id AND sp2.date < sp.date
                 ORDER BY sp2.date DESC LIMIT 1) AS prev_close,
@@ -152,7 +169,7 @@ def _merge_holdings_with_snapshot(holdings_df: pd.DataFrame, main_conn, extra_co
     是即時模擬出來的假設性支出，不是已經發生的歷史紀錄)，每次呼叫都用目前
     market_value現算，見output_columns裡的`sell_fee`欄位。
     """
-    output_columns = ["stock_id", "name", *extra_columns, "cost_price", "shares", "fee", "note", *_DERIVED_COLUMNS]
+    output_columns = ["stock_id", "name", "listing_type", *extra_columns, "cost_price", "shares", "fee", "note", *_DERIVED_COLUMNS]
     if holdings_df.empty:
         return pd.DataFrame(columns=output_columns)
     snapshot_df = _load_price_and_sar_snapshot(main_conn, holdings_df["stock_id"].tolist())
@@ -217,7 +234,7 @@ def load_inventory_summary(main_conn, portfolio_conn) -> pd.DataFrame:
     lots_df = load_inventory_lots(main_conn, portfolio_conn)
     if lots_df.empty:
         return pd.DataFrame(
-            columns=["stock_id", "name", "cost_price", "shares", "fee", "lot_count", *_DERIVED_COLUMNS],
+            columns=["stock_id", "name", "listing_type", "cost_price", "shares", "fee", "lot_count", *_DERIVED_COLUMNS],
         )
 
     def _aggregate(group: pd.DataFrame) -> pd.Series:
@@ -239,9 +256,11 @@ def load_inventory_summary(main_conn, portfolio_conn) -> pd.DataFrame:
     aggregated = lots_df.groupby("stock_id", as_index=False).apply(_aggregate, include_groups=False)
     holdings_df = aggregated[["stock_id", "cost_price", "shares", "fee"]].copy()
     holdings_df["note"] = ""
+    # listing_type不用從aggregated帶過來——merged下面會透過_merge_holdings_with_
+    # snapshot()自己的stocks JOIN重新查出來，同一檔股票不管幾筆批次(lot)結果都一樣。
     merged = _merge_holdings_with_snapshot(holdings_df, main_conn)
     return merged.merge(aggregated[["stock_id", "lot_count"]], on="stock_id").drop(columns="note")[
-        ["stock_id", "name", "cost_price", "shares", "fee", "lot_count", *_DERIVED_COLUMNS]
+        ["stock_id", "name", "listing_type", "cost_price", "shares", "fee", "lot_count", *_DERIVED_COLUMNS]
     ]
 
 

@@ -13,11 +13,17 @@ PRAGMA foreign_keys = ON;
 
 -- 股票基本資料
 CREATE TABLE IF NOT EXISTS stocks (
-    stock_id    TEXT PRIMARY KEY,      -- 例如 "2330"
-    name        TEXT NOT NULL,         -- 例如 "台積電"
-    market      TEXT NOT NULL,         -- "TWSE" 或 "TPEx"
-    industry    TEXT,                  -- 產業別
-    updated_at  TEXT NOT NULL          -- 本筆資料最後更新時間(ISO8601字串)
+    stock_id      TEXT PRIMARY KEY,      -- 例如 "2330"
+    name          TEXT NOT NULL,         -- 例如 "台積電"
+    market        TEXT NOT NULL,         -- "TWSE" 或 "TPEx"（興櫃併入TPEx，見listing_type）
+    industry      TEXT,                  -- 產業別
+    listing_type  TEXT,                  -- FinMind TaiwanStockInfo原始市場別："twse"/"tpex"/
+                                          -- "emerging"(興櫃)，2026-08-04新增，只給觀察清單
+                                          -- 依市場別顯示不同字體顏色用，不影響market欄位既有
+                                          -- 的篩選/分類邏輯（見src/data/finmind_client.py
+                                          -- fetch_stock_info()的說明）。可能是NULL(來源沒有
+                                          -- 提供，例如大盤INDEX這種特殊列)。
+    updated_at    TEXT NOT NULL          -- 本筆資料最後更新時間(ISO8601字串)
 );
 
 -- 每日股價OHLCV（欄位對應 FinMind TaiwanStockPrice，與TWSE官方開放資料語意相同）

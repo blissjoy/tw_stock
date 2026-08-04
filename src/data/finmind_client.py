@@ -85,16 +85,33 @@ def _get(dataset: str, data_id: str | None = None, start_date: str | None = None
 
 
 def fetch_stock_info() -> list[dict]:
-    """股票基本資料，涵蓋上市(twse)+上櫃(tpex)，用於填 stocks 參考表。"""
+    """股票基本資料，涵蓋上市(twse)+上櫃(tpex)+興櫃(emerging)，用於填 stocks 參考表。
+
+    ⚠️ 2026-08-04發現：TaiwanStockInfo對同一檔股票會回傳多筆歷史紀錄(公司市場別/
+    產業別曾經變更過，例如興櫃轉上櫃、上櫃轉上市——實測4300筆原始資料裡有1048筆
+    股票代號重複)，不能直接假設API回傳順序、用最後一筆當最新資料。這裡明確依date
+    由新到舊排序、每個stock_id只保留最新一筆，避免抓到過期的market/industry分類
+    (這正是先前「下載錯誤」誤判成「上櫃還沒收盤」的根因之一——見ai/PLAN.md)。
+
+    market欄位維持既有的TWSE/TPEx二分類(興櫃併入TPEx)，不變動既有篩選邏輯的語意；
+    `listing_type`是2026-08-04新增的原始分類值("twse"/"tpex"/"emerging")，供
+    觀察清單依市場別(上市/上櫃/興櫃)顯示不同字體顏色用，不影響market欄位既有的
+    篩選/分類邏輯。
+    """
     raw_rows = _get("TaiwanStockInfo")
+    raw_rows.sort(key=lambda r: r["date"], reverse=True)
+    latest_by_id: dict[str, dict] = {}
+    for r in raw_rows:
+        latest_by_id.setdefault(r["stock_id"], r)
     return [
         {
             "stock_id": r["stock_id"],
             "name": r["stock_name"],
             "market": "TWSE" if r.get("type") == "twse" else "TPEx",
             "industry": r.get("industry_category"),
+            "listing_type": r.get("type"),
         }
-        for r in raw_rows
+        for r in latest_by_id.values()
     ]
 
 

@@ -1373,6 +1373,10 @@ class MainWindow(QMainWindow):
                 item = item_cls(str(value))
                 if col_idx in _PORTFOLIO_NUMERIC_COLUMNS:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if col_idx == 1:
+                    # 名稱欄依市場別上色(上市藍/上櫃黑/興櫃灰)，2026-08-04新增，
+                    # 跟Google Sheet匯出(watchlist_export.py)共用同一份對照表。
+                    item.setForeground(QColor(portfolio_data.listing_type_color(row.get("listing_type"))))
                 table.setItem(row_idx, col_idx, item)
         table.setSortingEnabled(True)
         table.resizeRowsToContents()

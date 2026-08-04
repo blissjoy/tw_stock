@@ -100,6 +100,21 @@ def test_fetch_today_twse_stores_real_name_and_industry_from_finmind(monkeypatch
     assert row == ("台積電", "半導體")
 
 
+def test_fetch_today_twse_stores_listing_type_from_finmind(monkeypatch):
+    """2026-08-04新增：listing_type("twse"/"tpex"/"emerging")供觀察清單依市場別
+    顯示不同字體顏色用，見src/data/finmind_client.py的fetch_stock_info()說明。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+
+    stock_info_by_id = {"2330": {"name": "台積電", "industry": "半導體", "listing_type": "twse"}}
+    daily_pipeline.fetch_today_twse(conn, "20260722", stock_info_by_id)
+
+    row = conn.execute("SELECT listing_type FROM stocks WHERE stock_id = '2330'").fetchone()
+    assert row == ("twse",)
+
+
 def test_fetch_today_twse_falls_back_to_stock_id_when_name_unknown(monkeypatch):
     """FinMind名單可能沒有100%涵蓋所有代號，查不到時退回用代號本身當name，不應該crash。"""
     conn = _fresh_conn()
@@ -458,6 +473,39 @@ def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):
 
     row = conn.execute("SELECT market, name FROM stocks WHERE stock_id = '6488'").fetchone()
     assert row == ("TPEx", "環球晶")
+
+
+def test_fetch_today_tpex_stores_listing_type_from_finmind(monkeypatch):
+    """2026-08-04新增：正常TPEx下載成功時，listing_type沿用FinMind提供的原始分類
+    ("tpex"或"emerging")。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "4578", "name": "總格精密", "market": "TPEx", "industry": None, "listing_type": "emerging"}]
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
+        lambda *a, **k: {"4578": [_price_row(stock_id="4578")]},
+    )
+
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    row = conn.execute("SELECT listing_type FROM stocks WHERE stock_id = '4578'").fetchone()
+    assert row == ("emerging",)
+
+
+def test_fetch_today_tpex_reclassified_to_twse_overrides_stale_listing_type(monkeypatch):
+    """轉上市備援成功時，listing_type要寫成"twse"，不能沿用FinMind可能過期的"tpex"
+    分類——不然會跟同時被修正的market="TWSE"矛盾。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "6472", "name": "保瑞", "market": "TPEx", "industry": "醫藥", "listing_type": "tpex"}]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_twse_prices_batch",
+        lambda stock_ids, start_date, end_date: {"6472": [_price_row(stock_id="6472")]},
+    )
+
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    row = conn.execute("SELECT market, listing_type FROM stocks WHERE stock_id = '6472'").fetchone()
+    assert row == ("TWSE", "twse")
 
 
 def test_fetch_today_tpex_filters_out_non_4_digit_codes(monkeypatch):

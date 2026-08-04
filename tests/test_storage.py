@@ -128,6 +128,52 @@ def test_ensure_schema_adds_ma200_column_to_pre_existing_daily_indicators_table(
     assert row[0] == 12.0
 
 
+def test_ensure_schema_adds_listing_type_column_to_pre_existing_stocks_table():
+    """2026-08-04新增：listing_type是在stocks表已經有真實使用者資料後才新增的欄位，
+    同一個理由需要ALTER TABLE補上(見schema.sql說明)。"""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE stocks (
+            stock_id TEXT PRIMARY KEY, name TEXT NOT NULL, market TEXT NOT NULL,
+            industry TEXT, updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+    ensure_schema(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(stocks)").fetchall()}
+    assert "listing_type" in columns
+
+
+def test_upsert_stocks_writes_listing_type_when_provided():
+    conn = _fresh_db()
+    upsert_stocks(conn, [
+        {"stock_id": "4578", "name": "總格精密", "market": "TPEx", "industry": None,
+         "listing_type": "emerging", "updated_at": "2026-08-04"},
+    ])
+    row = conn.execute("SELECT listing_type FROM stocks WHERE stock_id = '4578'").fetchone()
+    assert row == ("emerging",)
+
+
+def test_upsert_stocks_does_not_clobber_known_listing_type_when_later_call_omits_it():
+    """有些呼叫端(例如只更新股價的路徑)不知道listing_type，這種呼叫不應該把之前
+    已經記錄過的值覆蓋成NULL——用COALESCE保留舊值。"""
+    conn = _fresh_db()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體",
+         "listing_type": "twse", "updated_at": "2026-08-04T10:00:00"},
+    ])
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體",
+         "updated_at": "2026-08-04T11:00:00"},
+    ])
+    row = conn.execute("SELECT listing_type FROM stocks WHERE stock_id = '2330'").fetchone()
+    assert row == ("twse",)
+
+
 def test_ensure_schema_migration_is_idempotent_when_ma200_already_exists():
     """既有表已經有ma200欄位時(一般每天在跑的DB)，重複呼叫ensure_schema()不應該因為
     重複ALTER TABLE ADD COLUMN而丟例外。"""

@@ -50,6 +50,35 @@ def test_build_group_table_group_label_row_has_merges_and_background():
     assert (0, 17, 0, 24) in table["merges"]  # 法人買賣超8欄合併
 
 
+def test_build_group_table_a1_has_export_timestamp():
+    """2026-08-04新增：A1(header_row0第一欄)要放這次匯出的時間，使用者才知道
+    Google Sheet上的資料是什麼時候匯出的。"""
+    main_conn = _main_conn()
+    portfolio_conn = _portfolio_conn()
+    group_id = add_watchlist_group(portfolio_conn, "測試群組")
+
+    table = watchlist_export.build_group_table(main_conn, portfolio_conn, group_id)
+
+    assert table["values"][0][0].startswith("更新時間：")
+
+
+def test_build_group_table_colors_name_column_by_listing_type():
+    """2026-08-04新增：名稱欄依市場別上色(上市藍/上櫃黑/興櫃灰)，跟desktop/
+    main_window.py的觀察清單表格共用同一份對照表(src.presentation.portfolio_
+    data.listing_type_color())。"""
+    main_conn = _main_conn()
+    portfolio_conn = _portfolio_conn()
+    _seed_stock(main_conn, "2330", "台積電", 100.0)
+    upsert_stocks(main_conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "listing_type": "twse", "updated_at": "2026-08-03"}])
+    group_id = add_watchlist_group(portfolio_conn, "測試群組")
+    add_watchlist_stock(portfolio_conn, group_id, "2330", cost_price=None, shares=None, note=None)
+
+    table = watchlist_export.build_group_table(main_conn, portfolio_conn, group_id)
+
+    name_col = 1  # "股票代號","名稱"是前兩欄
+    assert table["text_colors"][(2, name_col)] == "#0000CC"
+
+
 def test_build_group_table_empty_group_still_has_headers():
     main_conn = _main_conn()
     portfolio_conn = _portfolio_conn()

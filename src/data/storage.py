@@ -36,6 +36,10 @@ def _migrate_schema(conn) -> None:
     if "ma200" not in existing_columns:
         conn.execute("ALTER TABLE daily_indicators ADD COLUMN ma200 REAL")
 
+    stocks_columns = {row[1] for row in conn.execute("PRAGMA table_info(stocks)").fetchall()}
+    if "listing_type" not in stocks_columns:
+        conn.execute("ALTER TABLE stocks ADD COLUMN listing_type TEXT")
+
 
 def init_db(db_path: str | Path, check_same_thread: bool = True) -> sqlite3.Connection:
     """依 schema.sql 建立(或沿用既有)本機檔案資料庫，回傳已開啟的連線。
@@ -50,16 +54,26 @@ def init_db(db_path: str | Path, check_same_thread: bool = True) -> sqlite3.Conn
 
 
 def upsert_stocks(conn: sqlite3.Connection, rows: list[dict]) -> None:
-    """rows的每個dict需含 stock_id/name/market/industry/updated_at 欄位。"""
+    """rows的每個dict需含 stock_id/name/market/industry/updated_at 欄位。
+
+    listing_type(2026-08-04新增，見schema.sql說明)是可選欄位——不是每個呼叫端都
+    有這份資料(例如fetch_today_taiex()只知道market="INDEX"，不會有FinMind的
+    twse/tpex/emerging分類)，這裡用.get()正規化成一定有這個key，缺值時寫入NULL
+    但用COALESCE(excluded.listing_type, stocks.listing_type)，不會讓「不知道
+    listing_type」的呼叫(例如只更新股價的路徑)把之前已經記錄過的值覆蓋成NULL。
+    """
+    normalized_rows = [{**row, "listing_type": row.get("listing_type")} for row in rows]
     conn.executemany(
         """
-        INSERT INTO stocks (stock_id, name, market, industry, updated_at)
-        VALUES (:stock_id, :name, :market, :industry, :updated_at)
+        INSERT INTO stocks (stock_id, name, market, industry, listing_type, updated_at)
+        VALUES (:stock_id, :name, :market, :industry, :listing_type, :updated_at)
         ON CONFLICT(stock_id) DO UPDATE SET
             name = excluded.name, market = excluded.market,
-            industry = excluded.industry, updated_at = excluded.updated_at
+            industry = excluded.industry,
+            listing_type = COALESCE(excluded.listing_type, stocks.listing_type),
+            updated_at = excluded.updated_at
         """,
-        rows,
+        normalized_rows,
     )
     conn.commit()
 

@@ -65,8 +65,8 @@ def test_fetch_stock_info_maps_market(monkeypatch):
     def fake_get(dataset, **kwargs):
         assert dataset == "TaiwanStockInfo"
         return [
-            {"stock_id": "2330", "stock_name": "台積電", "type": "twse", "industry_category": "半導體業"},
-            {"stock_id": "6488", "stock_name": "環球晶", "type": "tpex", "industry_category": "半導體業"},
+            {"stock_id": "2330", "stock_name": "台積電", "type": "twse", "industry_category": "半導體業", "date": "2026-08-04"},
+            {"stock_id": "6488", "stock_name": "環球晶", "type": "tpex", "industry_category": "半導體業", "date": "2026-08-04"},
         ]
 
     monkeypatch.setattr(finmind_client, "_get", fake_get)
@@ -75,6 +75,35 @@ def test_fetch_stock_info_maps_market(monkeypatch):
     assert by_id["2330"]["market"] == "TWSE"
     assert by_id["6488"]["market"] == "TPEx"
     assert by_id["2330"]["name"] == "台積電"
+
+
+def test_fetch_stock_info_maps_emerging_to_tpex_market_but_keeps_raw_listing_type(monkeypatch):
+    """興櫃(emerging)併入market="TPEx"(維持既有二分類語意不變)，但listing_type
+    保留原始值"emerging"，供觀察清單依市場別(上市/上櫃/興櫃)顯示不同字體顏色用。"""
+    def fake_get(dataset, **kwargs):
+        return [{"stock_id": "4578", "stock_name": "總格精密", "type": "emerging", "industry_category": "電子零組件業", "date": "2026-08-04"}]
+
+    monkeypatch.setattr(finmind_client, "_get", fake_get)
+    rows = finmind_client.fetch_stock_info()
+    assert rows[0]["market"] == "TPEx"
+    assert rows[0]["listing_type"] == "emerging"
+
+
+def test_fetch_stock_info_deduplicates_keeping_latest_date_per_stock(monkeypatch):
+    """2026-08-04發現：TaiwanStockInfo對同一檔股票會回傳多筆歷史紀錄(市場別曾經
+    變更過)，必須明確依date取最新一筆，不能依賴API回傳順序。"""
+    def fake_get(dataset, **kwargs):
+        return [
+            {"stock_id": "3687", "stock_name": "新品牌", "type": "twse", "industry_category": "新產業", "date": "2026-06-29"},
+            {"stock_id": "3687", "stock_name": "舊品牌", "type": "tpex", "industry_category": "舊產業", "date": "2020-06-03"},
+            {"stock_id": "3687", "stock_name": "最新品牌", "type": "twse", "industry_category": "最新產業", "date": "2026-08-04"},
+        ]
+
+    monkeypatch.setattr(finmind_client, "_get", fake_get)
+    rows = finmind_client.fetch_stock_info()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "最新品牌"
+    assert rows[0]["industry"] == "最新產業"
 
 
 def test_fetch_stock_prices_maps_fields(monkeypatch):

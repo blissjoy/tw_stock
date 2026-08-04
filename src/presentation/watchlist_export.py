@@ -11,6 +11,8 @@ Qt Widget。
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 
 from src.data import google_sheets_client, portfolio_storage
@@ -120,9 +122,15 @@ def build_group_table(main_conn, portfolio_conn, group_id: int) -> dict:
     for col in range(_TOTAL_COLUMNS):
         bold_cells.add((1, col))
 
+    # A1(header_row0第一欄)固定放這次匯出的時間，跟_GROUP_LABEL_SPANS(從第11欄
+    # 開始)不會衝突——2026-08-04新增，使用者才知道Google Sheet上的資料是什麼時候
+    # 匯出的，不用回頭對照桌面版的「資料更新至」才能判斷是否過期。
+    header_row0[0] = f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
     values: list[list[str]] = [header_row0, header_row1]
     text_colors: dict[tuple[int, int], str] = {}
 
+    name_col = _BASE_HEADERS.index("名稱")
     for i, row in enumerate(df.reset_index(drop=True).to_dict("records")):
         row_series = pd.Series(row)
         row_idx = i + 2  # 前2列是表頭
@@ -130,6 +138,9 @@ def build_group_table(main_conn, portfolio_conn, group_id: int) -> dict:
         chip_values, chip_text_colors = _chip_row_values_and_text_colors(chip_row, row_idx)
         values.append(_base_row_values(row_series) + chip_values)
         text_colors.update(chip_text_colors)
+        # 名稱欄依市場別上色(上市藍/上櫃黑/興櫃灰)，跟desktop/main_window.py的
+        # 觀察清單表格共用src.presentation.portfolio_data.listing_type_color()。
+        text_colors[(row_idx, name_col)] = portfolio_data.listing_type_color(row_series.get("listing_type"))
 
     return {
         "values": values,
@@ -172,5 +183,4 @@ def export_all_watchlist_groups(
             main_conn, portfolio_conn, group["id"], group["group_name"], resolved_spreadsheet_id,
             interactive=interactive,
         )
-    return len(groups)
     return len(groups)
