@@ -36,6 +36,8 @@ from src.presentation.chart_data import (  # noqa: E402
     get_latest_update_time,
     list_candidate_dates,
     list_industries,
+    list_price_dates,
+    load_industry_rotation,
     load_stock_universe_for_date,
     load_holidays_for_chart,
     load_price_history,
@@ -54,7 +56,8 @@ TAIEX_DISPLAY_NAME = "台股加權指數"
 TAB_MARKET = "大盤"
 TAB_SCREENER = "選股"
 TAB_STOCK_DETAIL = "個股資訊"
-TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL]
+TAB_INDUSTRY_ROTATION = "產業輪動"
+TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL, TAB_INDUSTRY_ROTATION]
 
 
 def _format_month_day(date_str: str) -> str:
@@ -537,6 +540,40 @@ def main() -> None:
             render_price_chart(detail_stock_id, widget_key="detail")
         else:
             st.info("請輸入股票代號或名稱查詢，或到「選股」分頁點選候選股票。")
+
+    elif active_tab == TAB_INDUSTRY_ROTATION:
+        # 「產業輪動」：某一天各產業別的成交量加總/平均漲跌幅/股票數，看資金比較集中往
+        # 哪個產業移動——照抄桌面版desktop/main_window.py的_build_industry_rotation_
+        # tab()/_refresh_industry_rotation_tab()，底層查詢函式(chart_data.list_price_
+        # dates()/load_industry_rotation())兩前端共用。日期選單不受daily_candidates
+        # 限制(跟「選股」分頁的候選清單日期選單不同)，只要有股價資料就能選。
+        price_dates = list_price_dates(conn)
+        rotation_date = (
+            st.selectbox("日期", price_dates, index=0, key="industry_rotation_date_select")
+            if price_dates else None
+        )
+        update_ts = get_latest_update_time(conn)
+        update_label = datetime.fromisoformat(update_ts).strftime("%Y-%m-%d %H:%M") if update_ts else "尚無資料"
+        st.caption(f"資料更新至　{update_label}")
+        rotation_df, latest_date = load_industry_rotation(conn, target_date=rotation_date)
+        if latest_date is None or rotation_df.empty:
+            st.info("目前沒有股價資料可以計算產業輪動。")
+        else:
+            # 依平均漲跌幅由高到低排序，一打開就能看到資金最集中流入的產業排最前面，
+            # 照抄桌面版的預設排序慣例(不用先手動點一次欄位標題排序)。
+            rotation_df = rotation_df.sort_values("avg_pct_change", ascending=False).reset_index(drop=True)
+            rotation_df["total_volume_lots"] = (rotation_df["total_volume"] // 1000).astype(int)
+            st.subheader(f"產業輪動（{latest_date}）")
+            st.dataframe(
+                rotation_df, use_container_width=True, hide_index=True,
+                column_order=["industry", "total_volume_lots", "avg_pct_change", "stock_count"],
+                column_config={
+                    "industry": "產業別",
+                    "total_volume_lots": st.column_config.NumberColumn("成交量合計(張)", format="%d"),
+                    "avg_pct_change": st.column_config.NumberColumn("平均漲跌幅(%)", format="%+.2f%%"),
+                    "stock_count": st.column_config.NumberColumn("股票數", format="%d"),
+                },
+            )
 
 
 if __name__ == "__main__":

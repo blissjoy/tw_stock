@@ -6269,3 +6269,26 @@ docstring寫「只給desktop使用」，這次移除這個過時的假設)。
 KD四個子圖、左上角資訊框正確更新成當天數值、Y軸浮動價格標籤正確跟隨游標，
 跟桌面版效果一致；瀏覽器console確認0個JS錯誤。`pytest tests/ -q`1007個
 測試全數通過(這批純UI/渲染邏輯改動，沒有新增測試，跟現有慣例一致)。
+
+## web/桌面版功能對齊 第2批：新增「產業輪動」分頁（2026-08-04）
+
+延續web/桌面版功能對齊計畫，這次做第2項：把桌面版7個分頁裡web完全沒有的
+「產業輪動」補上——某一天各產業別的成交量加總/平均漲跌幅/股票數，用來看
+資金比較集中往哪個產業移動。這個分頁沒有依賴其他還沒補的功能，底層查詢
+函式(`chart_data.list_price_dates()`/`load_industry_rotation()`)本來就是
+兩前端共用層，桌面版早就在用，這次只是照抄`desktop/main_window.py`的
+`_build_industry_rotation_tab()`/`_refresh_industry_rotation_tab()`邏輯
+補一份web版UI，沒有動任何共用層程式碼。
+
+`dashboard/app.py`：`TAB_OPTIONS`新增`TAB_INDUSTRY_ROTATION`("產業輪動")，
+排在「個股資訊」後面(跟桌面版分頁順序一致)；新分頁內容：日期選單(`list_
+price_dates()`，不受`daily_candidates`限制，只要有股價資料就能選)、
+「資料更新至」說明文字、表格依「平均漲跌幅(%)」由高到低排序(照抄桌面版
+`sortByColumn()`的預設排序慣例，一打開就看到資金最集中流入的產業排最前
+面)，`total_volume`(原始股數)換算成「張」顯示。
+
+真實驗證：本機啟動Streamlit(`LOCAL_DB_PATH`指向DB複本)+Playwright無頭
+瀏覽器，切到「產業輪動」分頁截圖確認：日期選單/資料更新至文字/表格四欄
+(產業別/成交量合計(張)/平均漲跌幅(%)/股票數)都正確顯示，且預設依平均
+漲跌幅由高到低排序；瀏覽器console確認0個JS錯誤。`pytest tests/ -q`1007
+個測試全數通過(共用層函式沒有改動，不需要新增測試)。
