@@ -6118,3 +6118,18 @@ Delete刪除；選股清單的勾選欄表頭也要能一鍵全選/取消全選�
   正確繪製成勾選狀態。`pytest tests/ -q`1000個測試全數通過(這批純UI快捷鍵/
   繪製邏輯沒有新增pytest測試，跟表格填值/按鈕點擊等既有UI程式碼一致，用
   PySide6實際視窗驗證取代)。
+
+## 選股清單名稱欄也依市場別上色（2026-08-04）
+
+使用者指出選股清單漏了這個——Google Sheet匯出、觀察清單/庫存清單桌面表格
+(`_populate_portfolio_table()`)都已經套用`listing_type_color()`上色，但
+`_reload_candidates()`(選股分頁桌面表格本身)漏掉了，只有底層資料
+(`chart_data.load_stock_universe_for_date()`的`listing_type`欄位)有，沒有
+真的拿來設定`QTableWidgetItem`的文字顏色。補上同一行`item.setForeground(...)`，
+四處(觀察清單/庫存清單桌面表格、Google Sheet匯出兩處、選股清單桌面表格)
+現在共用同一份對照表，不會再有遺漏。
+
+真實驗證：PySide6實際視窗，關掉均線/SAR篩選讓候選清單出現更多股票，截圖+
+直接讀取`item.foreground().color().name()`確認名稱欄顏色正確對應
+listing_type(`#0000cc`=twse多數股票、`#000000`=8111立碁這檔tpex)。`pytest
+tests/ -q`1000個測試全數通過(純UI顯示邏輯，跟其餘三處同一種驗證方式)。

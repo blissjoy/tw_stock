@@ -2580,6 +2580,12 @@ class MainWindow(QMainWindow):
                     # 跟右邊格線的間距由candidates_table的stylesheet(padding-right)處理，
                     # 不是緊貼著格線。
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if col_offset == 1:
+                    # 名稱欄依市場別上色(上市藍/上櫃黑/興櫃灰)，2026-08-04新增，跟觀察
+                    # 清單/庫存清單(_populate_portfolio_table())、Google Sheet匯出
+                    # (watchlist_export.py)共用同一份src.presentation.portfolio_data.
+                    # listing_type_color()對照表。
+                    item.setForeground(QColor(portfolio_data.listing_type_color(row.get("listing_type"))))
                 # 部分欄位內容常常比欄寬長、會被截斷看不到完整內容(尤其訊號欄位同時符合多條
                 # 規則時)；設定tooltip讓滑鼠移過去任一儲存格都能懸浮顯示完整文字，不用特別
                 # 放寬欄寬。
