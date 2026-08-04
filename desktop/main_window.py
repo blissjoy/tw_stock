@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
@@ -93,9 +94,11 @@ _MARKET_FILTER_VALUES = {"上市": "TWSE", "上櫃": "TPEx"}
 CANDIDATE_SIGNAL_MAX_LINES = 5
 
 # 觀察清單表格共用的欄位結構(見_populate_portfolio_table())：
-# 股票代號/名稱/現價/漲跌幅(%)/成本價/持股數/市值/帳面損益/報酬率(%)/SAR狀態/SAR距離%/備註
+# 股票代號/名稱/現價/漲跌幅(%)/成本價/持股數/市值/帳面損益/報酬率(%)/SAR狀態/SAR距離%
+# 2026-08-04：使用者要求拿掉「備註」欄位(觀察清單用不到，庫存清單的備註是
+# _INVENTORY_TREE_HEADERS另一份獨立清單，不受影響)。
 _PORTFOLIO_NUMERIC_COLUMNS = {2, 3, 4, 5, 6, 7, 8, 10}
-_PORTFOLIO_BASE_COLUMN_COUNT = 12
+_PORTFOLIO_BASE_COLUMN_COUNT = 11
 
 # 黃豐凱籌碼分析法(見src/indicators/huang_chip_signals.py，程式碼來源private)接在
 # 觀察清單表格既有12欄之後的額外欄位——2026-08-04新增，只接進觀察清單，跟_PORTFOLIO_
@@ -126,6 +129,19 @@ _WATCHLIST_COLUMN_TOGGLE_GROUPS: dict[str, list[int]] = {
 }
 _WATCHLIST_TECH_TOGGLE_COLUMNS = [9, 10]  # SAR狀態/SAR距離%
 _WATCHLIST_CHIP_TOGGLE_COLUMNS = list(range(_PORTFOLIO_BASE_COLUMN_COUNT, _PORTFOLIO_BASE_COLUMN_COUNT + len(_HUANG_CHIP_HEADERS)))
+
+# 黃豐凱籌碼分析法欄位的「雙列表頭」分類群組(見_build_watchlist_group_header_table())：
+# 比照temp/鉸哥籌碼.jpg截圖的分類方式(法人近期籌碼/大戶散戶持股變化(週)/技術型態/
+# 法人買賣超（張數）)，{顯示文字: (底色, 欄位索引清單)}——這4組是視覺分類，跟「欄位
+# 顯示」下拉選單的顯示/隱藏開關粒度(籌碼面整組一起開關)是分開的兩件事，這裡只負責
+# 標籤怎麼分組顯示，不影響開關邏輯。前面11欄(股票代號~SAR距離%)是既有欄位，不屬於
+# 黃豐凱籌碼分析法，這排分類標籤在那個範圍留空。
+_WATCHLIST_CHIP_GROUP_LABELS: list[tuple[str, str, list[int]]] = [
+    ("法人近期籌碼", "#FCEBEB", [11, 12]),
+    ("大戶/散戶持股變化(週)", "#EEEDFE", [13, 14]),
+    ("技術型態", "#E1F5EE", [15, 16]),
+    ("法人買賣超（張數）", "#FAEEDA", [17, 18, 19, 20, 21, 22, 23, 24]),
+]
 
 # 庫存清單改用QTreeWidget(彙總父列+可展開的批次明細子列，見_populate_inventory_
 # tree())的欄位結構——父列/子列共用同一組欄，欄位語意見_build_inventory_tab()。
@@ -622,6 +638,36 @@ class PipelineWorker(QThread):
                 conn.close()
 
 
+class WatchlistExportWorker(QThread):
+    """背景執行緒呼叫watchlist_export.export_all_watchlist_groups()，避免「匯出到
+    Google Sheet」按鈕卡住UI主執行緒——這是網路呼叫(Google Sheets API)，加上OAuth
+    token可能需要刷新，耗時不可預期。跟PipelineWorker同一個理由，開獨立連線，不
+    重用MainWindow.conn/portfolio_conn(同一個sqlite3連線物件不該被主執行緒跟背景
+    執行緒同時使用)。
+    """
+
+    finished_ok = Signal(int)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        from src.presentation import watchlist_export
+
+        main_conn = None
+        portfolio_conn = None
+        try:
+            main_conn = get_default_connection()
+            portfolio_conn = get_default_portfolio_connection()
+            count = watchlist_export.export_all_watchlist_groups(main_conn, portfolio_conn)
+            self.finished_ok.emit(count)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            if main_conn is not None:
+                main_conn.close()
+            if portfolio_conn is not None:
+                portfolio_conn.close()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -644,6 +690,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "庫存清單資料庫連線失敗", str(exc))
 
         self._pipeline_worker: PipelineWorker | None = None
+        self._watchlist_export_worker: WatchlistExportWorker | None = None
         self._current_stock_id: str | None = None
         # 目前「個股資訊」分頁顯示的股票是從候選清單哪一天的選股策略點進來的("YYYY-MM-DD"
         # 字串)；手動查詢時設為None，右上角的來源標籤(self.stock_source_label)就不顯示
@@ -1276,7 +1323,6 @@ class MainWindow(QMainWindow):
                 f"{row['return_pct']:+.2f}" if pd.notna(row["return_pct"]) else "-",
                 row["sar_status"] if pd.notna(row["sar_status"]) else "-",
                 f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-",
-                row["note"] if pd.notna(row["note"]) and row["note"] else "",
             ]
             for col_idx, value in enumerate(values):
                 item_cls = _NumericTableWidgetItem if col_idx in _PORTFOLIO_NUMERIC_COLUMNS else QTableWidgetItem
@@ -1630,6 +1676,13 @@ class MainWindow(QMainWindow):
         self.watchlist_column_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._build_watchlist_column_menu()
         toolbar.addWidget(self.watchlist_column_button)
+        # 「匯出到Google Sheet」：2026-08-04新增，見WatchlistExportWorker/
+        # src/presentation/watchlist_export.py——把全部觀察清單群組(不只目前選取的
+        # 這個)各自匯出成一個分頁，跟daily_pipeline.py的自動排程共用同一套匯出邏輯。
+        self.watchlist_export_btn = QPushButton("匯出到Google Sheet")
+        self.watchlist_export_btn.setToolTip("把全部觀察清單群組匯出到Google Sheet，每個群組各自一個分頁")
+        self.watchlist_export_btn.clicked.connect(self._on_watchlist_export_clicked)
+        toolbar.addWidget(self.watchlist_export_btn)
         toolbar.addStretch()
         # 「資料更新至」：比照「大盤」分頁既有的做法(見_build_market_tab())，放在
         # 工具列最右邊、灰色小字。
@@ -1639,14 +1692,93 @@ class MainWindow(QMainWindow):
         watchlist_layout.addLayout(toolbar)
 
         self.watchlist_table = self._build_portfolio_table(
-            ["股票代號", "名稱", "現價", "漲跌幅(%)", "參考成本價", "參考股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "備註"]
+            ["股票代號", "名稱", "現價", "漲跌幅(%)", "參考成本價", "參考股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%"]
             + _HUANG_CHIP_HEADERS,
-            stretch_column="備註",
+            stretch_column="名稱",
         )
+        self.watchlist_group_header_table = self._build_watchlist_group_header_table()
+        watchlist_layout.addWidget(self.watchlist_group_header_table)
         watchlist_layout.addWidget(self.watchlist_table, stretch=1)
 
         self._restore_watchlist_column_visibility()
         self._reload_watchlist_groups()
+
+    def _build_watchlist_group_header_table(self) -> QTableWidget:
+        """黃豐凱籌碼分析法欄位的「雙列表頭」：QHeaderView本身不支援跨欄合併儲存格，
+        這裡改用「疊一個獨立的1列QTableWidget在主表格正上方，欄數/欄寬/水平捲動都
+        跟主表格同步」的常見Qt多層表頭技巧(見_sync_watchlist_group_header()、
+        _on_watchlist_column_toggled())，不是動主表格本身的資料列——那樣會跟現有
+        「點欄位標題排序」衝突(排序會把假標頭列當成普通資料一起排進去，沒辦法固定
+        釘在最上面)。
+
+        這個表格本身隱藏了自己的水平/垂直標頭(row數字、column名稱都不顯示，主表格
+        的QHeaderView本來就會顯示真正的欄位名稱)、不可選取/不可編輯、沒有自己的
+        捲軸(水平捲動完全由主表格的捲軸帶動，見_build_watchlist_tab()的訊號連接)，
+        單純拿QTableWidget的cell/span機制來畫「一整排跨欄合併的分類色塊」。
+        """
+        table = QTableWidget()
+        table.setRowCount(1)
+        table.setColumnCount(self.watchlist_table.columnCount())
+        table.horizontalHeader().hide()
+        # ⚠️ 2026-08-04修正：原本用verticalHeader().hide()，結果這排標籤全部往左偏移了
+        # 一整欄——主表格的QTableWidget左邊還有原生的「列號」欄(1、2、3...這欄，
+        # 使用者用截圖圈起來抓到這個問題)，那欄本身也佔寬度，隱藏掉自己的垂直標頭
+        # 等於少算了這段寬度，導致這裡的欄位位置跟主表格的欄位對不齊。改成不隱藏、
+        # 但寬度跟主表格的列號欄同步(見_sync_watchlist_group_header())、內容留空，
+        # 讓這欄「佔位但不顯示數字」，兩個表格的欄位位置才會真正對齊。
+        table.setVerticalHeaderItem(0, QTableWidgetItem(""))
+        table.setFixedHeight(30)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        table.setShowGrid(False)  # 不要讓合併儲存格範圍內還看得到格線，才會像一整塊色塊
+        table.setStyleSheet(
+            "QTableWidget { border: none; gridline-color: transparent; }"
+            "QTableWidget::item { padding: 0px; }"
+            "QHeaderView::section { background: transparent; border: none; }"
+        )
+
+        for label, color, cols in _WATCHLIST_CHIP_GROUP_LABELS:
+            start_col = cols[0]
+            item = QTableWidgetItem(label)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setBackground(QColor(color))
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            table.setItem(0, start_col, item)
+            if len(cols) > 1:
+                table.setSpan(0, start_col, 1, len(cols))
+        for col in range(table.columnCount()):
+            if table.item(0, col) is None:
+                table.setItem(0, col, QTableWidgetItem(""))
+
+        # 水平捲動完全跟著主表格走：使用者橫向捲動主表格時，這排分類標籤要跟著同步
+        # 移動，不然畫面看起來像是標籤「脫離」了底下真正的欄位。
+        self.watchlist_table.horizontalScrollBar().valueChanged.connect(table.horizontalScrollBar().setValue)
+        return table
+
+    def _sync_watchlist_group_header(self) -> None:
+        """把主表格目前每一欄的實際寬度/隱藏狀態複製到分類標籤列——這個表格的欄位是
+        ResizeToContents(依內容自動調寬)+「名稱」欄Stretch，使用者不能用滑鼠拖曳
+        調欄寬，所以欄寬只會在①重新整理資料後(內容變寬變窄)、②「欄位顯示」被切換
+        後這兩個時機改變，呼叫端在這兩處呼叫這個方法就夠，不需要即時監聽resize事件。
+
+        連主表格「列號」欄(最左邊顯示1、2、3...的原生欄位)的寬度也要一起同步——這欄
+        的寬度會隨列數增加而變寬(例如超過9列後要多留一位數的空間給"10")，兩邊沒對齊
+        會讓整排標籤跟著往左或往右偏移，見_build_watchlist_group_header_table()的
+        修正說明。
+        """
+        header_table = self.watchlist_group_header_table
+        main_table = self.watchlist_table
+        if header_table.columnCount() != main_table.columnCount():
+            header_table.setColumnCount(main_table.columnCount())
+        header_table.verticalHeader().setFixedWidth(main_table.verticalHeader().width())
+        for col in range(main_table.columnCount()):
+            header_table.setColumnWidth(col, main_table.columnWidth(col))
+            header_table.setColumnHidden(col, main_table.isColumnHidden(col))
 
     def _app_settings(self) -> QSettings:
         """整個桌面版共用的持久化設定(QSettings，Windows上實際存在登錄檔)——2026-08-04
@@ -1656,65 +1788,90 @@ class MainWindow(QMainWindow):
         """
         return QSettings("tw_stock", "desktop")
 
+    def _add_watchlist_column_checkbox(self, parent_menu: QMenu, label: str, key: str, columns: list[int]) -> None:
+        """把一個可勾選項目加進選單，用QWidgetAction包一個真正的QCheckBox元件，不是
+        單純的checkable QAction——2026-08-04改版：使用者反映用checkable QAction時，
+        每點一下勾選框選單就整個關閉，要重新點「欄位顯示」才能繼續勾下一個，體驗很差。
+        QMenu預設行為是「任何QAction被觸發就關閉選單」，但點擊QWidgetAction包住的
+        真正widget(這裡是QCheckBox)屬於widget自己處理滑鼠事件，不會觸發QAction的
+        triggered訊號，QMenu因此不會跟著關閉——這是Qt的標準做法，不是workaround。
+        選單會在使用者點擊選單以外的地方時自然關閉(QMenu本身的既有行為)。
+        """
+        checkbox = QCheckBox(label, parent_menu)
+        checkbox.setChecked(True)
+        checkbox.toggled.connect(lambda checked, k=key, c=columns: self._on_watchlist_column_toggled(k, c, checked))
+        widget_action = QWidgetAction(parent_menu)
+        widget_action.setDefaultWidget(checkbox)
+        parent_menu.addAction(widget_action)
+        self._watchlist_column_actions[key] = (checkbox, columns)
+
     def _build_watchlist_column_menu(self) -> None:
         """組出「欄位顯示」下拉選單：Qt沒有原生的「下拉+樹狀勾選」元件，這裡用
-        QToolButton+QMenu(內含checkable QAction，技術面/籌碼面用子選單QMenu.addMenu())
-        組出同樣的效果。「全部顯示」是一般(非checkable)action，點一下把其餘所有
-        checkable action都設成勾選；「股票代號/名稱/現價/漲跌幅」是識別用欄位，
-        不放進選單、永遠顯示；「備註」使用者要求先不用做成可切換選項，也不放進來。
+        QToolButton+QMenu(內含QWidgetAction包的QCheckBox，技術面/籌碼面用子選單
+        QMenu.addMenu())組出同樣的效果，見_add_watchlist_column_checkbox()。
+        「全部顯示」是一般(非checkable)action，點一下把其餘所有勾選框都設成勾選；
+        「股票代號/名稱/現價/漲跌幅」是識別用欄位，不放進選單、永遠顯示；「備註」
+        欄位使用者要求直接拿掉，不是保留但不可切換。
 
-        每個checkable action的toggled訊號都接到_on_watchlist_column_toggled()，
-        依欄位索引清單顯示/隱藏對應的QTableWidget欄位，並把狀態存進QSettings，供
+        每個checkbox的toggled訊號都接到_on_watchlist_column_toggled()，依欄位索引
+        清單顯示/隱藏對應的QTableWidget欄位，並把狀態存進QSettings，供
         _restore_watchlist_column_visibility()下次開啟APP時還原。
         """
         menu = QMenu(self.watchlist_column_button)
-        self._watchlist_column_actions: dict[str, tuple[object, list[int]]] = {}
+        self._watchlist_column_actions: dict[str, tuple[QCheckBox, list[int]]] = {}
 
         show_all_action = menu.addAction("全部顯示")
         show_all_action.triggered.connect(self._on_watchlist_show_all_columns)
         menu.addSeparator()
 
         for label, cols in _WATCHLIST_COLUMN_TOGGLE_GROUPS.items():
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(True)
-            action.toggled.connect(lambda checked, key=label, c=cols: self._on_watchlist_column_toggled(key, c, checked))
-            self._watchlist_column_actions[label] = (action, cols)
+            self._add_watchlist_column_checkbox(menu, label, label, cols)
 
         tech_menu = menu.addMenu("技術面")
-        tech_action = tech_menu.addAction("SAR狀態／SAR距離%")
-        tech_action.setCheckable(True)
-        tech_action.setChecked(True)
-        tech_action.toggled.connect(
-            lambda checked: self._on_watchlist_column_toggled("技術面", _WATCHLIST_TECH_TOGGLE_COLUMNS, checked)
-        )
-        self._watchlist_column_actions["技術面"] = (tech_action, _WATCHLIST_TECH_TOGGLE_COLUMNS)
+        self._add_watchlist_column_checkbox(tech_menu, "SAR狀態／SAR距離%", "技術面", _WATCHLIST_TECH_TOGGLE_COLUMNS)
 
         chip_menu = menu.addMenu("籌碼面")
-        chip_action = chip_menu.addAction("投信/外資/大戶/散戶/均線/週K/買賣超張數")
-        chip_action.setCheckable(True)
-        chip_action.setChecked(True)
-        chip_action.toggled.connect(
-            lambda checked: self._on_watchlist_column_toggled("籌碼面", _WATCHLIST_CHIP_TOGGLE_COLUMNS, checked)
+        self._add_watchlist_column_checkbox(
+            chip_menu, "投信/外資/大戶/散戶/均線/週K/買賣超張數", "籌碼面", _WATCHLIST_CHIP_TOGGLE_COLUMNS
         )
-        self._watchlist_column_actions["籌碼面"] = (chip_action, _WATCHLIST_CHIP_TOGGLE_COLUMNS)
 
         self.watchlist_column_button.setMenu(menu)
 
     def _on_watchlist_show_all_columns(self) -> None:
-        for action, _cols in self._watchlist_column_actions.values():
-            action.setChecked(True)
+        for checkbox, _cols in self._watchlist_column_actions.values():
+            checkbox.setChecked(True)
 
     def _on_watchlist_column_toggled(self, group_key: str, columns: list[int], checked: bool) -> None:
         for col in columns:
             self.watchlist_table.setColumnHidden(col, not checked)
         self._app_settings().setValue(f"watchlist/column_visible/{group_key}", checked)
+        self._sync_watchlist_group_header()
 
     def _restore_watchlist_column_visibility(self) -> None:
         settings = self._app_settings()
-        for group_key, (action, _cols) in self._watchlist_column_actions.items():
+        for group_key, (checkbox, _cols) in self._watchlist_column_actions.items():
             checked = settings.value(f"watchlist/column_visible/{group_key}", True, type=bool)
-            action.setChecked(checked)  # 觸發toggled，連帶套用setColumnHidden()
+            checkbox.setChecked(checked)  # 觸發toggled，連帶套用setColumnHidden()
+
+    def _on_watchlist_export_clicked(self) -> None:
+        if self._watchlist_export_worker is not None and self._watchlist_export_worker.isRunning():
+            return
+        self.watchlist_export_btn.setEnabled(False)
+        self.watchlist_export_btn.setText("匯出中...")
+        self._watchlist_export_worker = WatchlistExportWorker()
+        self._watchlist_export_worker.finished_ok.connect(self._on_watchlist_export_finished)
+        self._watchlist_export_worker.failed.connect(self._on_watchlist_export_failed)
+        self._watchlist_export_worker.start()
+
+    def _on_watchlist_export_finished(self, group_count: int) -> None:
+        self.watchlist_export_btn.setEnabled(True)
+        self.watchlist_export_btn.setText("匯出到Google Sheet")
+        QMessageBox.information(self, "匯出完成", f"已匯出{group_count}個觀察清單群組到Google Sheet。")
+
+    def _on_watchlist_export_failed(self, error_message: str) -> None:
+        self.watchlist_export_btn.setEnabled(True)
+        self.watchlist_export_btn.setText("匯出到Google Sheet")
+        QMessageBox.critical(self, "匯出失敗", error_message)
 
     def _reload_watchlist_groups(self) -> None:
         """重新整理群組下拉選單，找不到任何群組時自動建立一個「預設觀察清單」
@@ -1749,6 +1906,7 @@ class MainWindow(QMainWindow):
         df = portfolio_data.load_watchlist(self.conn, self.portfolio_conn, group_id)
         self._populate_portfolio_table(self.watchlist_table, df)
         self._populate_huang_chip_columns(self.watchlist_table, df)
+        self._sync_watchlist_group_header()
         self.watchlist_summary_label.setText(
             self._portfolio_summary_text(df, "總參考成本", "總觀察市值", "累積預估損益"),
         )

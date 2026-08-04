@@ -34,10 +34,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import finmind_client, storage, twse_client, yfinance_client  # noqa: E402
+from src.data.connection import get_default_portfolio_connection  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
-from src.presentation import chart_data, pipeline_status  # noqa: E402
+from src.presentation import chart_data, pipeline_status, watchlist_export  # noqa: E402
 from src.screener.daily_screener import refresh_indicator_window, run_screen_and_store  # noqa: E402
 
 
@@ -349,6 +350,22 @@ def run_daily_pipeline(
                 send_email(f"[每日選股] {iso_date}", format_candidates_email_body(iso_date, notify_candidates))
             except Exception as exc:  # noqa: BLE001
                 print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
+
+            # 觀察清單自動匯出Google Sheet(src/presentation/watchlist_export.py)：
+            # 2026-08-04新增，跟LINE/Email同一種「獨立try/except、失敗不影響已寫入的
+            # 候選清單」精神。interactive=False——自動排程沒有人在旁邊完成瀏覽器登入，
+            # 本機沒有可用/可刷新的token時會直接拋出GoogleAuthRequiresInteractionError
+            # (見google_sheets_client.py)，這裡當一般失敗處理、印出訊息即可，不會讓
+            # pipeline卡住等待永遠不會來的瀏覽器互動。
+            try:
+                portfolio_conn = get_default_portfolio_connection()
+                try:
+                    group_count = watchlist_export.export_all_watchlist_groups(conn, portfolio_conn, interactive=False)
+                    print(f"觀察清單已匯出Google Sheet：{group_count}個群組")
+                finally:
+                    portfolio_conn.close()
+            except Exception as exc:  # noqa: BLE001
+                print(f"觀察清單匯出Google Sheet失敗（略過，不影響已寫入的候選清單）：{exc}")
 
         pipeline_status.append_run_snapshot(conn, iso_date, is_intraday, len(candidates))
         pipeline_status.write_status("done", date=iso_date, candidate_count=len(candidates))

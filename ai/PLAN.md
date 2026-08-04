@@ -5651,3 +5651,104 @@ private，非書籍/公開出處)，原本是Google Sheet「籌碼追蹤」表�
   顯示、顏色正確(投信/外資紅綠、大戶/散戶紅綠相反、K~R數字正負著色)、「欄位
   顯示」下拉選單的「籌碼面」子選單勾選/取消勾選能正確一次隱藏/顯示全部14欄、
   「資料更新至」正確顯示股價資料時間。驗證截圖已從scratchpad清除。
+
+## 觀察清單雙列表頭改版＋下拉選單體驗修正（2026-08-04）
+
+使用者用截圖回報三個問題：①拿掉「備註」欄位；②雙列表頭做成「合併儲存格」的
+效果（比照溫哥`temp/鉸哥籌碼.jpg`的分類色塊）；③「欄位顯示」下拉選單每點一個
+勾選框就整個關閉，要重新點才能繼續勾下一個。
+
+- 拿掉「備註」：`_build_portfolio_table`/`_populate_portfolio_table`目前只有
+  觀察清單在用(庫存清單已經改用QTreeWidget、有自己獨立的`_INVENTORY_TREE_
+  HEADERS`)，直接從觀察清單的欄位清單/填值邏輯移掉，不影響庫存清單。
+  `_PORTFOLIO_BASE_COLUMN_COUNT`12→11，「名稱」欄改吃原本的Stretch空間。
+- 「欄位顯示」選單改用`QWidgetAction`包一個真正的`QCheckBox`元件，取代原本的
+  checkable QAction——QMenu預設「任何QAction被觸發就關閉」，但點擊
+  QWidgetAction包住的真正widget是widget自己處理滑鼠事件，不會觸發QAction的
+  triggered訊號，選單就不會跟著關閉，這是Qt的標準做法。
+- 雙列表頭：Qt的QHeaderView本身不支援跨欄合併儲存格，改用「疊一個獨立的1列
+  QTableWidget在主表格正上方，欄數/欄寬/水平捲動都跟主表格同步」的常見Qt多層
+  表頭技巧——新增`_build_watchlist_group_header_table()`/`_sync_watchlist_
+  group_header()`。⚠️ 第一版有個對齊bug：這個獨立表格`verticalHeader().hide()`
+  導致整排標籤往左偏移一整欄（使用者用截圖圈出主表格最左邊的「列號」欄，抓到
+  問題所在）——主表格本身還有原生列號欄(1、2、3...)佔了一段寬度，隱藏掉自己的
+  垂直標頭等於少算了這段寬度。修正成不隱藏、但寬度跟主表格的列號欄同步、內容
+  留空，兩個表格的欄位位置才真正對齊。額外加`setShowGrid(False)`讓合併範圍內
+  沒有格線、更像一整塊色塊。
+- `pytest tests/ -q`926個測試全數通過(這幾項都是UI調整，用PySide6實際視窗
+  截圖驗證：備註欄消失、雙列表頭色塊正確對齊四組分類、下拉選單勾選籌碼面能
+  正確一次隱藏/顯示全部14欄且選單不會關閉)。
+
+## 全DB法人資料缺口掃描＋TPEx法人買賣超資料回補（2026-08-04）
+
+延續上面：使用者提供`temp/鉸哥籌碼-0803.jpg`(真正0803 20:00後的最新資料)核對，
+發現6488/6182/3675/6693幾檔的D/E/K~R完全對不上，甚至方向相反。追查發現根因：
+`scripts/daily_pipeline.py`自2026-07-23起TPEx股價改用yfinance批次下載後，該
+檔案docstring明講「法人與融資融券還沒有任何規則在用，所以TPEx仍然只抓股價，
+需要時再另外補」——TPEx股票的法人資料從那之後就沒有再被每天更新過，是刻意
+延後、不是bug漏掉。全DB掃描證實：2495檔股票裡710檔(幾乎全是TPEx)完全沒有
+法人資料、另外695檔資料落後超過3天(559檔落後8~14天、136檔落後15天以上，
+17檔例外是TWSE、其餘都是TPEx)。使用者要求「這個必須處理，而且要全db掃描，
+不然以後就會踩雷」，選擇「先補齊現有缺口，之後再決定要不要排程」。
+
+- 新增`scripts/backfill_tpex_institutional_gaps.py`：用FinMind的逐股
+  `TaiwanStockInstitutionalInvestorsBuySell`(已有節流機制)補資料，只抓最近
+  120個曆日(涵蓋`huang_chip_data.INSTITUTIONAL_LOOKBACK_DAYS`所需範圍)，不是
+  全歷史回補；篩掉純4碼普通股票以外的ETF/債券/權證代號(跟`twse_client.
+  STOCK_CODE_PATTERN`同一個定義，測試`--limit 5`時發現沒篩選會抓到00744B這類
+  債券ETF代號、永遠查無資料，白白浪費額度)。每次執行都重新掃描目前DB實際缺
+  什麼，不依賴狀態檔，idempotent、中斷可直接重跑。
+- 背景執行約1292檔的全量回補：補上1205檔、87檔FinMind確實查無資料(例如
+  已下市/交易清淡的股票)、0個錯誤。
+- 回補後重新驗證：6488/6182/3675/6693這4檔的D/E/K~R(40/20/10/5日)全部逐位元
+  完全吻合截圖，之前完全沒資料的6693現在也對上了；3037/8046/3532/8261維持
+  原本「20/10/5日吻合、40日有小誤差」的已知正常現象；只有4958的投信部分仍然
+  對不上——直接重新呼叫FinMind即時比對，數字跟本地DB一致，確認不是資料缺口
+  問題(回補前後一樣)，是參考截圖本身那個時間點的資料差異，非本地bug，判定
+  無法再往下查(沒有朋友那邊確切的擷取時間點可以對照)。
+
+## 觀察清單自動匯出Google Sheet（2026-08-04）
+
+使用者要求把觀察清單(含黃豐凱籌碼分析法D~R欄位)自動輸出到Google Sheet，範圍
+全部群組、手動+自動排程都要、保留原本的顏色格式。
+
+認證方式的曲折：原本規劃用服務帳戶(Service Account)金鑰(免使用者互動、最適合
+背景自動執行)，但使用者的Google Cloud專案有「強制執行的組織政策
+iam.disableServiceAccountKeyCreation」，個人帳號沒有機構層級權限可以解除，
+改用OAuth Desktop app使用者登入這條路。中間又踩了兩個坑：①第一個專案的OAuth
+consent screen的User Type是「Internal」(該Google帳號隸屬某機構網域)，導致
+「已封鎖存取權」——改用另一個確定沒有機構綁定的帳號重新建一個全新專案；②新
+專案忘記啟用Google Sheets API，第一次呼叫直接403，啟用後即可。
+
+- `src/data/config.py`新增`get_google_oauth_client_config()`/
+  `get_google_sheet_id()`——OAuth client secret JSON整份內容存成單一環境變數
+  `GOOGLE_OAUTH_CLIENT_SECRET_JSON`(跟`FINMIND_API_TOKEN`等其他密鑰同一個
+  慣例，不是另外存檔案)，`.env.example`同步補上範例格式。
+- 新增`src/data/google_sheets_client.py`：OAuth Desktop app授權流程(第一次跳
+  瀏覽器登入、之後用本機`data/google_oauth_token.json`快取的token，過期時用
+  refresh token自動換發)＋通用的Sheets讀寫/格式化(`write_formatted_table()`：
+  清空重寫、套用儲存格底色/文字色/粗體/合併儲存格)。⚠️ `interactive`參數是
+  背景排程安全閥：`daily_pipeline.py`自動執行時沒有人在旁邊完成瀏覽器登入，
+  如果本機沒有可用/可刷新的token，原本會呼叫`run_local_server()`卡住等待永遠
+  不會來的callback，讓整條pipeline掛住——改成`interactive=False`時直接拋出
+  `GoogleAuthRequiresInteractionError`，呼叫端當一般失敗處理即可。
+- 新增`src/presentation/watchlist_export.py`：組裝層，把每個觀察清單群組的
+  資料(跟桌面版觀察清單同一份`portfolio_data.load_watchlist()`+`huang_chip_
+  data.load_huang_chip_row()`)組成要寫入的表格(雙列表頭分類色塊+D~R文字顏色)，
+  一個群組對應一個Google Sheet分頁。顏色比照原始參考來源/桌面版UI用「文字
+  顏色」而非儲存格底色(只有分類群組標籤列用底色)。
+- `requirements.txt`新增`gspread`/`google-auth`/`google-auth-oauthlib`；
+  `.gitignore`新增`data/google_oauth_token.json`(程式自己讀寫的憑證快取，
+  不是人手動維護的設定，不進版控)。
+- 桌面版：`desktop/main_window.py`新增`WatchlistExportWorker`(背景執行緒，
+  避免網路呼叫卡住UI，理由跟既有的`PipelineWorker`一致)＋觀察清單工具列新增
+  「匯出到Google Sheet」按鈕。
+- `scripts/daily_pipeline.py`：在LINE/Email通知之後，比照同一種「獨立
+  try/except、失敗不影響已寫入的候選清單」精神，加上`watchlist_export.
+  export_all_watchlist_groups(conn, portfolio_conn, interactive=False)`。
+- 完成第一次真正的即時測試(使用者實際完成瀏覽器登入同意)：OAuth登入成功、
+  token正確快取到本機；之後用`interactive=False`(daily_pipeline.py會用的
+  路徑)重新測試，直接沿用快取token、不再跳瀏覽器，確認自動排程情境可行。
+  `pytest tests/ -q`934個測試全數通過(新增`test_watchlist_export.py`4個、
+  `test_google_sheets_client.py`4個，後者專門驗證`interactive=False`在
+  「沒有token」「token過期無refresh_token」時正確拋例外、不會卡住)。

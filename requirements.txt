@@ -24,3 +24,12 @@ yfinance>=1.4.1
 # HTML顯示用(desktop/main_window.py的_open_rule_reference_window())。純Python、無C
 # 擴充套件，本機已驗證3.10.3可正常運作。
 markdown>=3.7
+
+# 觀察清單自動匯出Google Sheet(src/data/google_sheets_client.py)：2026-08-04新增。
+# gspread包一層Sheets API操作介面(讀寫儲存格、格式化、建立分頁)；google-auth/
+# google-auth-oauthlib負責OAuth Desktop app授權流程(使用者的Google Cloud專案關閉了
+# 服務帳戶金鑰建立功能，改用OAuth使用者登入，見config.py的get_google_oauth_client_
+# config()說明)。
+gspread>=6.1
+google-auth>=2.32
+google-auth-oauthlib>=1.2

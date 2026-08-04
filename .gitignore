@@ -29,4 +29,8 @@ data/pipeline_status.json
 # append_run_snapshot())，純本機事後診斷用途，會持續增長，不需要進版控
 data/pipeline_run_history.jsonl
 
+# Google Sheets匯出(src/data/google_sheets_client.py)的OAuth授權後token快取——程式自己
+# 讀寫、內容會隨token刷新不斷改變，不是人手動維護的設定(那些放在.env)，純本機憑證，不進版控
+data/google_oauth_token.json
+
 temp/
