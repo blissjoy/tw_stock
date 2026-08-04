@@ -216,6 +216,13 @@ def list_watchlist_stock_ids(conn: sqlite3.Connection, group_id: int) -> list[st
     return [row[0] for row in cur.fetchall()]
 
 
+def list_all_watchlist_stock_ids(conn: sqlite3.Connection) -> list[str]:
+    """跨所有群組去重後的股票代號清單，供daily_pipeline.py的F/G每日重抓範圍判斷用
+    (只重抓「目前在觀察清單裡」的股票，不是全市場)。"""
+    cur = conn.execute("SELECT DISTINCT stock_id FROM watchlist_stocks ORDER BY stock_id")
+    return [row[0] for row in cur.fetchall()]
+
+
 def list_watchlist_rows(conn: sqlite3.Connection, group_id: int) -> list[dict]:
     """一次查出指定群組所有股票的stock_id/cost_price/shares/note，供src/presentation/
     portfolio_data.py組DataFrame用，避免逐檔各自查一次(N+1查詢)。"""

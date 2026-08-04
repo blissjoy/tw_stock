@@ -760,3 +760,183 @@ def test_run_daily_pipeline_continues_when_taiex_update_raises(monkeypatch):
     candidates = daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
 
     assert candidates == []  # screen_all_stocks本身回傳空list，跟大盤更新失敗與否無關，只驗證沒有中斷拋出
+
+
+# ============================================================
+# fetch_today_tpex_institutional / refresh_watchlist_holder_shares (2026-08-04新增)
+# ============================================================
+
+
+def _fresh_portfolio_conn():
+    import sqlite3
+
+    from src.data import portfolio_storage
+    conn = sqlite3.connect(":memory:")
+    portfolio_storage.ensure_portfolio_schema(conn)
+    return conn
+
+
+def test_fetch_today_tpex_institutional_writes_rows_and_upserts_stocks(monkeypatch):
+    conn = _fresh_conn()
+    fake_rows = [
+        {"stock_id": "1264", "date": "2026-08-03", "investor_type": "Foreign_Investor", "buy": 1000, "sell": 500},
+        {"stock_id": "1264", "date": "2026-08-03", "investor_type": "Dealer_self", "buy": 9000, "sell": 9137},
+    ]
+    monkeypatch.setattr(daily_pipeline.tpex_client, "fetch_institutional_investors", lambda: fake_rows)
+
+    count = daily_pipeline.fetch_today_tpex_institutional(conn, {"1264": {"name": "test名稱", "industry": "測試業"}})
+
+    assert count == 1
+    stock_row = conn.execute("SELECT name, market, industry FROM stocks WHERE stock_id = '1264'").fetchone()
+    assert stock_row == ("test名稱", "TPEx", "測試業")
+    rows = conn.execute(
+        "SELECT investor_type, buy, sell FROM institutional_investors WHERE stock_id = '1264' ORDER BY investor_type"
+    ).fetchall()
+    assert rows == [("Dealer_self", 9000, 9137), ("Foreign_Investor", 1000, 500)]
+
+
+def test_fetch_today_tpex_institutional_falls_back_to_stock_id_when_no_stock_info(monkeypatch):
+    conn = _fresh_conn()
+    fake_rows = [{"stock_id": "1264", "date": "2026-08-03", "investor_type": "Foreign_Investor", "buy": 1, "sell": 0}]
+    monkeypatch.setattr(daily_pipeline.tpex_client, "fetch_institutional_investors", lambda: fake_rows)
+
+    count = daily_pipeline.fetch_today_tpex_institutional(conn, {})
+
+    assert count == 1
+    stock_row = conn.execute("SELECT name FROM stocks WHERE stock_id = '1264'").fetchone()
+    assert stock_row == ("1264",)
+
+
+def test_fetch_today_tpex_institutional_returns_zero_when_no_rows(monkeypatch):
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.tpex_client, "fetch_institutional_investors", lambda: [])
+
+    assert daily_pipeline.fetch_today_tpex_institutional(conn, {}) == 0
+
+
+def test_refresh_watchlist_holder_shares_only_covers_watchlist_stocks(monkeypatch):
+    from src.data import portfolio_storage
+
+    conn = _fresh_conn()
+    storage.upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-08-04"}])
+    portfolio_conn = _fresh_portfolio_conn()
+    group_id = portfolio_storage.add_watchlist_group(portfolio_conn, "半導體")
+    portfolio_storage.add_watchlist_stock(portfolio_conn, group_id, "2330")
+
+    fetch_calls = []
+
+    def _fake_fetch(stock_id, start_date, end_date):
+        fetch_calls.append(stock_id)
+        return [{"stock_id": stock_id, "date": "2026-07-31", "holding_shares_level": "more than 1,000,001",
+                  "people": 10, "unit": 100, "percent": 12.0}]
+
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_holding_shares_per", _fake_fetch)
+
+    count = daily_pipeline.refresh_watchlist_holder_shares(conn, portfolio_conn)
+
+    assert fetch_calls == ["2330"]  # 只查觀察清單裡的股票，不是全市場
+    assert count == 1
+    row = conn.execute(
+        "SELECT stock_id, percent FROM holder_shares_distribution WHERE stock_id = '2330'"
+    ).fetchone()
+    assert row == ("2330", 12.0)
+
+
+def test_refresh_watchlist_holder_shares_skips_failed_stock_and_continues(monkeypatch):
+    from src.data import portfolio_storage
+
+    conn = _fresh_conn()
+    storage.upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-08-04"},
+        {"stock_id": "2454", "name": "聯發科", "market": "TWSE", "industry": None, "updated_at": "2026-08-04"},
+    ])
+    portfolio_conn = _fresh_portfolio_conn()
+    group_id = portfolio_storage.add_watchlist_group(portfolio_conn, "半導體")
+    portfolio_storage.add_watchlist_stock(portfolio_conn, group_id, "2330")
+    portfolio_storage.add_watchlist_stock(portfolio_conn, group_id, "2454")
+
+    def _fake_fetch(stock_id, start_date, end_date):
+        if stock_id == "2330":
+            raise RuntimeError("模擬FinMind暫時性錯誤")
+        return [{"stock_id": stock_id, "date": "2026-07-31", "holding_shares_level": "more than 1,000,001",
+                  "people": 10, "unit": 100, "percent": 5.0}]
+
+    monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_holding_shares_per", _fake_fetch)
+
+    count = daily_pipeline.refresh_watchlist_holder_shares(conn, portfolio_conn)
+
+    assert count == 1  # 2330失敗略過，2454照常成功
+    assert conn.execute("SELECT COUNT(*) FROM holder_shares_distribution WHERE stock_id = '2330'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM holder_shares_distribution WHERE stock_id = '2454'").fetchone()[0] == 1
+
+
+def test_refresh_watchlist_holder_shares_returns_zero_when_watchlist_empty(monkeypatch):
+    conn = _fresh_conn()
+    portfolio_conn = _fresh_portfolio_conn()
+
+    assert daily_pipeline.refresh_watchlist_holder_shares(conn, portfolio_conn) == 0
+
+
+def test_run_daily_pipeline_chip_refresh_triggers_tpex_institutional_fg_and_sheets_export(monkeypatch):
+    """chip_refresh=True(獨立於dry_run)應該觸發：TPEx三大法人、觀察清單F/G、Google
+    Sheet匯出這三件事——即使dry_run=True(對應17:00排程帶--dry-run --chip-refresh的
+    情境，理由見run_daily_pipeline() docstring)。"""
+    conn = _fresh_conn()
+    portfolio_conn = _fresh_portfolio_conn()
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: portfolio_conn)
+
+    _stub_stock_info(monkeypatch, [{"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
+        lambda stock_ids, start_date, end_date, on_progress=None: {"6488": [_price_row(stock_id="6488")]},
+    )
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+
+    tpex_institutional_calls = []
+    monkeypatch.setattr(
+        daily_pipeline, "fetch_today_tpex_institutional",
+        lambda conn, stock_info_by_id: tpex_institutional_calls.append(stock_info_by_id) or 1,
+    )
+    holder_refresh_calls = []
+    monkeypatch.setattr(
+        daily_pipeline, "refresh_watchlist_holder_shares",
+        lambda conn, pconn: holder_refresh_calls.append(pconn) or 0,
+    )
+    export_calls = []
+    monkeypatch.setattr(
+        daily_pipeline.watchlist_export, "export_all_watchlist_groups",
+        lambda conn, pconn, interactive: export_calls.append((pconn, interactive)) or 0,
+    )
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False, chip_refresh=True)
+
+    assert len(tpex_institutional_calls) == 1
+    assert holder_refresh_calls == [portfolio_conn]
+    assert export_calls == [(portfolio_conn, False)]
+
+
+def test_run_daily_pipeline_chip_refresh_false_skips_the_three_steps(monkeypatch):
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "6488", "name": "環球晶", "market": "TPEx", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
+        lambda stock_ids, start_date, end_date, on_progress=None: {"6488": [_price_row(stock_id="6488")]},
+    )
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("chip_refresh=False時不應該被呼叫")
+
+    monkeypatch.setattr(daily_pipeline, "fetch_today_tpex_institutional", _fail)
+    monkeypatch.setattr(daily_pipeline, "refresh_watchlist_holder_shares", _fail)
+    monkeypatch.setattr(daily_pipeline.watchlist_export, "export_all_watchlist_groups", _fail)
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", _fail)
+
+    # 不應該拋出AssertionError
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False, chip_refresh=False)

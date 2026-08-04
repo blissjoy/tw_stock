@@ -20,6 +20,10 @@
 
     # 本機測試：不連Turso，改用本機sqlite檔案，且不真的發通知、跳過耗時的TPEx更新
     python scripts/daily_pipeline.py --local-db data/tw_stock_dryrun.db --dry-run --skip-tpex
+
+    # 17:00排程：法人資料公布後，額外更新TPEx三大法人＋觀察清單F/G＋Google Sheet匯出
+    # (--chip-refresh獨立於--dry-run之外，見run_daily_pipeline() docstring)
+    python scripts/daily_pipeline.py --chip-refresh
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.data import finmind_client, storage, twse_client, yfinance_client  # noqa: E402
+from src.data import finmind_client, holder_shares_sync, storage, tpex_client, twse_client, yfinance_client  # noqa: E402
 from src.data.connection import get_default_portfolio_connection  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
@@ -171,6 +175,48 @@ def fetch_today_tpex(
     return len(prices_by_stock)
 
 
+def fetch_today_tpex_institutional(conn, stock_info_by_id: dict) -> int:
+    """抓TPEx全市場最新一個交易日的三大法人買賣超(見`src/data/tpex_client.py`)，寫入
+    `institutional_investors`表。2026-08-04新增：修正TPEx股價自2026-07-23改用yfinance
+    後，法人資料就再也沒有排程更新過的落差(股價/法人資料原本走同一支FinMind逐股迴圈，
+    分開後法人資料被漏掉了——見`ai/BACKFILL_TPEX_INSTITUTIONAL_LOG.md`的一次性補值紀錄，
+    這裡是讓它之後每天自動維護、不再變舊)。
+
+    `tpex_client.fetch_institutional_investors()`一次回傳全市場資料，沒有股價那樣
+    逐檔yfinance失敗的風險，呼叫端應該獨立包一層try/except；這裡本身不吞例外，讓
+    呼叫端統一處理。寫入前先確保`stocks`表已經有對應股票(滿足`institutional_investors.
+    stock_id`的外鍵參照)，用`stock_info_by_id`(FinMind股票基本資料)補name/industry，
+    查無則退回用stock_id本身當name——理論上不會發生，tpex_client已過濾成4碼股票代號，
+    跟FinMind股票清單高度重疊。
+    """
+    rows = tpex_client.fetch_institutional_investors()
+    if not rows:
+        return 0
+
+    stock_ids = sorted({r["stock_id"] for r in rows})
+    now_iso = datetime.now().isoformat()
+    stock_rows = [
+        {
+            "stock_id": stock_id,
+            "name": stock_info_by_id.get(stock_id, {}).get("name", stock_id),
+            "market": "TPEx",
+            "industry": stock_info_by_id.get(stock_id, {}).get("industry"),
+            "updated_at": now_iso,
+        }
+        for stock_id in stock_ids
+    ]
+    storage.upsert_stocks(conn, stock_rows)
+    storage.upsert_institutional_investors(conn, rows)
+    return len(stock_ids)
+
+
+# F/G(大戶/散戶持股週變化)抓取＋寫入邏輯搬到src/data/holder_shares_sync.py，跟
+# desktop/main_window.py「重新整理」偵測到新加入觀察清單、本地DB查無F/G資料的股票時
+# 即時補抓共用同一份邏輯，避免兩處各自維護一份幾乎相同的抓取迴圈。這裡保留原本的
+# 函式名稱、原封不動轉呼叫，run_daily_pipeline()跟既有測試都不需要改動呼叫方式。
+refresh_watchlist_holder_shares = holder_shares_sync.refresh_watchlist_holder_shares
+
+
 # 每次更新大盤時，往回一併重新抓取的天數(見fetch_today_taiex()說明)。10個日曆天
 # 涵蓋約6~7個交易日，足夠蓋過連續假期，成本可忽略(yfinance單一ticker的請求，範圍
 # 拉長不會明顯增加耗時)。
@@ -220,7 +266,7 @@ def fetch_today_taiex(conn, date_str: str) -> bool:
 
 def run_daily_pipeline(
     conn, date_str: str | None = None, min_days: int = 60, dry_run: bool = False, skip_tpex: bool = False,
-    on_progress: Callable[[str, int, int], None] | None = None,
+    chip_refresh: bool = False, on_progress: Callable[[str, int, int], None] | None = None,
 ) -> list[dict]:
     """核心orchestration，刻意與「conn是Turso還是本機sqlite」無關，方便測試與dry-run重用。
 
@@ -230,6 +276,14 @@ def run_daily_pipeline(
 
     on_progress(stage, done, total)：stage是"TWSE"或"TPEx"，在對應的批次下載過程中被呼叫，
     供呼叫端顯示下載進度(例如桌面版狀態列顯示「TPEx 500/1980」)。
+
+    chip_refresh：2026-08-04新增，獨立於dry_run之外的旗標，控制「法人籌碼公布後才需要
+    做」的三件事：TPEx全市場三大法人買賣超、觀察清單F/G(大戶/散戶持股)重抓、觀察清單
+    Google Sheet匯出。之所以獨立於dry_run，是因為既有8個Windows排程任務裡只有17:00/
+    21:00這兩個帶`--dry-run`（其餘6個是全量抓取+真實LINE/Email通知），法人資料要17:00
+    後才公布，若沿用「不dry_run才做」的舊邏輯，這幾件事反而永遠不會在正確的時間點執行；
+    拆成獨立旗標後，17:00那次排程可以同時帶`--dry-run --chip-refresh`（不重複發送當天
+    已經發過的LINE/Email候選清單通知，但仍執行這三件籌碼相關更新）。
     """
     storage.ensure_schema(conn)
 
@@ -284,6 +338,16 @@ def run_daily_pipeline(
                 on_progress=lambda done, total: _on_progress("TPEx", done, total),
             )
             print(f"TPEx：{tpex_count} 檔成功更新")
+
+            if chip_refresh:
+                # 法人買賣超17:00才公布，跟股價一起在skip_tpex=False的路徑下更新，
+                # 理由見run_daily_pipeline() chip_refresh參數說明。獨立try/except——
+                # 失敗不應該讓股價/候選清單這些已經算完的資料受影響。
+                try:
+                    tpex_insti_count = fetch_today_tpex_institutional(conn, stock_info_by_id)
+                    print(f"TPEx三大法人：{tpex_insti_count} 檔成功更新")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"TPEx三大法人更新失敗（略過，不影響已寫入的股價/候選清單）：{exc}")
 
         candidates = run_screen_and_store(conn, iso_date=iso_date, min_days=min_days)
 
@@ -351,21 +415,29 @@ def run_daily_pipeline(
             except Exception as exc:  # noqa: BLE001
                 print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
 
-            # 觀察清單自動匯出Google Sheet(src/presentation/watchlist_export.py)：
-            # 2026-08-04新增，跟LINE/Email同一種「獨立try/except、失敗不影響已寫入的
-            # 候選清單」精神。interactive=False——自動排程沒有人在旁邊完成瀏覽器登入，
-            # 本機沒有可用/可刷新的token時會直接拋出GoogleAuthRequiresInteractionError
-            # (見google_sheets_client.py)，這裡當一般失敗處理、印出訊息即可，不會讓
-            # pipeline卡住等待永遠不會來的瀏覽器互動。
+        if chip_refresh:
+            # F/G(觀察清單股票)+Google Sheet匯出：2026-08-04改成獨立於dry_run之外的
+            # chip_refresh旗標(理由見run_daily_pipeline() docstring)。兩件事共用同一個
+            # portfolio_conn，各自獨立try/except——任一方失敗都不應該影響另一方，也不
+            # 應該影響已經寫入的候選清單。interactive=False：自動排程沒有人在旁邊完成
+            # 瀏覽器登入，本機沒有可用/可刷新的token時Sheets匯出會直接拋出
+            # GoogleAuthRequiresInteractionError(見google_sheets_client.py)，這裡當
+            # 一般失敗處理、印出訊息即可，不會讓pipeline卡住等待永遠不會來的瀏覽器互動。
+            portfolio_conn = get_default_portfolio_connection()
             try:
-                portfolio_conn = get_default_portfolio_connection()
+                try:
+                    holder_count = refresh_watchlist_holder_shares(conn, portfolio_conn)
+                    print(f"F/G(觀察清單)：{holder_count} 檔成功更新")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"F/G(觀察清單)更新失敗（略過，不影響已寫入的候選清單）：{exc}")
+
                 try:
                     group_count = watchlist_export.export_all_watchlist_groups(conn, portfolio_conn, interactive=False)
                     print(f"觀察清單已匯出Google Sheet：{group_count}個群組")
-                finally:
-                    portfolio_conn.close()
-            except Exception as exc:  # noqa: BLE001
-                print(f"觀察清單匯出Google Sheet失敗（略過，不影響已寫入的候選清單）：{exc}")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"觀察清單匯出Google Sheet失敗（略過，不影響已寫入的候選清單）：{exc}")
+            finally:
+                portfolio_conn.close()
 
         pipeline_status.append_run_snapshot(conn, iso_date, is_intraday, len(candidates))
         pipeline_status.write_status("done", date=iso_date, candidate_count=len(candidates))
@@ -382,6 +454,11 @@ def main() -> None:
     parser.add_argument("--min-days", type=int, default=60)
     parser.add_argument("--dry-run", action="store_true", help="只計算候選清單並印出，不實際發送LINE/Email通知")
     parser.add_argument("--skip-tpex", action="store_true", help="只更新TWSE，不透過FinMind更新TPEx（加速本機測試用）")
+    parser.add_argument(
+        "--chip-refresh", action="store_true",
+        help="更新TPEx三大法人買賣超＋觀察清單F/G(大戶/散戶持股)＋觀察清單Google Sheet匯出。"
+             "獨立於--dry-run之外，17:00法人資料公布後的排程應加這個旗標（見run_daily_pipeline() docstring）",
+    )
     args = parser.parse_args()
 
     if args.local_db:
@@ -397,7 +474,7 @@ def main() -> None:
 
     run_daily_pipeline(
         conn, date_str=args.date, min_days=args.min_days, dry_run=args.dry_run, skip_tpex=args.skip_tpex,
-        on_progress=_print_progress,
+        chip_refresh=args.chip_refresh, on_progress=_print_progress,
     )
     conn.close()
 

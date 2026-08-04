@@ -194,6 +194,24 @@ def test_load_holder_change_none_when_no_data():
     assert huang_chip_data.load_holder_change(conn, "2330") is None
 
 
+def test_get_latest_holder_update_time_returns_max_updated_at():
+    conn = _fresh_conn()
+    _seed_stock(conn)
+    upsert_holder_shares_distribution(conn, [
+        {"stock_id": "2330", "date": "2026-07-24", "holding_shares_level": "more than 1,000,001",
+         "people": 10, "unit": 100, "percent": 10.0, "updated_at": "2026-07-24T00:00:00"},
+        {"stock_id": "2330", "date": "2026-07-31", "holding_shares_level": "more than 1,000,001",
+         "people": 10, "unit": 100, "percent": 12.0, "updated_at": "2026-07-31T09:00:00"},
+    ])
+
+    assert huang_chip_data.get_latest_holder_update_time(conn) == "2026-07-31T09:00:00"
+
+
+def test_get_latest_holder_update_time_none_when_no_data():
+    conn = _fresh_conn()
+    assert huang_chip_data.get_latest_holder_update_time(conn) is None
+
+
 # ============================================================
 # load_huang_chip_row (組合)
 # ============================================================

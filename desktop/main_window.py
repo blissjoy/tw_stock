@@ -668,6 +668,37 @@ class WatchlistExportWorker(QThread):
                 portfolio_conn.close()
 
 
+class HolderShareFetchWorker(QThread):
+    """背景執行緒即時補抓「觀察清單裡本地DB完全查無F/G資料」的股票——通常是每日
+    17:00排程(daily_pipeline.py的--chip-refresh，實際呼叫
+    src/data/holder_shares_sync.py的refresh_watchlist_holder_shares())執行完之後
+    才被加入觀察清單的新股票，要等到隔天才會被每日排程涵蓋到。見MainWindow.
+    _maybe_fetch_missing_holder_shares()。跟PipelineWorker/WatchlistExportWorker
+    同一個理由，開獨立連線，不重用MainWindow.conn。
+    """
+
+    finished_ok = Signal(int)
+    failed = Signal(str)
+
+    def __init__(self, stock_ids: list[str]) -> None:
+        super().__init__()
+        self._stock_ids = stock_ids
+
+    def run(self) -> None:
+        from src.data.holder_shares_sync import fetch_and_store_holder_shares
+
+        conn = None
+        try:
+            conn = get_default_connection()
+            count = fetch_and_store_holder_shares(conn, self._stock_ids)
+            self.finished_ok.emit(count)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            if conn is not None:
+                conn.close()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -700,6 +731,19 @@ class MainWindow(QMainWindow):
         # 清單是否被外部(排程/Windows工作排程器背景觸發run_daily_pipeline())更新過，
         # 見_check_for_external_candidate_update()的說明。
         self._last_seen_candidate_update: str | None = None
+        # 2026-08-04新增：觀察清單版本的同一種機制，見_check_for_external_watchlist_
+        # update()——分別追蹤股價/法人資料(stocks.updated_at)跟F/G(holder_shares_
+        # distribution.updated_at)兩個各自獨立的更新時間戳，任一個變了都代表觀察
+        # 清單顯示的資料可能過時。
+        self._last_seen_watchlist_price_update: str | None = None
+        self._last_seen_watchlist_holder_update: str | None = None
+        # 「重新整理」新股票F/G即時補抓(見_maybe_fetch_missing_holder_shares())：
+        # _holder_fetch_worker追蹤目前是否有補抓在跑，避免重疊啟動；
+        # _holder_fetch_attempted_stock_ids是整個桌面程式執行期間的一次性guard，
+        # 避免真的查無資料的股票(例如剛IPO、TDCC還沒公布過集保股權分散表)每次
+        # 「重新整理」都重打一次FinMind。
+        self._holder_fetch_worker: HolderShareFetchWorker | None = None
+        self._holder_fetch_attempted_stock_ids: set[str] = set()
         # QWebEngineView.setHtml()對內容大小有~2MB的隱性限制(Chromium的data: URL限制，超過
         # 會loadFinished(False)、畫面完全空白且不會報錯)——Plotly圖表把plotly.js整包內嵌後
         # 通常有4~5MB，遠超過這個限制。改成寫進暫存檔案再用load(QUrl.fromLocalFile(...))，
@@ -1913,6 +1957,41 @@ class MainWindow(QMainWindow):
         self.watchlist_update_label.setText(
             f"資料更新至：{self._format_update_timestamp(chart_data.get_latest_update_time(self.conn))}"
         )
+        self._maybe_fetch_missing_holder_shares(list(df["stock_id"]))
+
+    def _maybe_fetch_missing_holder_shares(self, stock_ids: list[str]) -> None:
+        """「重新整理」除了重新查詢本地DB畫表格，也順便偵測「剛加入觀察清單、本地DB
+        完全查無F/G資料」的股票並背景即時補抓——不然使用者要等到隔天17:00排程才看得到
+        剛加入股票的F/G欄位(見src/data/holder_shares_sync.py的說明)。查詢本身
+        (list_stock_ids_without_holder_data)純查本地DB，不是API呼叫，只有真的發現
+        缺資料時才會背景呼叫FinMind，不會拖慢「重新整理」本身的畫面反應。
+        """
+        if self.conn is None:
+            return
+        if self._holder_fetch_worker is not None and self._holder_fetch_worker.isRunning():
+            return
+        from src.data.holder_shares_sync import list_stock_ids_without_holder_data
+
+        candidates = [sid for sid in stock_ids if sid not in self._holder_fetch_attempted_stock_ids]
+        missing = list_stock_ids_without_holder_data(self.conn, candidates)
+        if not missing:
+            return
+        self._holder_fetch_attempted_stock_ids.update(missing)
+        self._holder_fetch_worker = HolderShareFetchWorker(missing)
+        self._holder_fetch_worker.finished_ok.connect(self._on_holder_fetch_finished)
+        self._holder_fetch_worker.failed.connect(self._on_holder_fetch_failed)
+        self._holder_fetch_worker.start()
+
+    def _on_holder_fetch_finished(self, count: int) -> None:
+        # 只有真的補到資料、而且使用者現在還停留在觀察清單分頁時才重新整理畫面，
+        # 跟_check_for_external_watchlist_update()同一種「只在目前分頁時才重繪」考量。
+        if count > 0 and self.tabs.currentIndex() == TAB_WATCHLIST:
+            self._refresh_watchlist_tab()
+
+    def _on_holder_fetch_failed(self, error_message: str) -> None:
+        # 不彈窗——這是背景自動補抓，不是使用者主動觸發的動作，失敗只印出訊息即可，
+        # 不應該用彈窗打斷使用者，跟其餘背景/排程性質的失敗處理一致。
+        print(f"觀察清單新股票F/G即時補抓失敗（略過）：{error_message}")
 
     def _set_chip_text_item(self, table: QTableWidget, row_idx: int, col: int, label: dict | None) -> None:
         """label是{"text","color"}字典(或None)——黃豐凱籌碼分析法的判讀函式共用格式，
@@ -3466,6 +3545,30 @@ iframe {{ width: 100%; height: 900px; border: none; }}
             self._reload_candidates()
         self._last_seen_candidate_update = latest
 
+    def _check_for_external_watchlist_update(self) -> None:
+        """觀察清單版本的_check_for_external_candidate_update()——同一個bug、同一種
+        修法：背景排程(Windows工作排程器觸發的daily_pipeline.py，或F/G的排程/手動
+        回補)把DB更新完後，如果使用者剛好停留在觀察清單分頁，畫面不會自動反映新
+        資料，只有切換分頁或手動按「重新整理」才看得到。
+
+        分別追蹤股價/法人資料(`stocks.updated_at`)跟F/G(`holder_shares_
+        distribution.updated_at`)兩個獨立的時間戳，任一個變了就代表觀察清單顯示
+        的資料可能過時；只在使用者「目前正停留在觀察清單分頁」時才真的重新整理
+        (不像候選清單版本那樣不管在哪個分頁都重刷——觀察清單重新整理要逐股查
+        D~R好幾張表，沒必要在使用者根本沒在看這個分頁時也做；切換分頁本身
+        (`_on_tab_changed()`)已經會在切過去的當下重新整理一次，兩者互補)。
+        """
+        if self.conn is None:
+            return
+        price_update = chart_data.get_latest_update_time(self.conn)
+        holder_update = huang_chip_data.get_latest_holder_update_time(self.conn)
+        price_changed = self._last_seen_watchlist_price_update is not None and price_update != self._last_seen_watchlist_price_update
+        holder_changed = self._last_seen_watchlist_holder_update is not None and holder_update != self._last_seen_watchlist_holder_update
+        if (price_changed or holder_changed) and self.tabs.currentIndex() == TAB_WATCHLIST:
+            self._refresh_watchlist_tab()
+        self._last_seen_watchlist_price_update = price_update
+        self._last_seen_watchlist_holder_update = holder_update
+
     def _poll_pipeline_status(self) -> None:
         # 如果本視窗自己觸發的PipelineWorker正在跑，狀態列已經由_on_fetch_progress()顯示
         # 更細緻的下載進度(例如「TPEx 500/1980檔」)，這裡就不要每5秒用pipeline_status.json
@@ -3475,6 +3578,7 @@ iframe {{ width: 100%; height: 900px; border: none; }}
             return
         if self.conn is not None:
             self._check_for_external_candidate_update()
+            self._check_for_external_watchlist_update()
         status = pipeline_status.read_status()
         state = status.get("status") if status else None
         if state == "running":

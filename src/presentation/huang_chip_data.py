@@ -132,6 +132,17 @@ def load_weekly_volume_pattern(conn, stock_id: str, as_of_date: str | None = Non
     return signals.classify_weekly_volume_pattern(rows)
 
 
+def get_latest_holder_update_time(conn) -> str | None:
+    """回傳holder_shares_distribution表裡最新的updated_at時間戳，代表F/G資料最近
+    一次被寫入(不管是backfill、daily_pipeline.py的排程、還是使用者手動觸發)的時間。
+    跟`src.presentation.chart_data.get_latest_update_time()`(股價/法人資料版本)
+    同一種用途，供desktop/main_window.py偵測觀察清單背景資料有沒有被更新過、需不需要
+    自動重新整理畫面(見_check_for_external_watchlist_update())。查無任何資料回傳None。
+    """
+    row = conn.execute("SELECT MAX(updated_at) FROM holder_shares_distribution").fetchone()
+    return row[0] if row is not None else None
+
+
 def load_holder_change(conn, stock_id: str) -> dict | None:
     """F/G欄：大戶/散戶持股週變化。查`holder_shares_distribution`表——這張表目前沒有
     排程自動維護，查無資料時回傳None，呼叫端顯示「尚未有資料」。"""

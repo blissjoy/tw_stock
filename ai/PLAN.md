@@ -5752,3 +5752,80 @@ consent screen的User Type是「Internal」(該Google帳號隸屬某機構網域
   `pytest tests/ -q`934個測試全數通過(新增`test_watchlist_export.py`4個、
   `test_google_sheets_client.py`4個，後者專門驗證`interactive=False`在
   「沒有token」「token過期無refresh_token」時正確拋例外、不會卡住)。
+
+## 觀察清單背景更新自動偵測（2026-08-04）
+
+使用者問「重新整理」實際上做什麼、發現觀察清單分頁缺少候選清單分頁早就有的「背景
+排程更新DB時自動重新整理畫面」機制(2026-08-01曾經修過候選清單版本，但觀察清單當時
+沒有一併補上)。新增`MainWindow._check_for_external_watchlist_update()`：透過既有
+`self._status_timer`每5秒輪詢一次，分別追蹤`chart_data.get_latest_update_time()`
+(股價/法人資料，`stocks.updated_at`)跟新增的`huang_chip_data.get_latest_holder_
+update_time()`(F/G，`holder_shares_distribution.updated_at`)兩個各自獨立的時間戳，
+任一個變動且使用者目前正停留在觀察清單分頁時才觸發`_refresh_watchlist_tab()`——
+刻意用「目前分頁」把關(候選清單版本不管在哪個分頁都重刷)，因為觀察清單重新整理要
+逐股查DB，不像候選清單那麼輕量，且`_on_tab_changed()`本來就會在切換過去的當下刷新
+一次，兩者互補、不需要背景無條件重算。
+
+## TPEx官方三大法人買賣超 + F/G每日重抓 + 觀察清單新股票即時補抓（2026-08-04）
+
+延續前面的全DB法人資料缺口回補：那次是一次性backfill，使用者指出根本問題還沒解決
+——`daily_pipeline.py`的17:00/21:00排程實際帶的是`--dry-run --skip-tpex`(用
+PowerShell `Get-ScheduledTask`查證)，法人資料17:00才公布，但沒有任何排程真的在
+17:00更新TPEx法人買賣超或F/G，時間一久資料只會再度變舊。討論過程中使用者也糾正了
+兩個原本的設計：①F/G不需要「超過一週才重抓」的staleness判斷，t-7的計算本來就該
+每天重算，观察清單股票數量少，每天無條件全部重抓成本可忽略；②既有8個排程任務只有
+17:00/21:00帶`--dry-run`，若沿用「不dry_run才做」的舊邏輯，這幾件事反而永遠不會
+執行，因此新增一個完全獨立於`--dry-run`之外的`--chip-refresh`旗標。
+
+- 使用者問「除了觀察清單的F/G抓FinMind之外，其他上櫃籌碼資料可以抓TPEx官方的嗎」，
+  查證後找到TPEx官方OpenAPI批次端點`tpex_3insti_daily_trading`(一次回傳全市場，
+  取代原本逐股呼叫FinMind、耗時約1小時的做法)——這是跟`ai/PLAN.md`之前記錄過「TPEx
+  舊版after-trading端點`date`參數常被忽略」完全不同的新系統。實測發現這個端點的
+  欄位命名本身有品質問題：`"Dealers -TotalSell"`(TotalSell前多一個空白)是一個
+  有bug的重複欄位，148/780檔跟正確版本`"Dealers-TotalSell"`(無空白)對不上——比對
+  本地DB既有FinMind資料確認前者其實只等於自營商避險倉那一小部分，不是合計數，絕對
+  不能用。新增`src/data/tpex_client.py`封裝這個端點的解析(含這個欄位陷阱的完整
+  說明)，ROC民國年日期轉換，過濾非4碼股票代號。
+- `scripts/daily_pipeline.py`新增`fetch_today_tpex_institutional()`，掛在
+  `if not skip_tpex:`區塊內、且只在`chip_refresh=True`時執行，寫入前逐檔補
+  `stocks`表(滿足`institutional_investors`外鍵參照)。
+- F/G(大戶/散戶持股)抓取＋寫入邏輯抽成獨立模組`src/data/holder_shares_sync.py`
+  (原本規劃直接寫在`daily_pipeline.py`，考慮到desktop端也需要同一份邏輯才抽出來)：
+  `fetch_and_store_holder_shares(conn, stock_ids)`是核心迴圈，`refresh_watchlist_
+  holder_shares(conn, portfolio_conn)`(每日排程用，範圍=全部觀察清單股票)跟
+  `list_stock_ids_without_holder_data(conn, stock_ids)`(純查本地DB，供桌面版判斷
+  哪幾檔要即時補抓)都建立在這個共用模組上。`daily_pipeline.py`保留原本的函式名稱
+  (`refresh_watchlist_holder_shares = holder_shares_sync.refresh_watchlist_holder_
+  shares`)，呼叫方式不用改。
+- `run_daily_pipeline()`新增獨立於`dry_run`之外的`chip_refresh`參數，`main()`新增
+  對應的`--chip-refresh` CLI旗標；原本包在「`not dry_run`才做」的Google Sheet匯出
+  區塊，改成獨立的`if chip_refresh:`區塊，跟F/G重抓共用同一個`portfolio_conn`、
+  各自獨立try/except。用PowerShell `Set-ScheduledTask`把`tw_stock_pipeline_1700`
+  排程任務的參數從`--dry-run --skip-tpex`改成`--dry-run --chip-refresh`(移除
+  `--skip-tpex`讓TPEx股價/法人資料能在17:00這次真正更新，21:00維持原樣不動，
+  使用者的原始需求只針對17:00這次)。
+- 桌面版：`desktop/main_window.py`新增`HolderShareFetchWorker`(背景執行緒，理由
+  跟既有的`PipelineWorker`/`WatchlistExportWorker`一致)＋`MainWindow.
+  _maybe_fetch_missing_holder_shares()`，在`_refresh_watchlist_tab()`裡順便呼叫：
+  用`list_stock_ids_without_holder_data()`純查本地DB(不算API呼叫)找出觀察清單裡
+  「完全沒有任何F/G資料」的股票(通常是17:00排程執行後才加入觀察清單的新股票)，
+  真的有缺才背景呼叫FinMind補抓、完成後自動重新整理畫面。`self._holder_fetch_
+  attempted_stock_ids`是整個程式執行期間的一次性guard，避免真的查無資料的股票
+  (例如剛IPO)每次「重新整理」都重打一次FinMind。
+- 新增/擴充測試：`tests/test_tpex_client.py`(3個，含驗證有bug的重複欄位被正確
+  避開)、`tests/test_holder_shares_sync.py`(8個)、`tests/test_portfolio_storage.py`
+  新增`list_all_watchlist_stock_ids`(2個)、`tests/test_daily_pipeline.py`新增
+  `fetch_today_tpex_institutional`/`chip_refresh`旗標相關測試(9個)。
+  `pytest tests/ -q`957個測試全數通過。
+- 真實驗證：用D:\tmp下的DB複本(不動正式DB)測試F/G即時補抓端到端流程——手動清空
+  `6488`的F/G資料模擬「剛加入觀察清單的新股票」，用PySide6實際視窗截圖確認切到
+  觀察清單分頁後背景自動偵測、呼叫FinMind補回221筆資料、畫面自動重繪出正確的
+  「大戶週變化+0.88%／散戶週變化+0.22%」。⚠️ **TPEx官方OpenAPI端點目前實際打不通**：
+  `requests.get()`對`www.tpex.org.tw`回傳`SSLCertVerificationError: Missing
+  Subject Key Identifier`，用`verify=False`測試證實是TPEx伺服器端憑證本身缺少
+  Subject Key Identifier擴充欄位(不是本機環境或程式碼問題，Google/TWSE/FinMind
+  等其他https站台在同一台機器上都正常)，推測是Python 3.14的OpenSSL更嚴格驗證
+  下才被擋下來。程式碼本身正確處理(`verify=True`保持安全、外層try/except吞下
+  失敗只印訊息，不會讓pipeline中斷)，但這代表TPEx法人買賣超這個新資料來源目前
+  實際上抓不到資料，需要TPEx修好他們的憑證，或retreat改回FinMind逐股抓法。已經
+  告知使用者，尚待決定。

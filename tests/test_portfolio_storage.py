@@ -205,6 +205,22 @@ def test_clear_all_watchlist_stocks_only_affects_given_group():
     assert portfolio_storage.list_watchlist_stock_ids(conn, group_b) == ["2882"]
 
 
+def test_list_all_watchlist_stock_ids_dedupes_across_groups():
+    conn = _fresh_conn()
+    group_a = portfolio_storage.add_watchlist_group(conn, "半導體")
+    group_b = portfolio_storage.add_watchlist_group(conn, "權值股")
+    portfolio_storage.add_watchlist_stock(conn, group_a, "2330")
+    portfolio_storage.add_watchlist_stock(conn, group_b, "2330")
+    portfolio_storage.add_watchlist_stock(conn, group_b, "2882")
+
+    assert portfolio_storage.list_all_watchlist_stock_ids(conn) == ["2330", "2882"]
+
+
+def test_list_all_watchlist_stock_ids_empty_when_no_watchlist():
+    conn = _fresh_conn()
+    assert portfolio_storage.list_all_watchlist_stock_ids(conn) == []
+
+
 def test_add_stocks_to_watchlist_bulk_adds_to_multiple_groups():
     conn = _fresh_conn()
     group_a = portfolio_storage.add_watchlist_group(conn, "半導體")
