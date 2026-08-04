@@ -6040,3 +6040,52 @@ yfinance來源的volume單位/量級跟schema其餘欄位(原始股數)不一致
 - 真實驗證：先用D:\temp_claude的DB複本執行回補腳本，確認2023-01-03~2026-08-04
   共864筆全部更新成功、6月底到7月初交界處的數字量級變得連續一致(不再有1829倍
   的斷層)；確認正確後對正式DB執行同一次回補，864筆全部成功。
+
+## 選股清單匯出Google Sheet＋候選清單批次加入庫存/觀察清單（2026-08-04）
+
+使用者要求兩件事：①更新觀察清單Google Sheet時，選股清單(候選清單)也一起匯出，
+分成不同的分頁(worksheet)；②「選股」分頁表格最前面加一欄checkbox，可以把勾選的
+股票批次加入庫存或觀察清單(觀察清單要能選群組)。
+
+**選股清單匯出**：
+- `src/presentation/chart_data.py`的`load_stock_universe_for_date()`補上
+  `listing_type`欄位(SQL SELECT+組row dict+DataFrame columns三處都要加)，供
+  Sheets匯出的名稱欄上色用，跟觀察清單/庫存清單同一份`portfolio_data.
+  listing_type_color()`對照表。
+- `src/presentation/watchlist_export.py`新增`build_candidate_list_table()`/
+  `export_candidate_list()`：套用跟LINE/Email通知(`daily_pipeline.py`)完全
+  同一套「UI候選清單預設檢視」篩選條件(`CANDIDATE_FILTER_DEFAULTS`/
+  `CANDIDATE_SAR_FLIP_*_DEFAULT`/`CANDIDATE_ZHU_RULE_ONLY_DEFAULT`)，確保
+  Google Sheet上看到的跟桌面版「選股」分頁預設畫面、LINE/Email通知三處是同一個
+  集合。固定分頁名稱`"選股清單"`(`CANDIDATE_LIST_WORKSHEET_TITLE`)，A1放匯出
+  時間、A2欄放候選清單日期(latest_date可能是None，代表DB裡完全沒有候選清單
+  紀錄，這時只寫表頭)。
+- `scripts/daily_pipeline.py`的`chip_refresh`區塊新增第三個獨立try/except呼叫
+  `export_candidate_list()`；`desktop/main_window.py`的`WatchlistExportWorker`
+  (手動「匯出到Google Sheet」按鈕)也一併呼叫，兩處都跟觀察清單匯出共用同一個
+  main_conn/portfolio_conn。
+
+**候選清單批次加入庫存/觀察清單**：
+- `src/data/portfolio_storage.py`新增`add_stocks_to_inventory(conn,
+  stock_ids)`：對每檔股票各自新增一筆空白批次(cost_price/shares留空)，已經有
+  任何一筆批次紀錄的股票不重複新增(庫存的每筆批次代表真實購入紀錄，跟
+  `add_stocks_to_watchlist()`「存在性判斷」的既有語意不同，不能直接沿用)。
+- `desktop/main_window.py`的候選清單表格(`candidates_table`)最前面新增勾選欄
+  (欄位0)，其餘既有欄位索引全部+1——連帶更新`_on_candidate_selected()`/
+  `_on_candidate_search()`兩處原本假設欄位0是股票代號的地方。新增
+  `_checked_candidate_stock_ids()`讀取勾選狀態；「加入庫存」呼叫上面的新函式；
+  「加入觀察清單」把`_on_inventory_add_to_watchlist()`原本內嵌的群組勾選對話框
+  抽成共用的`_add_stocks_to_watchlist_via_dialog(stock_ids)`，庫存清單跟選股
+  清單的「加入觀察清單」現在共用同一份UI，不重複維護。
+- 新增/擴充測試：`tests/test_chart_data.py`新增`listing_type`欄位測試(1個)、
+  `tests/test_watchlist_export.py`新增候選清單匯出相關測試(5個，套用UI預設
+  篩選的測試比照`test_daily_pipeline.py`既有慣例把`apply_candidate_filters`
+  mock成直接放行，不重新測試篩選邏輯本身)、`tests/test_portfolio_storage.py`
+  新增`add_stocks_to_inventory`測試(2個)、`tests/test_daily_pipeline.py`
+  的chip_refresh測試補上`export_candidate_list`的mock(先前漏掉，實測發現
+  真的會觸發一次無token的Google Sheets連線嘗試，多花了幾秒鐘)。`pytest
+  tests/ -q`1000個測試全數通過。
+- 真實驗證：`build_candidate_list_table()`直接對正式DB呼叫，正確組出3列
+  (表頭×2+1檔候選股票)，欄位資料跟桌面版畫面一致；PySide6實際視窗截圖確認
+  勾選欄正確顯示、勾選後點「加入庫存」正確寫入一筆空白批次(已有庫存的股票
+  正確略過不重複新增)。

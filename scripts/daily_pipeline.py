@@ -542,6 +542,15 @@ def run_daily_pipeline(
                     print(f"觀察清單已匯出Google Sheet：{group_count}個群組")
                 except Exception as exc:  # noqa: BLE001
                     print(f"觀察清單匯出Google Sheet失敗（略過，不影響已寫入的候選清單）：{exc}")
+
+                # 選股清單(候選清單)：2026-08-04新增，使用者要求「更新觀察清單時，選股
+                # 清單也一起更新」，匯出到同一個試算表底下另一個固定名稱的分頁(見
+                # watchlist_export.export_candidate_list())，獨立try/except理由同上。
+                try:
+                    has_candidates = watchlist_export.export_candidate_list(conn, interactive=False)
+                    print(f"選股清單已匯出Google Sheet：{'有資料' if has_candidates else '目前無候選清單'}")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"選股清單匯出Google Sheet失敗（略過，不影響已寫入的候選清單）：{exc}")
             finally:
                 portfolio_conn.close()
 

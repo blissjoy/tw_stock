@@ -563,7 +563,7 @@ def load_stock_universe_for_date(
         params.append(market)
     cur = conn.execute(
         f"""
-        SELECT s.stock_id, s.name, s.industry, sp.close AS today_close, sp.volume AS today_volume,
+        SELECT s.stock_id, s.name, s.industry, s.listing_type, sp.close AS today_close, sp.volume AS today_volume,
                (SELECT sp2.close FROM stock_prices sp2
                 WHERE sp2.stock_id = s.stock_id AND sp2.date < ?
                 ORDER BY sp2.date DESC LIMIT 1) AS prev_close,
@@ -600,6 +600,7 @@ def load_stock_universe_for_date(
             "stock_id": stock_id,
             "name": row["name"],
             "industry": row["industry"],
+            "listing_type": row["listing_type"],
             "signal_name": signal_name,
             "close": today_close,
             "entry_price": cand["entry_price"] if cand else None,
@@ -617,7 +618,7 @@ def load_stock_universe_for_date(
     universe_df = pd.DataFrame(
         rows,
         columns=[
-            "stock_id", "name", "industry", "signal_name", "close", "entry_price", "stop_loss",
+            "stock_id", "name", "industry", "listing_type", "signal_name", "close", "entry_price", "stop_loss",
             "pct_change", "volume", "sar_value", "sar_status", "sar_distance_pct", "_confidence_sum",
         ],
     )

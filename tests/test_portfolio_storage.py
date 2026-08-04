@@ -221,6 +221,31 @@ def test_list_all_watchlist_stock_ids_empty_when_no_watchlist():
     assert portfolio_storage.list_all_watchlist_stock_ids(conn) == []
 
 
+def test_add_stocks_to_inventory_adds_blank_lots():
+    conn = _fresh_conn()
+
+    added = portfolio_storage.add_stocks_to_inventory(conn, ["2330", "2454"])
+
+    assert added == 2
+    assert portfolio_storage.list_inventory_stock_ids(conn) == ["2330", "2454"]
+    rows = portfolio_storage.list_inventory_rows(conn)
+    assert all(r["cost_price"] is None and r["shares"] is None for r in rows)
+
+
+def test_add_stocks_to_inventory_skips_stock_with_existing_lot():
+    """已經有任何一筆批次紀錄的股票不重複新增，避免每次點擊「加入庫存」都疊加
+    一筆全空的批次——庫存的每筆批次代表真實購入紀錄，跟觀察清單的存在性判斷不同。"""
+    conn = _fresh_conn()
+    portfolio_storage.add_inventory_stock(conn, "2330", cost_price=900.0, shares=1000)
+
+    added = portfolio_storage.add_stocks_to_inventory(conn, ["2330", "2454"])
+
+    assert added == 1  # 只有2454是新增的，2330已經有既有批次而略過
+    rows = portfolio_storage.list_inventory_rows(conn)
+    assert len(rows) == 2
+    assert [r["cost_price"] for r in rows if r["stock_id"] == "2330"] == [900.0]
+
+
 def test_add_stocks_to_watchlist_bulk_adds_to_multiple_groups():
     conn = _fresh_conn()
     group_a = portfolio_storage.add_watchlist_group(conn, "半導體")

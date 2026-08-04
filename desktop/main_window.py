@@ -639,11 +639,15 @@ class PipelineWorker(QThread):
 
 
 class WatchlistExportWorker(QThread):
-    """背景執行緒呼叫watchlist_export.export_all_watchlist_groups()，避免「匯出到
-    Google Sheet」按鈕卡住UI主執行緒——這是網路呼叫(Google Sheets API)，加上OAuth
-    token可能需要刷新，耗時不可預期。跟PipelineWorker同一個理由，開獨立連線，不
-    重用MainWindow.conn/portfolio_conn(同一個sqlite3連線物件不該被主執行緒跟背景
-    執行緒同時使用)。
+    """背景執行緒呼叫watchlist_export.export_all_watchlist_groups()+
+    export_candidate_list()，避免「匯出到Google Sheet」按鈕卡住UI主執行緒——這是
+    網路呼叫(Google Sheets API)，加上OAuth token可能需要刷新，耗時不可預期。跟
+    PipelineWorker同一個理由，開獨立連線，不重用MainWindow.conn/portfolio_conn
+    (同一個sqlite3連線物件不該被主執行緒跟背景執行緒同時使用)。
+
+    2026-08-04新增：使用者要求「更新觀察清單時，選股清單也一起更新上去，分成
+    不同的sheet」——選股清單匯出到同一個試算表底下另一個固定名稱的分頁，跟
+    scripts/daily_pipeline.py的chip_refresh區塊接同一組函式。
     """
 
     finished_ok = Signal(int)
@@ -658,6 +662,7 @@ class WatchlistExportWorker(QThread):
             main_conn = get_default_connection()
             portfolio_conn = get_default_portfolio_connection()
             count = watchlist_export.export_all_watchlist_groups(main_conn, portfolio_conn)
+            watchlist_export.export_candidate_list(main_conn)
             self.finished_ok.emit(count)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -960,15 +965,33 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.status_label)
         root_layout.addLayout(top_bar)
 
+        # 「加入庫存」「加入觀察清單」：2026-08-04新增，候選清單表格最前面新增勾選欄
+        # (見_reload_candidates())，這裡是對勾選的股票做批次動作的按鈕，跟「庫存清單」
+        # 分頁既有的「加入觀察清單」(_on_inventory_add_to_watchlist())同一種bulk動作
+        # 慣例，只是勾選來源換成候選清單的checkbox欄，不是QTableWidget原生的列選取。
+        bulk_action_bar = QHBoxLayout()
+        self.candidates_add_inventory_btn = QPushButton("加入庫存")
+        self.candidates_add_inventory_btn.setToolTip("把勾選的股票各自新增一筆空白庫存批次，成本價/股數之後再自行編輯")
+        self.candidates_add_inventory_btn.clicked.connect(self._on_candidates_add_to_inventory)
+        bulk_action_bar.addWidget(self.candidates_add_inventory_btn)
+        self.candidates_add_watchlist_btn = QPushButton("加入觀察清單")
+        self.candidates_add_watchlist_btn.setToolTip("把勾選的股票加入指定的觀察清單群組（可複選）")
+        self.candidates_add_watchlist_btn.clicked.connect(self._on_candidates_add_to_watchlist)
+        bulk_action_bar.addWidget(self.candidates_add_watchlist_btn)
+        bulk_action_bar.addStretch()
+        root_layout.addLayout(bulk_action_bar)
+
         self.intraday_label = QLabel("⚠ 尚未收盤，本頁為盤中即時資料，收盤後數字可能改變")
         self.intraday_label.setStyleSheet("color: red; font-weight: bold;")
         self.intraday_label.setVisible(False)
         root_layout.addWidget(self.intraday_label)
 
         self.candidates_table = QTableWidget()
-        self.candidates_table.setColumnCount(12)
+        self.candidates_table.setColumnCount(13)
+        # 第0欄是勾選欄(見下面_reload_candidates())，2026-08-04新增，供「加入庫存」/
+        # 「加入觀察清單」批次動作使用；其餘欄位順序不變，只是索引整體+1。
         self.candidates_table.setHorizontalHeaderLabels([
-            "股票代號", "名稱", "產業別", "訊號(信心%)", "收盤價", "進場價", "停損價",
+            "", "股票代號", "名稱", "產業別", "訊號(信心%)", "收盤價", "進場價", "停損價",
             "漲跌幅(%)", "成交量(張)", "SAR值", "SAR狀態", "SAR距離%",
         ])
         # 數值欄位靠右對齊(見下面_reload_candidates()裡的setTextAlignment)時，文字會
@@ -980,7 +1003,10 @@ class MainWindow(QMainWindow):
         # 留給「訊號」欄(Stretch)，這樣wrap後的行數才會合理。
         header = self.candidates_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        _SIGNAL_COLUMN = 3
+        _CANDIDATE_CHECKBOX_COLUMN = 0
+        header.setSectionResizeMode(_CANDIDATE_CHECKBOX_COLUMN, QHeaderView.ResizeMode.Fixed)
+        self.candidates_table.setColumnWidth(_CANDIDATE_CHECKBOX_COLUMN, 30)
+        _SIGNAL_COLUMN = 4
         header.setSectionResizeMode(_SIGNAL_COLUMN, QHeaderView.ResizeMode.Stretch)
         # 欄寬只有在視窗真正顯示、完成layout後才會是最終數值，_reload_candidates()在
         # __init__()裡就會被呼叫一次(視窗還沒show()、欄寬還是預設值)，resizeRowsToContents()
@@ -1647,9 +1673,16 @@ class MainWindow(QMainWindow):
         勾選的一個或多個觀察清單群組——單向操作(庫存→觀察清單)，比照ref-project
         沒有反向的「轉為庫存」功能，這次也不做。
         """
+        self._add_stocks_to_watchlist_via_dialog(self._selected_inventory_stock_ids())
+
+    def _add_stocks_to_watchlist_via_dialog(self, stock_ids: list[str]) -> None:
+        """共用的「選擇觀察清單群組(可複選)後批次加入」對話框，2026-08-04從
+        _on_inventory_add_to_watchlist()抽出來，供「選股」分頁的「加入觀察清單」
+        (_on_candidates_add_to_watchlist())共用，避免維護兩份幾乎一樣的群組
+        勾選清單UI。
+        """
         if self.portfolio_conn is None:
             return
-        stock_ids = self._selected_inventory_stock_ids()
         if not stock_ids:
             QMessageBox.information(self, "加入觀察清單", "請先選取要加入的股票。")
             return
@@ -1744,7 +1777,7 @@ class MainWindow(QMainWindow):
         # src/presentation/watchlist_export.py——把全部觀察清單群組(不只目前選取的
         # 這個)各自匯出成一個分頁，跟daily_pipeline.py的自動排程共用同一套匯出邏輯。
         self.watchlist_export_btn = QPushButton("匯出到Google Sheet")
-        self.watchlist_export_btn.setToolTip("把全部觀察清單群組匯出到Google Sheet，每個群組各自一個分頁")
+        self.watchlist_export_btn.setToolTip("把全部觀察清單群組跟選股清單匯出到Google Sheet，各自獨立分頁")
         self.watchlist_export_btn.clicked.connect(self._on_watchlist_export_clicked)
         toolbar.addWidget(self.watchlist_export_btn)
         toolbar.addStretch()
@@ -2417,7 +2450,9 @@ class MainWindow(QMainWindow):
         # 的資料被錯配到不同列。填完畢後再打開，使用者才能點欄位標題排序。
         self.candidates_table.setSortingEnabled(False)
         self.candidates_table.setRowCount(len(df))
-        _NUMERIC_COLUMNS = {4, 5, 6, 7, 8, 9, 11}  # 收盤價/進場價/停損價/漲跌幅/成交量/SAR值/SAR距離%
+        # 收盤價/進場價/停損價/漲跌幅/成交量/SAR值/SAR距離%——欄位整體+1，因為第0欄是
+        # 2026-08-04新增的勾選欄(見下面迴圈)。
+        _NUMERIC_COLUMNS = {5, 6, 7, 8, 9, 10, 12}
         for row_idx, row in df.reset_index(drop=True).iterrows():
             pct_change = row["pct_change"]
             pct_text = f"{pct_change:+.2f}" if pd.notna(pct_change) else "-"
@@ -2449,7 +2484,15 @@ class MainWindow(QMainWindow):
             # 被省略掉的規則實際是哪幾條，不是只看到跟儲存格一樣的截斷內容。
             tooltips = list(values)
             tooltips[3] = signal_full or "-"
-            for col_idx, (value, tooltip_value) in enumerate(zip(values, tooltips)):
+            # 第0欄：勾選欄，2026-08-04新增，供「加入庫存」/「加入觀察清單」批次動作用
+            # (見_checked_candidate_stock_ids())，跟其餘欄位分開設定(不走下面共用的
+            # item_cls/tooltip迴圈，checkbox不需要文字內容/tooltip)。
+            checkbox_item = QTableWidgetItem()
+            checkbox_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+            self.candidates_table.setItem(row_idx, 0, checkbox_item)
+            for col_offset, (value, tooltip_value) in enumerate(zip(values, tooltips)):
+                col_idx = col_offset + 1  # +1避開第0欄的勾選欄
                 item_cls = _NumericTableWidgetItem if col_idx in _NUMERIC_COLUMNS else QTableWidgetItem
                 item = item_cls(str(value))
                 if col_idx in _NUMERIC_COLUMNS:
@@ -2469,7 +2512,7 @@ class MainWindow(QMainWindow):
         rows = self.candidates_table.selectionModel().selectedRows()
         if not rows:
             return
-        stock_id = self.candidates_table.item(rows[0].row(), 0).text()
+        stock_id = self.candidates_table.item(rows[0].row(), 1).text()  # 欄位1：股票代號(欄位0是勾選欄)
         self._current_stock_id = stock_id
         # 記錄來源候選清單日期(目前分頁選取的日期)，供「個股資訊」分頁右上角顯示
         # 「來源：X月X日的選股策略」。自動切到該分頁——切換會觸發_on_tab_changed()
@@ -2489,8 +2532,8 @@ class MainWindow(QMainWindow):
             return
         query_lower = query.lower()
         for row in range(self.candidates_table.rowCount()):
-            stock_id_item = self.candidates_table.item(row, 0)
-            name_item = self.candidates_table.item(row, 1)
+            stock_id_item = self.candidates_table.item(row, 1)  # 欄位1：股票代號(欄位0是勾選欄)
+            name_item = self.candidates_table.item(row, 2)
             stock_id = stock_id_item.text() if stock_id_item else ""
             name = name_item.text() if name_item else ""
             if query_lower == stock_id.lower() or query in name:
@@ -2498,6 +2541,41 @@ class MainWindow(QMainWindow):
                 self.candidates_table.scrollToItem(stock_id_item)
                 return
         QMessageBox.information(self, "候選清單搜尋", f"目前候選清單中找不到「{query}」。")
+
+    def _checked_candidate_stock_ids(self) -> list[str]:
+        """回傳候選清單裡目前勾選(第0欄checkbox)的股票代號清單，供「加入庫存」/
+        「加入觀察清單」批次動作用。"""
+        stock_ids = []
+        for row in range(self.candidates_table.rowCount()):
+            checkbox_item = self.candidates_table.item(row, 0)
+            if checkbox_item is not None and checkbox_item.checkState() == Qt.CheckState.Checked:
+                stock_id_item = self.candidates_table.item(row, 1)
+                if stock_id_item is not None:
+                    stock_ids.append(stock_id_item.text())
+        return stock_ids
+
+    def _on_candidates_add_to_inventory(self) -> None:
+        """選股清單「加入庫存」：把勾選的股票各自新增一筆空白批次(成本價/股數留空，
+        之後自行到「庫存清單」分頁編輯)——已經有既有批次的股票不重複新增(見
+        src/data/portfolio_storage.py的add_stocks_to_inventory()說明)。"""
+        if self.portfolio_conn is None:
+            return
+        stock_ids = self._checked_candidate_stock_ids()
+        if not stock_ids:
+            QMessageBox.information(self, "加入庫存", "請先勾選要加入的股票。")
+            return
+        added = portfolio_storage.add_stocks_to_inventory(self.portfolio_conn, stock_ids)
+        skipped = len(stock_ids) - added
+        message = f"已加入{added}檔股票。"
+        if skipped:
+            message += f"（{skipped}檔已經有庫存紀錄，略過）"
+        QMessageBox.information(self, "加入庫存", message)
+
+    def _on_candidates_add_to_watchlist(self) -> None:
+        """選股清單「加入觀察清單」：把勾選的股票加入使用者選擇的一個或多個觀察
+        清單群組，跟「庫存清單」分頁的「加入觀察清單」共用同一個群組勾選對話框
+        (見_add_stocks_to_watchlist_via_dialog())。"""
+        self._add_stocks_to_watchlist_via_dialog(self._checked_candidate_stock_ids())
 
     def _on_search(self) -> None:
         query = self.search_input.text().strip()

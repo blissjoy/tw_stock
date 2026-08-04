@@ -260,3 +260,26 @@ def add_stocks_to_watchlist(conn: sqlite3.Connection, group_ids: list[int], stoc
         rows,
     )
     conn.commit()
+
+
+def add_stocks_to_inventory(conn: sqlite3.Connection, stock_ids: list[str]) -> int:
+    """選股清單「加入庫存」的批次動作用：對每檔股票各自新增一筆空白批次(lot，
+    cost_price/shares/buy_date都留空，由使用者之後自行編輯)。已經有任何一筆批次
+    紀錄的股票不重複新增——庫存的每筆批次代表一次真實的購入紀錄(見
+    add_inventory_stock()說明)，不像觀察清單只是「有沒有在清單裡」的存在性判斷，
+    重複點擊「加入庫存」不應該每次都疊加一筆全空的批次。回傳實際新增的股票數。
+    """
+    now = datetime.now().isoformat()
+    added = 0
+    for stock_id in stock_ids:
+        existing = conn.execute("SELECT 1 FROM inventory_stocks WHERE stock_id = ? LIMIT 1", (stock_id,)).fetchone()
+        if existing is not None:
+            continue
+        conn.execute(
+            "INSERT INTO inventory_stocks (stock_id, buy_date, cost_price, shares, fee, note, created_at) "
+            "VALUES (?, NULL, NULL, NULL, NULL, '', ?)",
+            (stock_id, now),
+        )
+        added += 1
+    conn.commit()
+    return added

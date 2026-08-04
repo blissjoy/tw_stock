@@ -18,7 +18,7 @@ import pandas as pd
 from src.data import google_sheets_client, portfolio_storage
 from src.data.config import get_google_sheet_id
 from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL
-from src.presentation import huang_chip_data, portfolio_data
+from src.presentation import chart_data, huang_chip_data, portfolio_data
 
 _BASE_HEADERS = [
     "股票代號", "名稱", "現價", "漲跌幅(%)", "參考成本價", "參考股數", "市值",
@@ -184,3 +184,103 @@ def export_all_watchlist_groups(
             interactive=interactive,
         )
     return len(groups)
+
+
+# 選股清單(候選清單)匯出——2026-08-04新增，使用者要求「更新觀察清單時，選股清單
+# 也一起更新上去，分成不同的sheet」。跟觀察清單分頁是同一個Google試算表(spreadsheet)
+# 底下另一個分頁(worksheet)，用固定名稱"選股清單"，不是每個觀察清單群組各自一頁。
+CANDIDATE_LIST_WORKSHEET_TITLE = "選股清單"
+
+_CANDIDATE_HEADERS = [
+    "股票代號", "名稱", "產業別", "訊號", "收盤價", "進場價", "停損價",
+    "漲跌幅(%)", "成交量(張)", "SAR值", "SAR狀態", "SAR距離%",
+]
+
+
+def _candidate_row_values(row: pd.Series) -> list[str]:
+    volume = row["volume"]
+    return [
+        row["stock_id"],
+        row["name"] if pd.notna(row["name"]) else "-",
+        row["industry"] if pd.notna(row["industry"]) else "",
+        row["signal_name"] if pd.notna(row["signal_name"]) else "-",
+        f"{row['close']:.2f}" if pd.notna(row["close"]) else "-",
+        f"{row['entry_price']:.2f}" if pd.notna(row["entry_price"]) else "-",
+        f"{row['stop_loss']:.2f}" if pd.notna(row["stop_loss"]) else "-",
+        f"{row['pct_change']:+.2f}" if pd.notna(row["pct_change"]) else "-",
+        f"{int(volume) // 1000:,}" if pd.notna(volume) else "-",
+        f"{row['sar_value']:.2f}" if pd.notna(row["sar_value"]) else "-",
+        row["sar_status"] if pd.notna(row["sar_status"]) else "-",
+        f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-",
+    ]
+
+
+def build_candidate_list_table(main_conn, target_date: str | None = None) -> dict:
+    """組出選股清單(候選清單)要匯出的表格資料。跟`scripts/daily_pipeline.py`的
+    LINE/Email通知內容套用同一套「UI候選清單預設檢視」篩選條件
+    (`chart_data.CANDIDATE_FILTER_DEFAULTS`/`CANDIDATE_SAR_FLIP_*_DEFAULT`/
+    `CANDIDATE_ZHU_RULE_ONLY_DEFAULT`)，不是`run_screen_and_store()`原始未篩選的
+    `daily_candidates`——確保Google Sheet上看到的跟桌面版「選股」分頁預設畫面、
+    LINE/Email通知三處是同一個集合，不會互相對不上。
+    """
+    universe_df, latest_date, _ = chart_data.load_stock_universe_for_date(main_conn, target_date=target_date)
+    if latest_date is not None:
+        active_filter_labels = [
+            label for label, default in chart_data.CANDIDATE_FILTER_DEFAULTS.items() if default
+        ]
+        universe_df = chart_data.apply_candidate_filters(
+            main_conn, universe_df, active_filter_labels,
+            sar_flip_option=(
+                chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT
+                if chart_data.CANDIDATE_SAR_FLIP_ENABLED_DEFAULT else None
+            ),
+            zhu_rule_only=chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT,
+            as_of_date=latest_date,
+        )
+
+    header_row0 = [""] * len(_CANDIDATE_HEADERS)
+    header_row0[0] = f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    if latest_date is not None:
+        header_row0[1] = f"候選清單日期：{latest_date}"
+
+    values: list[list[str]] = [header_row0, _CANDIDATE_HEADERS]
+    text_colors: dict[tuple[int, int], str] = {}
+    bold_cells: set[tuple[int, int]] = {(1, col) for col in range(len(_CANDIDATE_HEADERS))}
+    name_col = _CANDIDATE_HEADERS.index("名稱")
+
+    for i, row in enumerate(universe_df.reset_index(drop=True).to_dict("records")):
+        row_series = pd.Series(row)
+        row_idx = i + 2  # 前2列是表頭
+        values.append(_candidate_row_values(row_series))
+        # 名稱欄依市場別上色，跟觀察清單匯出/桌面版共用同一份對照表。
+        text_colors[(row_idx, name_col)] = portfolio_data.listing_type_color(row_series.get("listing_type"))
+
+    return {
+        "values": values,
+        "background_colors": {},
+        "text_colors": text_colors,
+        "bold_cells": bold_cells,
+        "merges": [],
+    }
+
+
+def export_candidate_list(
+    main_conn, spreadsheet_id: str | None = None, interactive: bool = True, target_date: str | None = None,
+) -> bool:
+    """匯出選股清單(候選清單)到固定名稱的分頁(`CANDIDATE_LIST_WORKSHEET_TITLE`)。
+    回傳True代表有實際匯出資料；latest_date為None(DB裡完全沒有任何候選清單紀錄)
+    時仍會寫入只有表頭的空表格，回傳False。
+    """
+    resolved_spreadsheet_id = spreadsheet_id or get_google_sheet_id()
+    table = build_candidate_list_table(main_conn, target_date=target_date)
+    google_sheets_client.write_formatted_table(
+        spreadsheet_id=resolved_spreadsheet_id,
+        worksheet_title=CANDIDATE_LIST_WORKSHEET_TITLE,
+        values=table["values"],
+        background_colors=table["background_colors"],
+        text_colors=table["text_colors"],
+        bold_cells=table["bold_cells"],
+        merges=table["merges"],
+        interactive=interactive,
+    )
+    return len(table["values"]) > 2

@@ -1,5 +1,5 @@
 from src.data.portfolio_storage import add_watchlist_group, add_watchlist_stock, init_portfolio_db
-from src.data.storage import init_db, upsert_stock_prices, upsert_stocks
+from src.data.storage import init_db, upsert_daily_candidates, upsert_stock_prices, upsert_stocks
 from src.presentation import watchlist_export
 
 
@@ -108,3 +108,91 @@ def test_export_all_watchlist_groups_counts_groups(monkeypatch):
 
     assert count == 2
     assert len(exported) == 2
+
+
+# ============================================================
+# 選股清單(候選清單)匯出(2026-08-04新增)
+# ============================================================
+
+
+def test_build_candidate_list_table_has_headers_and_row(monkeypatch):
+    """套用跟UI候選清單同一套預設篩選(見build_candidate_list_table()說明)——這裡
+    只驗證表格組裝/接線邏輯，不重新測試apply_candidate_filters()本身的篩選邏輯
+    是否正確(那部分tests/test_chart_data.py已經覆蓋)，跟test_daily_pipeline.py
+    測試LINE/Email通知篩選接線時同一種做法：直接讓篩選函式原樣放行。"""
+    monkeypatch.setattr(watchlist_export.chart_data, "apply_candidate_filters", lambda conn, df, *a, **k: df)
+    main_conn = _main_conn()
+    _seed_stock(main_conn, "2330", "台積電", 100.0)
+    upsert_daily_candidates(main_conn, [
+        {"date": "2026-08-03", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-08-03T18:00:00"},
+    ])
+
+    table = watchlist_export.build_candidate_list_table(main_conn)
+
+    assert table["values"][1] == watchlist_export._CANDIDATE_HEADERS
+    assert table["values"][0][0].startswith("更新時間：")
+    assert table["values"][0][1] == "候選清單日期：2026-08-03"
+    assert table["values"][2][0] == "2330"
+    assert table["values"][2][1] == "台積電"
+
+
+def test_build_candidate_list_table_empty_when_no_candidates():
+    main_conn = _main_conn()
+
+    table = watchlist_export.build_candidate_list_table(main_conn)
+
+    assert len(table["values"]) == 2  # 只有2列表頭，沒有任何資料列
+    assert table["values"][0][1] == ""  # 沒有latest_date，不顯示候選清單日期
+
+
+def test_build_candidate_list_table_colors_name_column_by_listing_type(monkeypatch):
+    monkeypatch.setattr(watchlist_export.chart_data, "apply_candidate_filters", lambda conn, df, *a, **k: df)
+    main_conn = _main_conn()
+    upsert_stocks(main_conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "listing_type": "twse", "updated_at": "2026-08-03"}])
+    upsert_stock_prices(main_conn, [
+        {"stock_id": "2330", "date": "2026-08-03", "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(main_conn, [
+        {"date": "2026-08-03", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-08-03T18:00:00"},
+    ])
+
+    table = watchlist_export.build_candidate_list_table(main_conn)
+
+    name_col = watchlist_export._CANDIDATE_HEADERS.index("名稱")
+    assert table["text_colors"][(2, name_col)] == "#0000CC"
+
+
+def test_export_candidate_list_writes_to_fixed_worksheet_title(monkeypatch):
+    monkeypatch.setattr(watchlist_export.chart_data, "apply_candidate_filters", lambda conn, df, *a, **k: df)
+    main_conn = _main_conn()
+    _seed_stock(main_conn, "2330", "台積電", 100.0)
+    upsert_daily_candidates(main_conn, [
+        {"date": "2026-08-03", "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
+         "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-08-03T18:00:00"},
+    ])
+
+    captured = {}
+
+    def _fake_write(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(watchlist_export.google_sheets_client, "write_formatted_table", _fake_write)
+
+    result = watchlist_export.export_candidate_list(main_conn, spreadsheet_id="fake-sheet-id", interactive=False)
+
+    assert result is True
+    assert captured["worksheet_title"] == "選股清單"
+    assert captured["spreadsheet_id"] == "fake-sheet-id"
+    assert captured["interactive"] is False
+
+
+def test_export_candidate_list_returns_false_when_no_candidates(monkeypatch):
+    main_conn = _main_conn()
+    monkeypatch.setattr(watchlist_export.google_sheets_client, "write_formatted_table", lambda **kwargs: None)
+
+    result = watchlist_export.export_candidate_list(main_conn, spreadsheet_id="fake-sheet-id", interactive=False)
+
+    assert result is False

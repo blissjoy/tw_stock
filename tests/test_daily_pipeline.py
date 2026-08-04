@@ -1192,12 +1192,18 @@ def test_run_daily_pipeline_chip_refresh_triggers_tpex_institutional_fg_and_shee
         daily_pipeline.watchlist_export, "export_all_watchlist_groups",
         lambda conn, pconn, interactive: export_calls.append((pconn, interactive)) or 0,
     )
+    candidate_export_calls = []
+    monkeypatch.setattr(
+        daily_pipeline.watchlist_export, "export_candidate_list",
+        lambda conn, interactive: candidate_export_calls.append(interactive) or True,
+    )
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False, chip_refresh=True)
 
     assert len(tpex_institutional_calls) == 1
     assert holder_refresh_calls == [portfolio_conn]
     assert export_calls == [(portfolio_conn, False)]
+    assert candidate_export_calls == [False]
 
 
 def test_run_daily_pipeline_chip_refresh_false_skips_the_three_steps(monkeypatch):
@@ -1218,6 +1224,7 @@ def test_run_daily_pipeline_chip_refresh_false_skips_the_three_steps(monkeypatch
     monkeypatch.setattr(daily_pipeline, "fetch_today_tpex_institutional", _fail)
     monkeypatch.setattr(daily_pipeline, "refresh_watchlist_holder_shares", _fail)
     monkeypatch.setattr(daily_pipeline.watchlist_export, "export_all_watchlist_groups", _fail)
+    monkeypatch.setattr(daily_pipeline.watchlist_export, "export_candidate_list", _fail)
     monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", _fail)
 
     # 不應該拋出AssertionError

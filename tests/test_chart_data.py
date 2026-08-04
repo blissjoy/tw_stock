@@ -457,6 +457,21 @@ def test_load_stock_universe_for_date_computes_pct_change_and_volume_from_stock_
     assert row["pct_change"] == 5.0  # (105-100)/100*100
 
 
+def test_load_stock_universe_for_date_includes_listing_type():
+    """2026-08-04新增：listing_type供選股清單匯出Google Sheet時依市場別上色名稱欄用
+    (跟觀察清單同一套src.presentation.portfolio_data.listing_type_color())。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "listing_type": "twse", "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 100.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+
+    df, _, _ = load_stock_universe_for_date(conn, target_date="2026-07-22")
+
+    assert df.iloc[0]["listing_type"] == "twse"
+
+
 def test_load_stock_universe_for_date_pct_change_is_nan_when_no_prior_day_price():
     """新上市或本機資料庫還沒有前一個交易日資料時，漲跌幅算不出來，應該是NaN不是crash或0。"""
     conn = _fresh_conn()
