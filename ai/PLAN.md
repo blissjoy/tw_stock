@@ -5994,3 +5994,23 @@ TPEx二分類(興櫃被併進TPEx)，這次要真正區分出興櫃，需要保�
   backfill(2495檔)。Google Sheet匯出的A1時間戳/名稱上色邏輯有對應的單元測試
   覆蓋，沒有額外觸發真實的Sheets API寫入(下次17:00排程執行`--chip-refresh`時
   會自然套用)。
+
+## 個股資訊／產業輪動分頁補上「資料更新至」（2026-08-04）
+
+使用者要求這兩個分頁也比照「大盤」/「觀察清單」既有做法補上更新時間標籤。
+
+- `src/presentation/chart_data.py`新增`get_stock_update_time(conn, stock_id)`：
+  刻意回傳「這檔股票自己的」`stocks.updated_at`，不是`get_latest_update_time()`
+  的全DB最新時間——查詢已下市/久未更新的股票時才能如實反映資料多舊，不會被
+  其他股票同一天的更新誤導成「看起來是最新的」。
+- 「個股資訊」分頁：查詢列右側新增`stock_detail_update_label`，`_rerender_chart()`
+  裡用`get_stock_update_time()`(單一股票語意，跟這個分頁本身查一檔股票一致)。
+- 「產業輪動」分頁：日期選單列右側新增`industry_update_label`，
+  `_refresh_industry_rotation_tab()`裡用`get_latest_update_time()`(全DB語意，
+  這個分頁是跨股票的產業別彙總，跟「個股資訊」的單一股票語意不同)。
+- 新增測試：`tests/test_chart_data.py`新增`get_stock_update_time()`測試(2個，
+  含驗證回傳的是該股票自己的時間戳而非全域最新)。`pytest tests/ -q`991個
+  測試全數通過。
+- 真實驗證：用D:\temp_claude的DB複本，PySide6實際視窗截圖確認「個股資訊」
+  查詢2330後右上角正確顯示「資料更新至：2026-08-04 14:30」、「產業輪動」分頁
+  右上角正確顯示「資料更新至：2026-08-04 16:01」。

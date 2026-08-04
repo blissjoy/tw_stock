@@ -18,6 +18,7 @@ from src.presentation.chart_data import (
     get_latest_candidate_update_time,
     get_latest_update_time,
     get_stock_name,
+    get_stock_update_time,
     list_candidate_dates,
     load_holidays_for_chart,
     load_ma_bullish_flags_from_table,
@@ -218,6 +219,24 @@ def test_get_latest_update_time_returns_max_updated_at():
         {"stock_id": "1101", "name": "台泥", "market": "TWSE", "industry": None, "updated_at": "2026-07-24T10:00:00"},
     ])
     assert get_latest_update_time(conn) == "2026-07-24T10:00:00"
+
+
+def test_get_stock_update_time_returns_this_stocks_own_timestamp_not_global_latest():
+    """2026-08-04新增：跟get_latest_update_time()(全DB最新)不同，這裡要回傳「這
+    檔股票自己的」updated_at，查詢已下市/久未更新的股票時才能如實反映資料多舊，
+    不會被其他股票同一天的更新誤導。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-08-04T09:00:00"},
+        {"stock_id": "8418", "name": "捷必勝-KY", "market": "TPEx", "industry": None, "updated_at": "2024-01-30T09:00:00"},
+    ])
+    assert get_stock_update_time(conn, "2330") == "2026-08-04T09:00:00"
+    assert get_stock_update_time(conn, "8418") == "2024-01-30T09:00:00"
+
+
+def test_get_stock_update_time_returns_none_when_stock_unknown():
+    conn = _fresh_conn()
+    assert get_stock_update_time(conn, "9999") is None
 
 
 def test_get_latest_candidate_update_time_returns_none_when_no_candidates():

@@ -1039,6 +1039,12 @@ class MainWindow(QMainWindow):
         self.stock_source_label = QLabel("")
         self.stock_source_label.setStyleSheet("color: #666666;")
         search_row.addWidget(self.stock_source_label)
+        # 「資料更新至」：比照「大盤」/「觀察清單」分頁既有的做法(見_build_market_tab()/
+        # _build_watchlist_tab())，放在查詢列最右邊、灰色小字——2026-08-04使用者反映
+        # 個股資訊/產業輪動看不出目前顯示的股價資料多新，這裡跟其他分頁一致補上。
+        self.stock_detail_update_label = QLabel("")
+        self.stock_detail_update_label.setStyleSheet("color: #666666;")
+        search_row.addWidget(self.stock_detail_update_label)
         bottom_layout.addLayout(search_row)
 
         # 2026-08-02改版：「個股分析」不再是按鈕展開/收合的內嵌面板，改成跟「圖表」平行的
@@ -1299,6 +1305,13 @@ class MainWindow(QMainWindow):
         self.industry_date_combo.currentIndexChanged.connect(self._refresh_industry_rotation_tab)
         date_bar.addWidget(self.industry_date_combo)
         date_bar.addStretch()
+        # 「資料更新至」：比照「大盤」/「觀察清單」/「個股資訊」分頁既有的做法，放在
+        # 日期選單列最右邊、灰色小字——2026-08-04使用者反映這個分頁看不出目前顯示的
+        # 股價資料多新。這裡顯示全DB最新更新時間(不是單一股票的)，因為這個分頁本身
+        # 是跨股票的產業別彙總，跟「個股資訊」分頁單一股票各自的updated_at不同語意。
+        self.industry_update_label = QLabel("")
+        self.industry_update_label.setStyleSheet("color: #666666;")
+        date_bar.addWidget(self.industry_update_label)
         rotation_layout.addLayout(date_bar)
 
         self.industry_table = QTableWidget()
@@ -1319,6 +1332,9 @@ class MainWindow(QMainWindow):
     def _refresh_industry_rotation_tab(self) -> None:
         if self.conn is None:
             return
+        self.industry_update_label.setText(
+            f"資料更新至：{self._format_update_timestamp(chart_data.get_latest_update_time(self.conn))}"
+        )
         target_date = self.industry_date_combo.currentText() or None
         df, latest_date = chart_data.load_industry_rotation(self.conn, target_date=target_date)
         self.industry_table.setSortingEnabled(False)
@@ -2502,6 +2518,9 @@ class MainWindow(QMainWindow):
             self.stock_source_label.setText(f"來源：{_format_month_day(self._current_stock_source)}的選股策略")
         else:
             self.stock_source_label.setText("")
+        self.stock_detail_update_label.setText(
+            f"資料更新至：{self._format_update_timestamp(chart_data.get_stock_update_time(self.conn, self._current_stock_id))}"
+        )
         price_df = chart_data.load_price_history(self.conn, self._current_stock_id)
         if price_df.empty:
             self.chart_view.setFixedHeight(80)

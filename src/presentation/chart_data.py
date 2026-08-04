@@ -728,6 +728,17 @@ def get_stock_name(conn, stock_id: str) -> str | None:
     return row[0] if row else None
 
 
+def get_stock_update_time(conn, stock_id: str) -> str | None:
+    """回傳指定股票stocks.updated_at時間戳，查無資料回傳None。2026-08-04新增，供
+    「個股資訊」分頁右上角顯示「資料更新至：...」用——刻意用這檔股票自己的
+    updated_at(不是get_latest_update_time()的全DB最新時間)，這樣查詢已下市/久未
+    更新的股票時能如實反映「這檔資料其實已經很舊了」，不會被其他股票同一天的更新
+    誤導成「看起來是最新的」。
+    """
+    row = conn.execute("SELECT updated_at FROM stocks WHERE stock_id = ?", (stock_id,)).fetchone()
+    return row[0] if row else None
+
+
 def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
     """回傳指定股票最近days天的OHLCV+均線(MA5/10/20/60/120/240，欄位名MA{n})，依date遞增
     排序、index為date；查無資料回傳空DataFrame。
