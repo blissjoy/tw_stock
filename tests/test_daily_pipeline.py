@@ -33,8 +33,13 @@ def _no_real_taiex_network_calls(monkeypatch):
     (不是全域tests/conftest.py)，因為只有run_daily_pipeline()這條路徑會無條件觸發，
     test_yfinance_client.py測的是這個函式本身，不應該被這個安全網擋住。個別測試需要驗證
     真正行為時，在測試函式主體內用monkeypatch覆蓋即可(晚於這個fixture執行，會蓋過去)。
+
+    2026-08-04新增：fetch_today_taiex()同時也會呼叫twse_client.fetch_taiex_volume()
+    (見_fetch_taiex_official_volume())覆蓋yfinance的volume欄位，同一個理由，一併
+    擋住避免真的打到TWSE。
     """
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda *args, **kwargs: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_volume", lambda *args, **kwargs: {})
 
 
 def test_run_daily_pipeline_skips_when_twse_has_no_data(monkeypatch):
@@ -658,6 +663,143 @@ def test_fetch_today_taiex_repair_refetch_overwrites_stale_zero_volume(monkeypat
         "SELECT volume FROM stock_prices WHERE stock_id = ? AND date = ?", (stock_id, "2026-07-28"),
     ).fetchone()
     assert row == (4492500,)
+
+
+def test_fetch_today_taiex_overwrites_volume_with_twse_official_figure(monkeypatch):
+    """2026-08-04修正：yfinance的^TWII volume欄位長期不可靠(甚至整天資料直接從回應
+    消失，不只是volume=0)，改用TWSE官方FMTQIK的成交股數覆蓋掉yfinance回傳的volume，
+    OHLC(開高低收)繼續維持yfinance原始值。"""
+    conn = _fresh_conn()
+    stock_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    fake_rows = [{
+        "stock_id": stock_id, "date": "2026-08-03", "open": 42780.42, "high": 43784.19,
+        "low": 42780.42, "close": 43386.41, "volume": 0, "trading_money": None,
+        "trading_turnover": None, "spread": None,
+    }]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: fake_rows)
+    monkeypatch.setattr(
+        daily_pipeline.twse_client, "fetch_taiex_volume",
+        lambda month: {"2026-08-03": 11427047935} if month.startswith("202608") else {},
+    )
+
+    daily_pipeline.fetch_today_taiex(conn, "20260803")
+
+    row = conn.execute(
+        "SELECT open, close, volume FROM stock_prices WHERE stock_id = ? AND date = ?",
+        (stock_id, "2026-08-03"),
+    ).fetchone()
+    assert row == (42780.42, 43386.41, 11427047935)  # OHLC維持yfinance原值，只有volume被換掉
+
+
+def test_fetch_today_taiex_keeps_yfinance_volume_when_twse_has_no_data_for_that_date(monkeypatch):
+    """TWSE FMTQIK查無某一天的資料(例如今天還沒收盤公布)時，該天的volume維持
+    yfinance原始值，不應該被清空或報錯中斷。"""
+    conn = _fresh_conn()
+    stock_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    fake_rows = [{
+        "stock_id": stock_id, "date": "2026-08-04", "open": 43092.49, "high": 43912.77,
+        "low": 42895.81, "close": 43360.66, "volume": 0, "trading_money": None,
+        "trading_turnover": None, "spread": None,
+    }]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: fake_rows)
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_volume", lambda month: {})
+
+    daily_pipeline.fetch_today_taiex(conn, "20260804")
+
+    row = conn.execute(
+        "SELECT volume FROM stock_prices WHERE stock_id = ? AND date = ?", (stock_id, "2026-08-04"),
+    ).fetchone()
+    assert row == (0,)
+
+
+def test_fetch_today_taiex_continues_when_twse_volume_fetch_raises(monkeypatch):
+    """TWSE FMTQIK呼叫失敗不應該讓整個大盤更新失敗——yfinance抓到的OHLC資料依然要
+    正常寫入，只有volume欄位維持yfinance原始值。"""
+    conn = _fresh_conn()
+    stock_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    fake_rows = [{
+        "stock_id": stock_id, "date": "2026-08-03", "open": 42780.42, "high": 43784.19,
+        "low": 42780.42, "close": 43386.41, "volume": 0, "trading_money": None,
+        "trading_turnover": None, "spread": None,
+    }]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: fake_rows)
+
+    def _raise(month):
+        raise RuntimeError("模擬TWSE暫時打不通")
+
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_volume", _raise)
+
+    result = daily_pipeline.fetch_today_taiex(conn, "20260803")
+
+    assert result is True
+    row = conn.execute(
+        "SELECT close, volume FROM stock_prices WHERE stock_id = ? AND date = ?",
+        (stock_id, "2026-08-03"),
+    ).fetchone()
+    assert row == (43386.41, 0)
+
+
+def test_fetch_today_taiex_repairs_volume_for_date_yfinance_no_longer_returns(monkeypatch):
+    """2026-08-04真實驗證時發現的真正bug：Yahoo有時不是「volume=0」，是把整天的資料
+    列從回應裡拿掉，rows根本沒有那個日期可以走到、逐一遍歷rows永遠不會修到它。這裡
+    模擬這個情境：DB裡已經有這天先前存過的OHLC(Yahoo以前回傳過)，但這次yfinance的
+    rows完全不含這天，TWSE卻有這天的官方成交量——應該要用DB裡的舊OHLC+TWSE的新
+    volume組一筆補回去，不能因為rows沒有這個日期就放棄。"""
+    conn = _fresh_conn()
+    stock_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    storage.upsert_stocks(conn, [{
+        "stock_id": stock_id, "name": "台股加權指數", "market": "INDEX",
+        "industry": None, "updated_at": "2026-08-03T14:00:00",
+    }])
+    storage.upsert_stock_prices(conn, [{
+        "stock_id": stock_id, "date": "2026-08-03", "open": 42780.42, "high": 43784.19,
+        "low": 42780.42, "close": 43386.41, "volume": 0, "trading_money": None,
+        "trading_turnover": None, "spread": None,
+    }])
+
+    # yfinance這次完全不包含2026-08-03這一天(模擬Yahoo把這天從回應裡拿掉)
+    fake_rows = [{
+        "stock_id": stock_id, "date": "2026-08-04", "open": 43092.49, "high": 43912.77,
+        "low": 42895.81, "close": 43360.66, "volume": 0, "trading_money": None,
+        "trading_turnover": None, "spread": None,
+    }]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: fake_rows)
+    monkeypatch.setattr(
+        daily_pipeline.twse_client, "fetch_taiex_volume",
+        lambda month: {"2026-08-03": 11427047935} if month.startswith("202608") else {},
+    )
+
+    result = daily_pipeline.fetch_today_taiex(conn, "20260804")
+
+    assert result is True
+    row = conn.execute(
+        "SELECT open, close, volume FROM stock_prices WHERE stock_id = ? AND date = ?",
+        (stock_id, "2026-08-03"),
+    ).fetchone()
+    assert row == (42780.42, 43386.41, 11427047935)  # 舊OHLC保留，volume被官方數字補上
+
+
+def test_fetch_today_taiex_skips_date_with_twse_volume_but_no_ohlc_anywhere(monkeypatch):
+    """TWSE有某天的官方成交量，但yfinance從來沒回傳過那天(rows不含、DB裡也沒有既有
+    資料)——沒有open/high/low/close可以組成一筆完整的紀錄，應該跳過，不寫入殘缺列。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_volume", lambda month: {"2026-08-03": 11427047935})
+
+    result = daily_pipeline.fetch_today_taiex(conn, "20260804")
+
+    assert result is False
+    stock_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    row = conn.execute(
+        "SELECT COUNT(*) FROM stock_prices WHERE stock_id = ? AND date = ?", (stock_id, "2026-08-03"),
+    ).fetchone()
+    assert row == (0,)
+
+
+def test_month_starts_covers_month_boundary_including_year_rollover():
+    assert daily_pipeline._month_starts("2026-07-28", "2026-08-04") == ["20260701", "20260801"]
+    assert daily_pipeline._month_starts("2026-08-01", "2026-08-04") == ["20260801"]
+    assert daily_pipeline._month_starts("2025-12-20", "2026-01-05") == ["20251201", "20260101"]
 
 
 def test_fetch_today_taiex_returns_false_when_no_data(monkeypatch):

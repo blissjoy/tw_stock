@@ -18,6 +18,10 @@ import requests
 STOCK_PRICE_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
 INSTITUTIONAL_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
 MARGIN_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
+# 大盤統計資訊(FMTQIK)：官方逐日公布的大盤成交股數/成交金額/發行量加權股價指數，
+# 2026-08-04新增，取代yfinance的^TWII volume欄位——見scripts/daily_pipeline.py
+# fetch_today_taiex()的說明，Yahoo的大盤成交量欄位長期不可靠。
+TAIEX_VOLUME_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
 
 # 只收4碼數字股票代號，排除ETF(5~6碼)、權證(6碼)、債券等其他證券類型
 STOCK_CODE_PATTERN = re.compile(r"^\d{4}$")
@@ -106,6 +110,22 @@ def parse_institutional_investors(raw: dict) -> list[dict]:
     return rows
 
 
+def _parse_roc_slash_date(roc_date: str) -> str:
+    """民國年日期字串(例如'115/08/03')轉西元'YYYY-MM-DD'。FMTQIK用斜線分隔的民國年
+    格式，跟fetch_stock_prices()等其他端點吃的西元年YYYYMMDD不同，不要搞混。"""
+    year_str, month, day = roc_date.split("/")
+    return f"{int(year_str) + 1911}-{month}-{day}"
+
+
+def parse_taiex_volume(raw: dict) -> dict[str, int]:
+    """解析FMTQIK(大盤統計資訊)回應，回傳{date('YYYY-MM-DD'): 成交股數}對照表。這個
+    端點以「月」為單位回傳整月資料(date參數指定要查哪個月)，非交易日(stat!='OK'，
+    例如查詢還沒有任何資料的未來月份)回傳空dict，不拋錯。"""
+    if raw.get("stat") != "OK":
+        return {}
+    return {_parse_roc_slash_date(row[0].strip()): _to_int(row[1]) for row in raw.get("data", [])}
+
+
 def parse_margin_trading(raw: dict) -> list[dict]:
     """解析 MI_MARGN 回應（取「融資融券彙總」逐股明細表，不取開頭的全市場統計表）。"""
     if raw.get("stat") != "OK":
@@ -167,3 +187,10 @@ def fetch_institutional_investors(date: str) -> list[dict]:
 def fetch_margin_trading(date: str) -> list[dict]:
     raw = _get_json(MARGIN_URL, {"date": date, "selectType": "ALL", "response": "json"})
     return parse_margin_trading(raw)
+
+
+def fetch_taiex_volume(date: str) -> dict[str, int]:
+    """date: 'YYYYMMDD'西元年格式，只有年月部分有意義(TWSE用來決定回傳哪個月，日期
+    數字本身被忽略、回傳整個月份的資料)。查無資料(例如還沒收盤公布)回傳空dict。"""
+    raw = _get_json(TAIEX_VOLUME_URL, {"date": date, "response": "json"})
+    return parse_taiex_volume(raw)

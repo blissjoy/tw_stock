@@ -5841,3 +5841,50 @@ Session`)。真實驗證：用D:\tmp的DB複本呼叫`fetch_today_tpex_instituti
 `test_legacy_compat_ssl_adapter_keeps_strict_certificate_verification()`，直接
 檢查adapter建出來的`ssl_context`屬性，鎖定這個安全前提之後不會被意外改掉。
 `pytest tests/ -q`958個測試全數通過。
+
+## 大盤成交量長期為0的根因修正（2026-08-04）
+
+使用者回報「大盤昨天已收盤，成交量還是0」，且質疑「開盤中也不可能沒有當下成交量」，
+要求仔細確認。直接反覆呼叫真實yfinance API驗證(不是猜測)：`yf.download('^TWII',
+start='2026-08-01', end='2026-08-06')`連續測試3次結果一致，**2026-08-03這天的
+資料列直接從回應裡消失**(不是volume=0，是Yahoo根本不回傳這天)，2026-07-31以前
+44個交易日裡只有最新一天會是volume=0——證實2026-08-01已有的「往回重抓等Yahoo
+補齊」自我修復機制對「Yahoo整天資料消失」這種情況完全沒用，因為根本沒有東西可以
+讓我們重新覆蓋。
+
+一開始提案「加總自己DB裡TWSE股票的成交量」當替代來源，但使用者追問「100%確定
+這樣算=大盤成交量嗎」，實測比對TWSE官方`FMTQIK`(大盤統計資訊)發現**這個假設是
+錯的**：2026-08-03官方成交股數是114億2,704萬7,935股，而自己篩選4碼代號的TWSE
+股票加總只有50億股，少了一半以上(漏掉ETF/TDR/特別股等非4碼代號證券)——這個方法
+不能用。改用TWSE官方`FMTQIK`端點本身的「成交股數」欄位，用其中的「發行量加權
+股價指數」欄位比對本地DB既有收盤價(43,386.41完全一致)確認抓對列，才100%確定
+可以拿來用。
+
+使用者接著問「一檔股票OHLC來源a、volume來源b，以後維護會不會太複雜」——說明TWSE
+官方沒有提供大盤指數的開高低(只有收盤指數一個數字，查過`MI_INDEX`/`MI_INDEX4`/
+`MI_INDEX20`都沒有)，「完全只用TWSE」做不到會失去K線高低價；但這其實跟`fetch_
+today_twse()`現有的「TWSE股價+FinMind名稱/產業別合併成一列」是同一種既有模式，
+不是新的複雜度，使用者確認可以接受。
+
+- `src/data/twse_client.py`新增`TAIEX_VOLUME_URL`(FMTQIK)、`_parse_roc_slash_
+  date()`(這個端點的日期格式`"115/08/03"`跟其他TWSE端點的`YYYYMMDD`不同，斜線
+  分隔的民國年)、`parse_taiex_volume()`(回傳`{date: 成交股數}`，這個端點以「月」
+  為單位回傳整月資料)、`fetch_taiex_volume(date)`。
+- `scripts/daily_pipeline.py`新增`_month_starts()`(算出查詢範圍涵蓋到的每個月份
+  第一天，供跨月查詢FMTQIK用)、`_fetch_taiex_official_volume()`，`fetch_today_
+  taiex()`改成：yfinance抓到的OHLC列先用`date -> row`字典整理，再走過TWSE回傳的
+  每個日期把volume換掉；**這裡踩了一個坑**——第一版直接逐一遍歷yfinance的`rows`
+  找符合日期的列換volume，真實驗證時才發現Yahoo「整天消失」的那幾天`rows`根本沒有
+  那個日期可以走到，這樣永遠修不到；改成反過來走過TWSE回傳的日期，`rows`裡沒有
+  的話改查DB裡有沒有先前存過的OHLC(代表Yahoo以前回傳過)，用舊OHLC+新volume補一筆，
+  兩邊都沒有OHLC的日期才放棄。TWSE查詢失敗獨立try/except，OHLC資料維持正常寫入。
+- `tests/test_twse_client.py`新增`parse_taiex_volume`/`_parse_roc_slash_date`
+  測試(3個)；`tests/test_daily_pipeline.py`新增`_month_starts`跨月/跨年測試、
+  volume覆蓋/TWSE查無資料/TWSE查詢失敗/**Yahoo整天消失但DB有舊OHLC**這幾種情境
+  的測試(共7個)，`_no_real_taiex_network_calls`這個autouse安全網一併擋住
+  `twse_client.fetch_taiex_volume`避免其他測試真的打到TWSE。`pytest tests/ -q`
+  967個測試全數通過。
+- 真實驗證：先用D:\temp_claude的DB複本測試(第一版有bug、驗證時當場抓到、修正後
+  重測通過)，確認正確後直接套用到正式DB——2026-08-03的volume從0改成正確的
+  11,427,047,935，OHLC維持不變；2026-08-04(今天)因為TWSE官方統計還沒公布，
+  volume維持0是預期行為，下次排程執行TWSE公布後會自動補上。

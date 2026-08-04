@@ -1,8 +1,10 @@
 from src.data.twse_client import (
+    _parse_roc_slash_date,
     format_date,
     parse_institutional_investors,
     parse_margin_trading,
     parse_stock_prices,
+    parse_taiex_volume,
 )
 
 
@@ -126,3 +128,31 @@ def test_parse_margin_trading():
     assert row["short_sale_sell"] == 0
     assert row["short_sale_today_balance"] == 779
     assert row["offset_loan_and_short"] == 0
+
+
+# ============================================================
+# FMTQIK(大盤統計資訊，2026-08-04新增)
+# ============================================================
+
+
+def test_parse_roc_slash_date():
+    assert _parse_roc_slash_date("115/08/03") == "2026-08-03"
+    assert _parse_roc_slash_date("115/01/01") == "2026-01-01"
+
+
+def test_parse_taiex_volume_returns_date_to_volume_map():
+    # 真實回應樣本(2026-08-04實測)：['115/08/03', '11,427,047,935', '885,506,043,091', '4,191,882', '43,386.41', '266.66']
+    raw = {
+        "stat": "OK",
+        "data": [
+            ["115/08/03", "11,427,047,935", "885,506,043,091", "4,191,882", "43,386.41", "266.66"],
+            ["115/08/04", "9,876,543,210", "800,000,000,000", "4,000,000", "43,360.66", "0.00"],
+        ],
+    }
+    result = parse_taiex_volume(raw)
+    assert result == {"2026-08-03": 11427047935, "2026-08-04": 9876543210}
+
+
+def test_parse_taiex_volume_empty_when_stat_not_ok():
+    # 查詢還沒有任何交易日資料的月份時的實際回應型態
+    assert parse_taiex_volume({"stat": "查詢無資料"}) == {}

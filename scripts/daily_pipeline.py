@@ -232,6 +232,29 @@ TAIEX_REFETCH_WINDOW_DAYS = 10
 INDICATOR_REFRESH_WINDOW_DAYS = 10
 
 
+def _month_starts(start_date: str, end_date: str) -> list[str]:
+    """回傳start_date~end_date(含)涵蓋到的每個月份第一天，格式'YYYYMM01'(西元年)，
+    供_fetch_taiex_official_volume()逐月查詢TWSE FMTQIK用(這個端點以「月」為單位
+    回傳整月資料)。"""
+    cur = date.fromisoformat(start_date).replace(day=1)
+    end = date.fromisoformat(end_date).replace(day=1)
+    months = []
+    while cur <= end:
+        months.append(cur.strftime("%Y%m01"))
+        cur = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
+    return months
+
+
+def _fetch_taiex_official_volume(start_date: str, end_date: str) -> dict[str, int]:
+    """呼叫TWSE官方FMTQIK，合併start_date~end_date(含)涵蓋到的每個月份，回傳
+    {date: 成交股數}對照表。見fetch_today_taiex()說明：這是用來覆蓋掉yfinance
+    ^TWII不可靠的volume欄位。"""
+    result: dict[str, int] = {}
+    for month_str in _month_starts(start_date, end_date):
+        result.update(twse_client.fetch_taiex_volume(month_str))
+    return result
+
+
 def fetch_today_taiex(conn, date_str: str) -> bool:
     """更新大盤(台股加權指數，`yfinance_client.TAIEX_STOCK_ID`)的OHLCV資料。
 
@@ -249,18 +272,65 @@ def fetch_today_taiex(conn, date_str: str) -> bool:
     `TAIEX_REFETCH_WINDOW_DAYS`天(不只當天)，`storage.upsert_stock_prices()`本來
     就是ON CONFLICT DO UPDATE，回抓到比之前更完整的資料時會自動覆蓋掉舊的0值，不需要
     額外偵測「哪幾天資料不完整」的邏輯，日後也會持續自我修正。
+
+    ⚠️ 2026-08-04發現：上面這個「回頭重抓等Yahoo補齊」的假設本身有破綻——實測發現
+    Yahoo Finance的^TWII有時不是「volume=0還沒補」，而是**整天的資料列直接從回應裡
+    消失**(用同一個查詢範圍連續呼叫3次結果一致，不是隨機的網路問題)，之後也不會再
+    出現，往回重抓的自我修復機制對這種情況完全沒用。改用TWSE官方FMTQIK(大盤統計
+    資訊)的「成交股數」覆蓋掉yfinance的volume欄位——這是TWSE逐日公布的官方數字，
+    已用「發行量加權股價指數」欄位比對我們既有的收盤價數字完全一致，確認抓對列。
+    OHLC(開高低收)繼續用yfinance(TWSE沒有提供大盤指數的開高低，只有收盤指數這一個
+    數字)，兩個來源合併成同一列才寫入，跟`fetch_today_twse()`「TWSE股價+FinMind
+    名稱/產業別」合併同一列的既有模式一致。TWSE查詢失敗只印出訊息、volume欄位維持
+    yfinance原始值，不應該讓OHLC這部分已經抓到的資料也一起遺失。
+
+    ⚠️ **這個merge邏輯不能只是「逐一走過`rows`、把符合日期的volume換掉」**：實測
+    發現Yahoo「整天資料列消失」的那幾天，`rows`裡根本沒有那個日期可以走到，逐一遍歷
+    `rows`永遠不會處理到它，volume就會永遠停在DB裡舊的錯誤值(第一版修法就是這樣，
+    真實驗證時才發現漏掉這個情況)。改成先用`rows`建`date -> row`字典，再走過TWSE
+    回傳的每個日期：`rows`裡已經有的直接換volume；`rows`裡沒有但DB裡已經存過OHLC
+    (代表Yahoo以前回傳過這天、現在才消失)的，用DB裡的舊OHLC+TWSE的新volume組一筆
+    補回去；兩邊都沒有OHLC可用的日期(從來没被yfinance回傳過)就放棄，沒有open/high/
+    low/close可以寫。
     """
     iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
     next_day = (date.fromisoformat(iso_date) + timedelta(days=1)).isoformat()
     start_date = (date.fromisoformat(iso_date) - timedelta(days=TAIEX_REFETCH_WINDOW_DAYS)).isoformat()
     rows = yfinance_client.fetch_taiex_prices(start_date, next_day)
-    if not rows:
+    rows_by_date = {row["date"]: row for row in rows}
+
+    try:
+        volume_by_date = _fetch_taiex_official_volume(start_date, iso_date)
+    except Exception as exc:  # noqa: BLE001
+        print(f"大盤官方成交量(TWSE FMTQIK)更新失敗（略過，volume欄位維持yfinance原始值）：{exc}")
+        volume_by_date = {}
+
+    for row_date, volume in volume_by_date.items():
+        if row_date in rows_by_date:
+            rows_by_date[row_date]["volume"] = volume
+            continue
+        existing = conn.execute(
+            "SELECT open, high, low, close FROM stock_prices WHERE stock_id = ? AND date = ?",
+            (yfinance_client.TAIEX_STOCK_ID, row_date),
+        ).fetchone()
+        if existing is None:
+            continue  # 從來沒有任何來源回傳過這天的OHLC，沒有資料可以補
+        open_, high, low, close = existing
+        rows_by_date[row_date] = {
+            "stock_id": yfinance_client.TAIEX_STOCK_ID, "date": row_date,
+            "open": open_, "high": high, "low": low, "close": close,
+            "volume": volume, "trading_money": None, "trading_turnover": None, "spread": None,
+        }
+
+    merged_rows = list(rows_by_date.values())
+    if not merged_rows:
         return False
+
     storage.upsert_stocks(conn, [{
         "stock_id": yfinance_client.TAIEX_STOCK_ID, "name": "台股加權指數", "market": "INDEX",
         "industry": None, "updated_at": datetime.now().isoformat(),
     }])
-    storage.upsert_stock_prices(conn, rows)
+    storage.upsert_stock_prices(conn, merged_rows)
     return True
 
 
