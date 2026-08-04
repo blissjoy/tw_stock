@@ -6328,3 +6328,50 @@ stock_detail_data`匯入。
 📌總結分析區塊頂端(用`stMain.scrollTop`數值變化交叉驗證捲動確實發生，
 不只是視覺上看起來像)；瀏覽器console確認0個JS錯誤。`pytest tests/ -q`
 1007個測試全數通過(純UI版面重組，底層函式未改動，不需要新增測試)。
+
+## web/桌面版功能對齊 第4批：新增「個股明細」5個區塊（2026-08-04）
+
+延續對齊計畫第4項：桌面版「個股資訊」分頁的「個股明細」inner tab有5個各自
+可收合的區塊(交易資訊/法人買賣總覽/主力進出/資券變化總覽/大戶籌碼)，web版
+完全沒有，這次補上。底層資料函式(`stock_detail_data.py`的`load_quote_
+summary`/`load_institutional_cumulative`/`load_institutional_estimated_
+cost`/`load_institutional_flow_analysis`/`load_institutional_momentum_
+analysis`/`load_margin_daily`/`load_margin_cumulative`/`load_margin_
+maintenance_analysis`等)本來就是兩前端共用層，這次沒有改動；只有桌面版
+`desktop/main_window.py`裡把這些資料組成HTML表格/分析文字的`_build_
+overview_*_html()`系列方法是桌面版UI專屬程式碼，這次刻意不去重構桌面版
+(那些方法已經穩定運作、沒有現成測試覆蓋，貿然搬動風險大於效益)，改成在
+`dashboard/app.py`裡照抄同一套呈現邏輯與文字內容(理論依據/書籍引用文字
+逐字對齊)，用web慣用的元件重新組版：5個區塊各自一個`st.expander(expanded=
+True)`(取代桌面版的`_CollapsibleBox`，預設展開一致)；「資券變化總覽」的
+當日/累計切換改用`st.radio(horizontal=True)`(取代桌面版的QButtonGroup雙
+按鈕，效果等價)；数字表格改用`pd.DataFrame`+`st.dataframe`(法人買賣總覽
+表格用`.style.map()`依正負值上紅/綠色，跟桌面版`_colored_num()`同一套配色
+邏輯)；主力進出/大戶籌碼維持桌面版原文的「尚未串接資料來源」提示，不假造
+資料。新增`_colored_num()`/`_render_institutional_flow_analysis()`/
+`_render_margin_maintenance_analysis()`三個輔助函式，`render_stock_
+overview_section()`統籌5個區塊，只在「個股資訊」分頁呼叫(大盤不顯示，跟
+桌面版的個股專屬邊界一致)。
+
+**踩到的坑**：`st.dataframe()`搭配`pandas.Styler`時，缺值儲存格(不管是
+Python`None`還是明確轉成的`float("nan")`)一律顯示Python的"None"字面
+字串，`Styler.format(..., na_rep=...)`參數對這類儲存格不生效(疑似
+`st.dataframe`內部Arrow轉換流程對NaN有自己固定的顯示邏輯，蓋過Styler的
+格式化結果)——「預估持股成本價」表格(淨賣出天期無累積部位時該格是`None`，
+理論上要顯示「不適用」)因此一開始誤顯示成"None"文字。修法：不依賴Styler
+處理NA，改成在建構DataFrame前就把每一格轉成「已經格式化好的字串」("不
+適用"或`"{:,.2f}"`格式化後的數字字串)，犧牲這個表格數字欄位的靠右對齊，
+換取顯示正確——這是為了讓其他函式碰到同類需求時，第一時間就避開這個
+Streamlit/Styler的已知限制，不用重新踩一次坑。
+
+真實驗證：本機啟動Streamlit(`LOCAL_DB_PATH`指向DB複本)+Playwright無頭
+瀏覽器，查詢一檔實際有法人/資券資料且當下融資維持率已跌破斷頭線的股票
+(9958)，捲動確認5個區塊都正確顯示：交易資訊(紅綠上色的漲跌/漲跌幅)、
+法人買賣總覽(10個天期x4個法人類別的正負值表格+預估持股成本價表格+
+📊法人籌碼分析文字，含三大法人連續買超5天/外資連續買超5天/買賣力道變化
+段落)、主力進出(正確顯示尚未串接資料來源提示)、資券變化總覽(當日/累計
+切換正確運作+📊融資維持率分析正確顯示「已跌破斷頭線」與「超跌反彈」兩則
+警示文字，這是實際資料觸發的真實案例，不是刻意造的測試資料)、大戶籌碼
+(正確顯示尚未串接資料來源提示)；過程中發現並修正「不適用」誤顯示"None"
+的bug，修正後重新驗證通過；瀏覽器console全程確認0個JS錯誤。`pytest
+tests/ -q`1007個測試全數通過(底層資料函式未改動，不需要新增測試)。

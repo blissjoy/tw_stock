@@ -79,6 +79,7 @@ def main() -> None:
     from scripts.daily_pipeline import run_daily_pipeline
     from src.data import storage
     from src.data.connection import get_default_connection
+    from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
     from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
 
     try:
@@ -297,6 +298,258 @@ def main() -> None:
         st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
         st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))
         st.caption("⚠️ 型態訊號的「高檔/低檔」判斷已接上趨勢位置模組(is_at_high/is_at_low)，但目前只用單一容忍帶門檻，還沒有初升/主升/末升等更細的子階段分類。")
+
+    def _colored_num(value, decimals: int = 0, signed: bool = False, suffix: str = "") -> str:
+        """數字上紅(正)下綠(負)——跟K棒既有的紅漲綠跌配色一致，照抄desktop/main_window.py
+        的_colored_num()。value是None/NaN時回傳"-"，不是"0"，區分「沒有資料」跟「剛好是0」。"""
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return "-"
+        color = "#c0392b" if value > 0 else ("#27ae60" if value < 0 else "#333333")
+        sign = "+" if signed and value > 0 else ""
+        return f'<span style="color:{color};">{sign}{value:,.{decimals}f}{suffix}</span>'
+
+    def _render_institutional_flow_analysis(flow: dict | None, momentum: dict | None) -> None:
+        """依load_institutional_flow_analysis()/load_institutional_momentum_analysis()
+        的判讀結果，組出法人買賣總覽下方的「📊 法人籌碼分析」文字——照抄desktop/
+        main_window.py的_build_institutional_flow_analysis_html()，理論依據/書籍
+        引用文字完全一致(見該函式docstring)，這裡不重複展開說明。"""
+        if flow is None and momentum is None:
+            return
+        st.markdown("**📊 法人籌碼分析**")
+        streak_shown = False
+        if flow is not None:
+            sanhua = flow["三大法人"]
+            if sanhua["is_sell_warning"]:
+                st.markdown(
+                    f'<p style="color:#27ae60;">⚠️ 三大法人已連續賣超{sanhua["streak_days"]}天，'
+                    "達到停損觀察門檻（依朱家泓《抓住飆股輕鬆賺》淘汰法選股排除規則第8項："
+                    "三大法人連續賣超應避開，建議留意停損／減碼）。</p>", unsafe_allow_html=True,
+                )
+                streak_shown = True
+            elif sanhua["is_buy_watch"]:
+                st.markdown(
+                    f'<p style="color:#c0392b;">三大法人已連續買超{sanhua["streak_days"]}天，'
+                    "短線動能偏多，但書中沒有給「連續買超代表安全」的保證，僅供參考。</p>", unsafe_allow_html=True,
+                )
+                streak_shown = True
+
+            invtrust = flow["投信"]
+            if invtrust["is_buy_watch"]:
+                st.markdown(
+                    f'<p style="color:#c0392b;">📈 投信已連續買超{invtrust["streak_days"]}天'
+                    "（依陳家豐《看懂籌碼 股市賺大錢》：投信受法規限制(單一個股持股上限10%、"
+                    "單日買進不得超過成交量10%)須分批布局，連續加碼3~5天且個股剛脫離下跌"
+                    "整理通常是切入時機——本畫面沒有另外判斷「是否剛脫離整理區」，需自行"
+                    "對照K線圖）。</p>", unsafe_allow_html=True,
+                )
+                streak_shown = True
+            elif invtrust["is_sell_warning"]:
+                st.markdown(
+                    f'<p style="color:#27ae60;">投信已連續賣超{invtrust["streak_days"]}天，'
+                    "留意是否轉向保守（書中提到投信若轉向防禦型持股，代表對後市看淡）。</p>", unsafe_allow_html=True,
+                )
+                streak_shown = True
+
+            foreign = flow["外資"]
+            if foreign["is_buy_watch"] or foreign["is_sell_warning"]:
+                direction_text = "買超" if foreign["is_buy_watch"] else "賣超"
+                st.markdown(
+                    f'<p style="color:#999999;">外資已連續{direction_text}{foreign["streak_days"]}天——'
+                    "⚠️ 陳家豐書中提醒：外資買賣單只有在中小型股(非權值股)才有參考價值，"
+                    "權值股/大型股的外資買賣受全球布局、期貨套利、指數調整干擾，不宜直接"
+                    "採信本訊號判斷多空。</p>", unsafe_allow_html=True,
+                )
+                streak_shown = True
+
+            dealer = flow["自營商"]
+            if dealer["is_buy_watch"] or dealer["is_sell_warning"]:
+                direction_text = "買超" if dealer["is_buy_watch"] else "賣超"
+                st.markdown(
+                    f'<p style="color:#999999;">自營商連續{direction_text}{dealer["streak_days"]}天——'
+                    "⚠️ 陳家豐書中建議「自營商首先剔除」，操作週期短、常忽買忽賣，不建議"
+                    "用連續性判斷趨勢，僅供參考。</p>", unsafe_allow_html=True,
+                )
+                streak_shown = True
+
+            if not streak_shown:
+                st.write(f"近期法人買賣方向尚未達連續{INSTITUTIONAL_STREAK_THRESHOLD}天門檻，暫無明顯訊號。")
+
+        if momentum:
+            trend_colors = {
+                "買超力道增強": "#c0392b", "由賣轉買": "#c0392b",
+                "賣壓加重": "#27ae60", "由買轉賣": "#27ae60",
+            }
+            group_titles = {
+                "外資": "📐 外資買賣力道變化（近期比前期）",
+                "投信": "📐 投信買賣力道變化（近期比前期）",
+                "外資+投信": "📐 外資＋投信合計買賣力道變化（近期比前期，不含自營商）",
+            }
+            for group in stock_detail_data.MOMENTUM_GROUPS:
+                periods = momentum.get(group)
+                if not periods:
+                    continue
+                st.markdown(f"**{group_titles[group]}**")
+                for label, info in periods.items():
+                    current_lots, prior_lots = info["current"] / 1000, info["prior"] / 1000
+                    trend = info["trend"]
+                    color = trend_colors.get(trend, "#999999")
+                    verb = "持續買進" if trend in ("買超力道增強", "由賣轉買") else ("持續賣出" if trend in ("賣壓加重", "由買轉賣") else "力道趨緩，方向未明確轉變")
+                    st.markdown(
+                        f'<p style="color:{color};">近{label}合計買賣超{current_lots:+,.0f}張，'
+                        f"較前{label}（{prior_lots:+,.0f}張）{trend}——{verb}。</p>", unsafe_allow_html=True,
+                    )
+
+    def _render_margin_maintenance_analysis(maintenance: dict | None) -> None:
+        """融資維持率分析文字，照抄desktop/main_window.py的
+        _build_margin_maintenance_analysis_html()，理論依據見該函式docstring。"""
+        if maintenance is None or maintenance["ratio"] is None:
+            return
+        ratio_pct = maintenance["ratio"] * 100
+        state = maintenance["state"]
+        st.markdown("**📊 融資維持率分析**")
+        st.write(f"估算融資維持率：{ratio_pct:.1f}%（狀態：{state}；融資成數估算採書中預設的6成，非個股實際規定，僅供參考）")
+        if state == "已跌破斷頭線":
+            st.markdown(
+                '<p style="color:#27ae60;">⚠️ 估算已跌破斷頭線(120%)，代表融資部位可能面臨'
+                "券商強制賣出的斷頭賣壓（依陳家豐《看懂籌碼》第2篇第4章）。</p>", unsafe_allow_html=True,
+            )
+        elif state == "警戒區(爹不疼娘不愛)":
+            st.markdown(
+                '<p style="color:#e67e22;">融資維持率落在135%以下的警戒區——書中提醒：'
+                "主力通常不會在這個階段進場，因為要面對層層融資套牢賣壓，此時股票容易"
+                "「爹不疼、娘不愛」，若後續跌破120%，可留意超跌反彈機會。</p>", unsafe_allow_html=True,
+            )
+        if maintenance["oversold_rebound_signal"]:
+            st.markdown(
+                '<p style="color:#c0392b;">📈 已連續多日低於120%斷頭線，符合書中「超跌'
+                "反彈」訊號條件——僅適合手腳靈活、能嚴設停利的短線操作，不是長線買進"
+                "依據。</p>", unsafe_allow_html=True,
+            )
+
+    def render_stock_overview_section(stock_id: str) -> None:
+        """「個股明細」5個區塊：交易資訊/法人買賣總覽/主力進出/資券變化總覽/大戶籌碼，
+        照抄desktop/main_window.py的_build_stock_overview_tab()版面結構(5個各自
+        獨立可收合的區塊，這裡用st.expander(expanded=True)取代_CollapsibleBox，
+        預設展開一致)。只有個股資訊分頁呼叫，大盤不顯示這個區塊(桌面版也是同樣的
+        個股專屬邊界，見_build_market_tab()跟_build_stock_detail_tab()是分開的
+        兩份inner tabs，大盤那份沒有「個股明細」)。主力進出/大戶籌碼目前資料庫
+        schema還沒有對應的資料來源(見stock_detail_data.py模組docstring)，維持
+        桌面版同樣的「尚未串接資料來源」提示，不假造資料。
+        """
+        st.markdown("## 個股明細")
+
+        with st.expander("交易資訊", expanded=True):
+            quote = stock_detail_data.load_quote_summary(conn, stock_id)
+            if quote is None:
+                st.write("查無成交資料。")
+            else:
+                st.caption(f"資料時間：{quote['date']}")
+                estimated_suffix = "（估）" if quote["avg_price_is_estimated"] else ""
+                avg_price_text = f"{quote['avg_price']:,.2f}{estimated_suffix}" if quote["avg_price"] is not None else "-"
+                trading_money_text = (
+                    f"{quote['trading_money_billion']:,.2f}{estimated_suffix}"
+                    if quote["trading_money_billion"] is not None else "-"
+                )
+                cost_summary = stock_detail_data.load_latest_institutional_cost_summary(conn, stock_id)
+                foreign_cost = cost_summary["外資"] if cost_summary else None
+                trust_cost = cost_summary["投信"] if cost_summary else None
+                foreign_cost_text = f"{foreign_cost:,.2f}" if foreign_cost is not None else "不適用"
+                trust_cost_text = f"{trust_cost:,.2f}" if trust_cost is not None else "不適用"
+                rows = [
+                    ("成交", _colored_num(quote["close"], 2), "昨收", f"{quote['prev_close']:,.2f}" if quote["prev_close"] is not None else "-"),
+                    ("開盤", f"{quote['open']:,.2f}", "漲跌幅", _colored_num(quote["change_pct"], 2, signed=True, suffix="%")),
+                    ("最高", f"{quote['high']:,.2f}", "漲跌", _colored_num(quote["change"], 2, signed=True)),
+                    ("最低", f"{quote['low']:,.2f}", "總量", f"{quote['volume_lots']:,} 張"),
+                    ("均價", avg_price_text, "昨量", f"{quote['prev_volume_lots']:,} 張" if quote["prev_volume_lots"] is not None else "-"),
+                    ("成交金額(億)", trading_money_text, "振幅", _colored_num(quote["amplitude_pct"], 2, suffix="%") if quote["amplitude_pct"] is not None else "-"),
+                    ("外資持有成本(預估)", foreign_cost_text, "投信持有成本(預估)", trust_cost_text),
+                ]
+                for label1, value1, label2, value2 in rows:
+                    c1, c2, c3, c4 = st.columns([1, 2, 1, 2])
+                    c1.caption(label1)
+                    c2.markdown(value1, unsafe_allow_html=True)
+                    c3.caption(label2)
+                    c4.markdown(value2, unsafe_allow_html=True)
+
+        with st.expander("法人買賣總覽", expanded=True):
+            cumulative = stock_detail_data.load_institutional_cumulative(conn, stock_id)
+            if cumulative is None:
+                st.write("查無法人買賣資料。")
+            else:
+                periods = list(stock_detail_data.INSTITUTIONAL_PERIODS.keys())
+                st.caption("單位：張")
+                table_df = pd.DataFrame(
+                    [[cumulative[group][label] / 1000 for label in periods] for group in stock_detail_data.INSTITUTIONAL_GROUPS],
+                    index=stock_detail_data.INSTITUTIONAL_GROUPS, columns=periods,
+                )
+                st.dataframe(
+                    table_df.style.format("{:+,.0f}").map(lambda v: "color:#c0392b" if v > 0 else ("color:#27ae60" if v < 0 else "")),
+                    use_container_width=True,
+                )
+
+                cost = stock_detail_data.load_institutional_estimated_cost(conn, stock_id)
+                if cost:
+                    st.caption("預估持股成本價（單位：元，淨賣出天期無累積部位，標示為不適用）")
+                    # ⚠️ 實測發現：不管是None還是轉成float("nan")，st.dataframe()搭配
+                    # Styler時對缺值儲存格一律顯示Python的"None"字面字串，Styler.format()
+                    # 的na_rep參數不會生效(疑似st.dataframe內部Arrow轉換對NaN有自己的
+                    # 固定顯示邏輯，蓋過Styler的格式化結果)——改成在建DataFrame前就把每格
+                    # 轉成「已經格式化好的字串」("不適用"或數字字串)，不依賴Styler處理NA，
+                    # 犧牲純數字欄位的靠右對齊，但保證顯示正確。
+                    cost_df = pd.DataFrame(
+                        [[f"{cost[group][label]:,.2f}" if cost[group][label] is not None else "不適用" for label in periods]
+                         for group in stock_detail_data.ESTIMATED_COST_GROUPS],
+                        index=stock_detail_data.ESTIMATED_COST_GROUPS, columns=periods,
+                    )
+                    st.dataframe(cost_df, use_container_width=True)
+
+                flow = stock_detail_data.load_institutional_flow_analysis(conn, stock_id)
+                momentum = stock_detail_data.load_institutional_momentum_analysis(conn, stock_id)
+                _render_institutional_flow_analysis(flow, momentum)
+
+        with st.expander("主力進出", expanded=True):
+            st.caption("⚠️ 尚未串接資料來源（需要券商分點籌碼資料，schema已預留broker_chips表，待FinMind付費方案開通後才能接上）。")
+
+        with st.expander("資券變化總覽", expanded=True):
+            margin_view = st.radio(
+                "檢視", ["當日", "累計"], key=f"margin_view_{stock_id}", horizontal=True, label_visibility="collapsed",
+            )
+            maintenance = stock_detail_data.load_margin_maintenance_analysis(conn, stock_id)
+            if margin_view == "當日":
+                margin = stock_detail_data.load_margin_daily(conn, stock_id)
+                if margin is None:
+                    st.write("查無資券資料。")
+                else:
+                    st.caption(f"資料時間：{margin['date']}")
+                    rows = []
+                    for row_label, key in (("融資", "margin"), ("融券", "short")):
+                        r = margin[key]
+                        rows.append({
+                            "": row_label, "買進": r["buy"], "賣出": r["sell"], "現價": margin["close"],
+                            "增減": r["change"], "餘額": r["balance"],
+                            "使用率": f"{r['usage_rate']:.2f}%" if r["usage_rate"] is not None else "-",
+                            "連增連減": r["streak"] or "-",
+                        })
+                    st.dataframe(pd.DataFrame(rows).set_index(""), use_container_width=True)
+                    offset_text = f"{margin['offset_loan_and_short']:,}" if margin["offset_loan_and_short"] is not None else "-"
+                    ratio_text = f"{margin['short_to_margin_ratio_pct']:.2f}%" if margin["short_to_margin_ratio_pct"] is not None else "-"
+                    st.caption(f"資券互抵：{offset_text} 張　券資比：{ratio_text}")
+            else:
+                cumulative_days = 20
+                margin_cum = stock_detail_data.load_margin_cumulative(conn, stock_id, days=cumulative_days)
+                if margin_cum is None:
+                    st.write("查無資券資料。")
+                else:
+                    st.caption(f"最近{margin_cum['days']}個交易日累計")
+                    rows = [
+                        {"": row_label, "買進": margin_cum[key]["buy"], "賣出": margin_cum[key]["sell"], "餘額增減": margin_cum[key]["change"]}
+                        for row_label, key in (("融資", "margin"), ("融券", "short"))
+                    ]
+                    st.dataframe(pd.DataFrame(rows).set_index(""), use_container_width=True)
+            _render_margin_maintenance_analysis(maintenance)
+
+        with st.expander("大戶籌碼", expanded=True):
+            st.caption("⚠️ 尚未串接資料來源（需要股權分散/大戶持股統計資料，目前資料庫schema還沒有對應的表）。")
 
     title_col, status_col = st.columns([4, 1])
     with title_col:
@@ -570,6 +823,7 @@ def main() -> None:
         detail_stock_id = st.session_state.get("detail_stock_id")
         if detail_stock_id:
             render_price_chart(detail_stock_id, widget_key="detail")
+            render_stock_overview_section(detail_stock_id)
         else:
             st.info("請輸入股票代號或名稱查詢，或到「選股」分頁點選候選股票。")
 
