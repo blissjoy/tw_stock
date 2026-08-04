@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from typing import Callable
 
 import pandas as pd
 
@@ -819,3 +820,83 @@ def refresh_indicator_window(conn, end_date: str, window_days: int, min_days: in
     if indicator_rows:
         storage.upsert_daily_indicators(conn, indicator_rows)
     return len(indicator_rows)
+
+
+def recompute_indicators_for_range(conn, stock_ids: list[str] | None, start_date: str, end_date: str) -> int:
+    """「回補資料」桌面分頁專用：股價回補完成後，只針對受影響的股票子集＋回補的日期範圍
+    重算daily_indicators(均線/SAR快取)，不像scripts/backfill_daily_indicators.py那樣對
+    全部歷史重算一次——回補通常只動到一小段範圍，成本可以低很多。
+
+    跟refresh_indicator_window()的差異：這裡的範圍由呼叫端明確指定(回補的start_date~
+    end_date)，不是「往回抓最近window_days筆」；stock_ids為None時處理load_trailing_
+    frames()讀到的全部股票(對應「全市場」回補情境)，非None時只處理指定子集。
+    """
+    frames = load_trailing_frames(conn, min_days=1)
+    if stock_ids is not None:
+        wanted = set(stock_ids)
+        frames = {sid: df for sid, df in frames.items() if sid in wanted}
+
+    start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    indicator_rows: list[dict] = []
+    for stock_id, df in frames.items():
+        bounded = df[df.index <= end_ts]
+        target_dates = set(bounded[bounded.index >= start_ts].index.strftime("%Y-%m-%d"))
+        if not target_dates:
+            continue
+        indicator_rows.extend(compute_indicator_rows(stock_id, bounded, target_dates))
+    if indicator_rows:
+        storage.upsert_daily_indicators(conn, indicator_rows)
+    return len(indicator_rows)
+
+
+def run_screen_and_store_for_range(
+    conn, stock_ids: list[str] | None, start_date: str, end_date: str, min_days: int = 60,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """「回補資料」桌面分頁「同時回補歷史候選清單訊號」勾選框專用：針對回補範圍內每一天，
+    重新算出『當時』(只用<=該日期的資料)符合哪些screen_*規則，寫回daily_candidates。
+
+    ⚠️ 不能直接對每個歷史日期各呼叫一次run_screen_and_store()：那個函式永遠評估『資料庫
+    現有資料的最後一列』，在已經有更新資料的正式DB上對歷史iso_date呼叫，實際算出來的會是
+    『今天』的訊號，只是被貼上歷史日期標籤寫進DB——是錯的。這裡改成把每檔股票的frame明確
+    截到`df.index <= 該日期`才餵給screen_all_stocks()，才是真正『回到當時』重算。純本地
+    運算，不呼叫任何API，但日期範圍/股票數越多，CPU時間越久，所以桌面版UI上這個選項預設
+    不勾選。
+
+    stock_ids為None時處理全部股票(對應「全市場」回補情境)。回傳寫入的候選總數(可能同一檔
+    股票同一天觸發多條規則，各算一筆)。
+    """
+    frames = load_trailing_frames(conn, min_days=1)
+    if stock_ids is not None:
+        wanted = set(stock_ids)
+        frames = {sid: df for sid, df in frames.items() if sid in wanted}
+
+    start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    trading_dates: set = set()
+    for df in frames.values():
+        trading_dates.update(df.index[(df.index >= start_ts) & (df.index <= end_ts)])
+    dates = sorted(trading_dates)
+
+    total_candidates = 0
+    for i, d in enumerate(dates, 1):
+        frames_as_of = {}
+        for sid, df in frames.items():
+            trimmed = df[df.index <= d]
+            if len(trimmed) >= min_days:
+                frames_as_of[sid] = trimmed
+        candidates = screen_all_stocks(frames_as_of, min_days=min_days)
+        iso_date = d.strftime("%Y-%m-%d")
+        storage.delete_daily_candidates_for_date(conn, iso_date)
+        if candidates:
+            storage.upsert_daily_candidates(conn, [
+                {
+                    "date": iso_date, "stock_id": c["stock_id"], "signal_name": c["signal_name"],
+                    "entry_price": c["entry_price"], "stop_loss": c["stop_loss"], "note": c.get("note"),
+                    "created_at": datetime.now().isoformat(),
+                }
+                for c in candidates
+            ])
+        total_candidates += len(candidates)
+        if on_progress is not None:
+            on_progress(i, len(dates))
+    return total_candidates

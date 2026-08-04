@@ -842,3 +842,116 @@ def test_refresh_indicator_window_only_recomputes_dates_on_or_before_end_date():
         row[0] for row in conn.execute("SELECT date FROM daily_indicators WHERE stock_id = '2330'").fetchall()
     }
     assert dates == {"2026-03-08", "2026-03-09", "2026-03-10"}
+
+
+def test_recompute_indicators_for_range_writes_only_dates_in_range():
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)  # 最後一天是2026-03-14
+
+    written = daily_screener.recompute_indicators_for_range(conn, None, "2026-03-10", "2026-03-14")
+
+    assert written == 5
+    dates = {row[0] for row in conn.execute("SELECT date FROM daily_indicators WHERE stock_id = '2330'").fetchall()}
+    assert dates == {"2026-03-10", "2026-03-11", "2026-03-12", "2026-03-13", "2026-03-14"}
+
+
+def test_recompute_indicators_for_range_filters_to_given_stock_ids():
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+    _seed_stock_prices(conn, "1101", n_days=70)
+
+    daily_screener.recompute_indicators_for_range(conn, ["2330"], "2026-03-10", "2026-03-14")
+
+    stock_ids = {row[0] for row in conn.execute("SELECT DISTINCT stock_id FROM daily_indicators").fetchall()}
+    assert stock_ids == {"2330"}
+
+
+def test_recompute_indicators_for_range_none_means_all_stocks():
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+    _seed_stock_prices(conn, "1101", n_days=70)
+
+    daily_screener.recompute_indicators_for_range(conn, None, "2026-03-10", "2026-03-14")
+
+    stock_ids = {row[0] for row in conn.execute("SELECT DISTINCT stock_id FROM daily_indicators").fetchall()}
+    assert stock_ids == {"2330", "1101"}
+
+
+def test_run_screen_and_store_for_range_bounds_each_day_to_data_available_that_day(monkeypatch):
+    """「回補資料」桌面分頁「同時回補歷史候選清單訊號」的核心正確性要求：不能像
+    run_screen_and_store()那樣永遠看『資料庫現有資料的最後一列』，而是每個歷史日期都要
+    截到『當時』——這裡直接驗證screen_all_stocks()每次被呼叫時收到的frame，最後一列
+    的日期確實等於當下處理的那一天，不是整段歷史真正的最後一天(2026-03-14)。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)  # 最後一天是2026-03-14
+
+    captured_last_dates = []
+
+    def fake_screen(frames, min_days):
+        for df in frames.values():
+            captured_last_dates.append(df.index[-1].strftime("%Y-%m-%d"))
+        return []
+
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", fake_screen)
+
+    daily_screener.run_screen_and_store_for_range(conn, ["2330"], "2026-03-12", "2026-03-14", min_days=60)
+
+    assert captured_last_dates == ["2026-03-12", "2026-03-13", "2026-03-14"]
+
+
+def test_run_screen_and_store_for_range_writes_candidates_per_date(monkeypatch):
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+
+    def fake_screen(frames, min_days):
+        df = frames.get("2330")
+        if df is None:
+            return []
+        last_date = df.index[-1].strftime("%Y-%m-%d")
+        return [{"stock_id": "2330", "signal_name": f"SIG-{last_date}", "entry_price": 1.0, "stop_loss": 0.5, "note": None}]
+
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", fake_screen)
+
+    total = daily_screener.run_screen_and_store_for_range(conn, ["2330"], "2026-03-12", "2026-03-14", min_days=60)
+
+    assert total == 3
+    rows = conn.execute("SELECT date, signal_name FROM daily_candidates ORDER BY date").fetchall()
+    assert rows == [
+        ("2026-03-12", "SIG-2026-03-12"),
+        ("2026-03-13", "SIG-2026-03-13"),
+        ("2026-03-14", "SIG-2026-03-14"),
+    ]
+
+
+def test_run_screen_and_store_for_range_calls_on_progress(monkeypatch):
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=70)
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    calls = []
+
+    daily_screener.run_screen_and_store_for_range(
+        conn, ["2330"], "2026-03-12", "2026-03-14", min_days=60,
+        on_progress=lambda done, total: calls.append((done, total)),
+    )
+
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_run_screen_and_store_for_range_excludes_dates_before_min_days_available(monkeypatch):
+    """min_days門檻要逐日判斷，不是整段回補範圍一次判斷：股票在回補範圍前段累積天數還
+    不夠min_days時，那幾天不該把該股票餵給screen_all_stocks()。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=65)  # 最後一天是2026-03-09
+
+    captured = []
+
+    def fake_screen(frames, min_days):
+        captured.append("2330" in frames)
+        return []
+
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", fake_screen)
+
+    daily_screener.run_screen_and_store_for_range(conn, ["2330"], "2026-03-01", "2026-03-09", min_days=60)
+
+    # 2026-03-01~2026-03-03累積天數(57~59)還不到min_days=60門檻，2026-03-04起(60天)才夠
+    assert captured == [False, False, False, True, True, True, True, True, True]

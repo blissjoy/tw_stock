@@ -6165,3 +6165,54 @@ monkeypatch覆蓋即可(晚於這個fixture執行，會蓋過去)。手動把正
 方式操作UI元件(例如programmatically setChecked()真實widget)，優先用「讀取
 狀態確認」而不是「操作真實widget再讀回」的驗證方式，或至少確保操作完會
 還原成原狀態。
+
+## 新增「回補資料」桌面分頁（2026-08-04）
+
+取代原本只能下命令列跑`scripts/backfill_*.py`的回補流程。多輪討論定案的
+操作流程：大盤(TAIEX)跟個股(TWSE+TPEx+興櫃，UI上不分市場)共用同一個日期
+區間、同一個「開始回補」按鈕，用勾選框決定要補哪些項目——不是分成兩個
+獨立按鈕，理由是使用者實際會用到回補功能的情境(發現缺資料、需要更早期
+歷史)通常會想同時補大盤+個股。新增「強制覆蓋」勾選框(預設不勾)：不勾＝DB
+已有資料的日期/股票就跳過、不呼叫API；勾選＝忽略既有資料全部重抓覆蓋。
+
+**技術上最關鍵的一個發現**：`run_screen_and_store()`(候選清單重算)的
+`iso_date`參數只是「存進daily_candidates哪個日期欄位」的標籤，實際餵給
+`screen_all_stocks()`的資料是`load_trailing_frames()`讀到的『資料庫現有
+全部歷史』，每個`screen_*`規則永遠只看每檔股票frame的**最後一列**——在
+已經有「今天」資料的正式DB上對歷史`iso_date`呼叫這個函式，算出來的其實
+是「今天」的訊號，只是被貼上歷史日期標籤寫進DB，是錯的。因此新寫了
+`run_screen_and_store_for_range()`：對回補範圍內每一天，把每檔股票的frame
+明確截到`df.index <= 該日期`才餵給`screen_all_stocks()`，才是真正「回到
+當時」重算。這是選填、預設不勾的「同時回補歷史候選清單訊號」功能(較耗時，
+純本地運算但需要逐日重跑選股)。
+
+**改動的檔案**：
+- `scripts/backfill_history.py`：`backfill_twse()`/`backfill_tpex()`加上
+  `include_price`/`include_institutional`/`include_margin`/`force_overwrite`/
+  `stock_id_filter`/`on_progress`參數；TPEx新增`_covers_range()`存在性檢查
+  (該股票該區間內已有任一筆資料就跳過FinMind呼叫，省配額)——這順便補上了
+  TPEx資券(融資融券)完全沒有補缺口機制的缺口(先前只有TPEx法人有
+  `backfill_tpex_institutional_gaps.py`)。
+- `scripts/backfill_taiex.py`：新增`backfill_taiex_range()`，OHLC來自
+  yfinance、成交量沿用`twse_client.fetch_taiex_volume_range()`(跟
+  `backfill_taiex_volume.py`共用同一個函式)。
+- `src/screener/daily_screener.py`：新增`recompute_indicators_for_range()`
+  (股價回補完成後自動重算daily_indicators，只動受影響股票+回補範圍，不是
+  全歷史重算)、`run_screen_and_store_for_range()`(見上)。
+- `desktop/main_window.py`：新增`TAB_BACKFILL`分頁、`BackfillWorker`(整合
+  執行大盤→個股→均線/SAR快取→選填候選清單重算，支援`requestInterruption()`
+  中途取消)、`StockInfoRefreshWorker`(低優先的「重新整理股票清單」按鈕)、
+  `_build_backfill_tab()`版面。
+- `tests/test_daily_screener.py`：新增`recompute_indicators_for_range`/
+  `run_screen_and_store_for_range`測試，共7個(包含核心正確性測試：驗證
+  `screen_all_stocks()`每次收到的frame最後一列日期確實對應當下處理的
+  那一天，不是整段歷史真正的最新一天)。
+
+真實驗證：PySide6實際視窗+DB複本，指定兩檔測試股票(TWSE的0050、TPEx的
+1240)+強制覆蓋跑一次完整流程，確認TWSE/TPEx都正確篩選到只寫入這兩檔(不是
+誤觸全市場)、TAIEX/均線SAR快取都正確寫入，`finished_ok`訊號正確回傳摘要。
+另外驗證「強制覆蓋」不勾選時TPEx正確跳過已有資料(`0天股價`)。再用一次
+「同時回補歷史候選清單訊號」勾選跑3天範圍，確認`daily_candidates`裡
+2026-07-28/07-29/07-30三天寫入不同的結果(不是同一批「今天」資料重複貼
+標籤)，且候選清單日期下拉選單(`list_candidate_dates()`)正確能選到補回來
+的歷史日期。`pytest tests/ -q`1007個測試全數通過(新增7個)。

@@ -20,13 +20,14 @@ from pathlib import Path
 
 import markdown
 import pandas as pd
-from PySide6.QtCore import QEvent, QRect, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, QRect, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -45,6 +46,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QStyle,
@@ -64,7 +66,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from desktop.chart_render import render_chart_html
-from src.data import portfolio_storage, storage
+from src.data import finmind_client, portfolio_storage, storage
 from src.data.connection import get_default_connection, get_default_portfolio_connection
 from src.data.yfinance_client import TAIEX_STOCK_ID
 from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL
@@ -73,17 +75,25 @@ from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src import rule_docs
 from src.presentation import chart_data, huang_chip_data, pipeline_status, portfolio_data, stock_detail_data
-from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
+from src.screener.daily_screener import (
+    analyze_stock_signals,
+    recompute_indicators_for_range,
+    run_screen_and_store,
+    run_screen_and_store_for_range,
+    summarize_signal_matches,
+)
 
 TAIEX_DISPLAY_NAME = "台股加權指數"
 
-# 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股資訊/產業輪動/庫存清單/觀察清單。
+# 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股資訊/產業輪動/庫存清單/
+# 觀察清單/回補資料。
 TAB_MARKET = 0
 TAB_SCREENER = 1
 TAB_STOCK_DETAIL = 2
 TAB_INDUSTRY_ROTATION = 3
 TAB_INVENTORY = 4
 TAB_WATCHLIST = 5
+TAB_BACKFILL = 6
 
 # 「選股」分頁「市場：」下拉選單顯示文字對應chart_data.load_stock_universe_for_date()
 # 的market參數值；"全部"不在這裡，get()查不到就是None(不限制)。
@@ -757,6 +767,155 @@ class HolderShareFetchWorker(QThread):
                 conn.close()
 
 
+class BackfillWorker(QThread):
+    """背景執行緒跑「回補資料」分頁的整合回補流程：大盤股價→個股股價/法人/資券→均線/
+    SAR快取重算→(選填)歷史候選清單重算，依序執行、逐步emit進度文字讓UI的log區塊顯示。
+    跟其他Worker同一個理由，開獨立連線，不重用MainWindow.conn。
+
+    2026-08-04設計定案：大盤跟個股共用同一個「開始回補」動作(不是分開兩個按鈕)，實際
+    處理哪些項目由呼叫端在params裡打勾決定——使用者的理由是「用到回補功能的情境通常是
+    發現缺資料或需要更早期歷史，這時候會想同時補大盤+個股」。
+
+    支援用requestInterruption()中途取消：每個階段之間、以及TWSE/TPEx回補內部的逐日/
+    逐股迴圈都會檢查isInterruptionRequested()，偵測到就提早結束並emit cancelled——回補
+    本身是逐筆upsert，中途停止不會留下損壞資料，只是範圍沒跑完。
+
+    params需含：start/end(YYYY-MM-DD字串)、force_overwrite(bool)、
+    stock_id_filter(set[str] | None，None代表全市場)、taiex_price/stock_price/
+    stock_institutional/stock_margin/recompute_candidates(bool)。
+    """
+
+    progress = Signal(str)
+    finished_ok = Signal(dict)
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, params: dict) -> None:
+        super().__init__()
+        self._params = params
+
+    def run(self) -> None:
+        from datetime import date as _date
+
+        from scripts import backfill_history
+        from scripts.backfill_taiex import backfill_taiex_range
+
+        conn = None
+        try:
+            conn = get_default_connection()
+            p = self._params
+            start, end = p["start"], p["end"]
+            start_d, end_d = _date.fromisoformat(start), _date.fromisoformat(end)
+            force_overwrite = p["force_overwrite"]
+            stock_id_filter = p["stock_id_filter"]
+            summary: dict = {}
+            affected_stock_ids: set[str] = set()
+
+            if p["taiex_price"]:
+                self.progress.emit("開始回補大盤股價...")
+                written = backfill_taiex_range(conn, start, end, force_overwrite=force_overwrite)
+                summary["taiex_dates"] = len(written)
+                self.progress.emit(f"大盤股價回補完成：{len(written)}筆")
+
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+                return
+
+            any_stock_item = p["stock_price"] or p["stock_institutional"] or p["stock_margin"]
+            if any_stock_item:
+                rows = conn.execute(
+                    "SELECT stock_id, name, industry, market FROM stocks WHERE market IN ('TWSE', 'TPEx')"
+                ).fetchall()
+                known = {r[0]: {"stock_id": r[0], "name": r[1], "industry": r[2], "market": r[3]} for r in rows}
+                if stock_id_filter is not None:
+                    unknown = stock_id_filter - known.keys()
+                    if unknown:
+                        self.progress.emit(f"以下代號本機資料庫查無紀錄，已略過：{'、'.join(sorted(unknown))}")
+                    scope_rows = [known[sid] for sid in stock_id_filter if sid in known]
+                else:
+                    scope_rows = list(known.values())
+
+                twse_ids = {r["stock_id"] for r in scope_rows if r["market"] == "TWSE"}
+                tpex_rows = [r for r in scope_rows if r["market"] == "TPEx"]
+                affected_stock_ids = {r["stock_id"] for r in scope_rows}
+
+                if twse_ids:
+                    self.progress.emit(f"開始回補TWSE個股資料（{len(twse_ids)}檔）...")
+                    backfill_history.backfill_twse(
+                        conn, start_d, end_d,
+                        include_price=p["stock_price"], include_institutional=p["stock_institutional"],
+                        include_margin=p["stock_margin"], force_overwrite=force_overwrite,
+                        stock_id_filter=twse_ids if stock_id_filter is not None else None,
+                        on_progress=lambda done, total: self.progress.emit(f"TWSE回補中...{done}/{total}天"),
+                    )
+
+                if self.isInterruptionRequested():
+                    self.cancelled.emit()
+                    return
+
+                if tpex_rows:
+                    self.progress.emit(f"開始回補TPEx個股資料（{len(tpex_rows)}檔）...")
+                    backfill_history.backfill_tpex(
+                        conn, tpex_rows, start_d, end_d,
+                        include_price=p["stock_price"], include_institutional=p["stock_institutional"],
+                        include_margin=p["stock_margin"], force_overwrite=force_overwrite,
+                        on_progress=lambda done, total: self.progress.emit(f"TPEx回補中...{done}/{total}檔"),
+                    )
+
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+                return
+
+            # 均線/SAR快取／候選清單重算只跟「個股股價」有關(大盤本來就不接指標快取/選股
+            # 規則，見src.screener.daily_screener.load_trailing_frames()排除market='INDEX')。
+            stock_price_backfilled = bool(p["stock_price"] and any_stock_item and affected_stock_ids)
+            if stock_price_backfilled:
+                recompute_ids = None if stock_id_filter is None else list(affected_stock_ids)
+                self.progress.emit("重算均線/SAR快取...")
+                n = recompute_indicators_for_range(conn, recompute_ids, start, end)
+                summary["indicators"] = n
+                self.progress.emit(f"均線/SAR快取重算完成：{n}筆")
+
+                if p["recompute_candidates"]:
+                    self.progress.emit("重算歷史候選清單（較耗時）...")
+                    n = run_screen_and_store_for_range(
+                        conn, recompute_ids, start, end,
+                        on_progress=lambda done, total: self.progress.emit(f"候選清單重算中...{done}/{total}天"),
+                    )
+                    summary["candidates"] = n
+                    self.progress.emit(f"歷史候選清單重算完成：{n}筆")
+
+            self.finished_ok.emit(summary)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            if conn is not None:
+                conn.close()
+
+
+class StockInfoRefreshWorker(QThread):
+    """背景執行緒重新整理股票基本資料(名稱/產業別/市場別)——「回補資料」分頁的低優先
+    小按鈕，跟每日排程用的是同一份FinMind TaiwanStockInfo，供使用者需要時手動立即觸發，
+    不用等下一次排程。跟其他Worker同一個理由，開獨立連線，不重用MainWindow.conn。
+    """
+
+    finished_ok = Signal(int)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        conn = None
+        try:
+            conn = get_default_connection()
+            rows = finmind_client.fetch_stock_info()
+            storage.upsert_stocks(conn, rows)
+            self.finished_ok.emit(len(rows))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            if conn is not None:
+                conn.close()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -780,6 +939,8 @@ class MainWindow(QMainWindow):
 
         self._pipeline_worker: PipelineWorker | None = None
         self._watchlist_export_worker: WatchlistExportWorker | None = None
+        self._backfill_worker: BackfillWorker | None = None
+        self._stock_info_worker: StockInfoRefreshWorker | None = None
         self._current_stock_id: str | None = None
         # 目前「個股資訊」分頁顯示的股票是從候選清單哪一天的選股策略點進來的("YYYY-MM-DD"
         # 字串)；手動查詢時設為None，右上角的來源標籤(self.stock_source_label)就不顯示
@@ -834,13 +995,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # 六個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+
-        # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單——原本候選清單跟個股圖表擠在
-        # 同一個分頁，使用者反映畫面太擁擠，拆開後候選清單點選任一列會自動切到③並代入
-        # 該股票資料(見_on_candidate_selected())。①跟③都用同一套規則比對邏輯
+        # 七個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+
+        # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單、⑦回補資料——原本候選清單跟個股
+        # 圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選清單點選任一列會自動切到③
+        # 並代入該股票資料(見_on_candidate_selected())。①跟③都用同一套規則比對邏輯
         # (_build_analysis_sections_html())，只是分析對象(大盤/個股)不同，渲染格式共用。
         # ⑤⑥移植自ref-project的庫存清單/觀察清單，用獨立的self.portfolio_conn(見
-        # __init__())，不查主DB的候選清單/圖表相關資料。
+        # __init__())，不查主DB的候選清單/圖表相關資料。⑦是2026-08-04新增，取代原本
+        # 只能下命令列跑scripts/backfill_*.py的回補流程。
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
@@ -850,6 +1012,7 @@ class MainWindow(QMainWindow):
         self._build_industry_rotation_tab()
         self._build_inventory_tab()
         self._build_watchlist_tab()
+        self._build_backfill_tab()
         # ⚠️ 分頁還沒被切換過去顯示之前，分頁裡的QTextEdit/QWebEngineView實際上沒有
         # 真正的layout(viewport寬度等於0或預設值)，這時候算文字框需要的高度一定不準
         # (實測算出來只有個位數px，見_build_market_tab()的說明)。改成切到對應分頁時
@@ -2177,6 +2340,256 @@ class MainWindow(QMainWindow):
                 table.setItem(row_idx, col, item)
         table.setSortingEnabled(True)
         table.resizeRowsToContents()
+
+    def _build_backfill_tab(self) -> None:
+        """「回補資料」分頁：取代原本只能下命令列跑scripts/backfill_*.py的回補流程。
+
+        2026-08-04設計定案(多輪討論)：大盤跟個股共用同一個日期區間、同一個「開始回補」
+        按鈕，用勾選框決定要補哪些項目——不是分成兩個獨立按鈕，理由是使用者實際會用到
+        回補功能的情境(發現缺資料、需要更早期歷史)通常會想同時補大盤+個股。「強制覆蓋」
+        預設不勾：DB已有資料的日期/股票就跳過、不呼叫API。「同時回補歷史候選清單訊號」
+        預設不勾(較耗時)：回補股價後daily_indicators(均線/SAR快取)一定會自動重算，但
+        daily_candidates(選股規則比對)預設不會，因為那是逐日重算的相對昂貴操作，見
+        BackfillWorker/run_screen_and_store_for_range()的說明。
+        """
+        backfill_scroll = QScrollArea()
+        backfill_scroll.setWidgetResizable(True)
+        self.tabs.addTab(backfill_scroll, "回補資料")
+
+        backfill_content = QWidget()
+        backfill_scroll.setWidget(backfill_content)
+        layout = QVBoxLayout(backfill_content)
+
+        date_bar = QHBoxLayout()
+        date_bar.addWidget(QLabel("日期區間："))
+        self.backfill_start_date = QDateEdit()
+        self.backfill_start_date.setCalendarPopup(True)
+        self.backfill_start_date.setDisplayFormat("yyyy-MM-dd")
+        self.backfill_start_date.setDate(QDate.currentDate().addDays(-30))
+        date_bar.addWidget(self.backfill_start_date)
+        date_bar.addWidget(QLabel("～"))
+        self.backfill_end_date = QDateEdit()
+        self.backfill_end_date.setCalendarPopup(True)
+        self.backfill_end_date.setDisplayFormat("yyyy-MM-dd")
+        self.backfill_end_date.setDate(QDate.currentDate())
+        date_bar.addWidget(self.backfill_end_date)
+        self.backfill_force_overwrite_checkbox = QCheckBox("強制覆蓋")
+        date_bar.addWidget(self.backfill_force_overwrite_checkbox)
+        date_bar.addStretch()
+        layout.addLayout(date_bar)
+        force_overwrite_hint = QLabel("不勾選：DB已有資料的日期會跳過，不呼叫API")
+        force_overwrite_hint.setStyleSheet("color: #666666;")
+        layout.addWidget(force_overwrite_hint)
+
+        scope_bar = QHBoxLayout()
+        scope_bar.addWidget(QLabel("股票範圍(個股)："))
+        self.backfill_scope_all_radio = QRadioButton("全市場")
+        self.backfill_scope_all_radio.setChecked(True)
+        self.backfill_scope_custom_radio = QRadioButton("指定股票代號")
+        self._backfill_scope_group = QButtonGroup(self)
+        self._backfill_scope_group.addButton(self.backfill_scope_all_radio)
+        self._backfill_scope_group.addButton(self.backfill_scope_custom_radio)
+        scope_bar.addWidget(self.backfill_scope_all_radio)
+        scope_bar.addWidget(self.backfill_scope_custom_radio)
+        self.backfill_stock_codes_input = QLineEdit()
+        self.backfill_stock_codes_input.setPlaceholderText("多筆用逗號分隔，例如 2330,2454,6488")
+        self.backfill_stock_codes_input.setEnabled(False)
+        scope_bar.addWidget(self.backfill_stock_codes_input, stretch=1)
+        layout.addLayout(scope_bar)
+        self.backfill_scope_custom_radio.toggled.connect(self.backfill_stock_codes_input.setEnabled)
+
+        layout.addWidget(QLabel("回補項目："))
+        items_row1 = QHBoxLayout()
+        self.backfill_taiex_checkbox = QCheckBox("大盤股價")
+        self.backfill_taiex_checkbox.setChecked(True)
+        items_row1.addWidget(self.backfill_taiex_checkbox)
+        items_row1.addStretch()
+        layout.addLayout(items_row1)
+
+        items_row2 = QHBoxLayout()
+        self.backfill_stock_price_checkbox = QCheckBox("個股股價明細")
+        self.backfill_stock_price_checkbox.setChecked(True)
+        self.backfill_stock_institutional_checkbox = QCheckBox("個股三大法人買賣超")
+        self.backfill_stock_institutional_checkbox.setChecked(True)
+        items_row2.addWidget(self.backfill_stock_price_checkbox)
+        items_row2.addWidget(self.backfill_stock_institutional_checkbox)
+        items_row2.addStretch()
+        layout.addLayout(items_row2)
+
+        items_row3 = QHBoxLayout()
+        self.backfill_stock_margin_checkbox = QCheckBox("個股融資融券(資券)")
+        self.backfill_stock_margin_checkbox.setChecked(True)
+        self.backfill_stock_broker_checkbox = QCheckBox("個股分點進出籌碼")
+        self.backfill_stock_broker_checkbox.setEnabled(False)
+        self.backfill_stock_broker_checkbox.setToolTip("需FinMind付費方案，尚未開通")
+        items_row3.addWidget(self.backfill_stock_margin_checkbox)
+        items_row3.addWidget(self.backfill_stock_broker_checkbox)
+        items_row3.addStretch()
+        layout.addLayout(items_row3)
+
+        self.backfill_recompute_candidates_checkbox = QCheckBox("同時回補歷史候選清單訊號（較耗時，見下方說明）")
+        layout.addWidget(self.backfill_recompute_candidates_checkbox)
+        candidates_hint = QLabel(
+            "候選清單平常只在「今天」執行排程時計算，回補的歷史日期預設不會自動產生候選清單紀錄——\n"
+            "如果你需要回頭查某個歷史日期「當時」符合哪些規則，才需要勾選這個，會依日期區間逐日重算，\n"
+            "股票多、天數多時非常耗時。"
+        )
+        candidates_hint.setStyleSheet("color: #666666;")
+        layout.addWidget(candidates_hint)
+
+        warning_label = QLabel("⚠ 上櫃法人/資券逐股查詢，股票數多時可能耗時較久")
+        layout.addWidget(warning_label)
+        auto_indicator_label = QLabel("ⓘ 股價回補完成後會自動重算均線/SAR快取，不用另外操作")
+        layout.addWidget(auto_indicator_label)
+
+        self.backfill_start_btn = QPushButton("開始回補")
+        self.backfill_start_btn.clicked.connect(self._on_backfill_start)
+        layout.addWidget(self.backfill_start_btn)
+
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep1)
+
+        layout.addWidget(QLabel("【股票基本資料】名稱/產業別/市場別"))
+        stock_info_hint = QLabel("ⓘ 每日排程已會更新，通常不需要手動執行")
+        stock_info_hint.setStyleSheet("color: #666666;")
+        layout.addWidget(stock_info_hint)
+        self.backfill_refresh_stock_info_btn = QPushButton("重新整理股票清單")
+        self.backfill_refresh_stock_info_btn.clicked.connect(self._on_backfill_refresh_stock_info)
+        layout.addWidget(self.backfill_refresh_stock_info_btn)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep2)
+
+        layout.addWidget(QLabel("【執行進度】"))
+        self.backfill_status_label = QLabel("狀態：閒置")
+        layout.addWidget(self.backfill_status_label)
+        self.backfill_log = QTextEdit()
+        self.backfill_log.setReadOnly(True)
+        self.backfill_log.setFixedHeight(160)
+        layout.addWidget(self.backfill_log)
+        self.backfill_cancel_btn = QPushButton("取消")
+        self.backfill_cancel_btn.setEnabled(False)
+        self.backfill_cancel_btn.clicked.connect(self._on_backfill_cancel_clicked)
+        layout.addWidget(self.backfill_cancel_btn)
+
+    def _collect_backfill_params(self) -> dict | None:
+        start = self.backfill_start_date.date().toPython().isoformat()
+        end = self.backfill_end_date.date().toPython().isoformat()
+        if start > end:
+            QMessageBox.warning(self, "日期區間錯誤", "開始日期不能晚於結束日期。")
+            return None
+
+        stock_id_filter = None
+        if self.backfill_scope_custom_radio.isChecked():
+            codes = {c.strip() for c in self.backfill_stock_codes_input.text().split(",") if c.strip()}
+            if not codes:
+                QMessageBox.warning(self, "股票範圍錯誤", "請輸入至少一個股票代號，或改選「全市場」。")
+                return None
+            stock_id_filter = codes
+
+        taiex_price = self.backfill_taiex_checkbox.isChecked()
+        stock_price = self.backfill_stock_price_checkbox.isChecked()
+        stock_institutional = self.backfill_stock_institutional_checkbox.isChecked()
+        stock_margin = self.backfill_stock_margin_checkbox.isChecked()
+        if not (taiex_price or stock_price or stock_institutional or stock_margin):
+            QMessageBox.warning(self, "尚未勾選回補項目", "請至少勾選一項回補項目。")
+            return None
+
+        return {
+            "start": start, "end": end,
+            "force_overwrite": self.backfill_force_overwrite_checkbox.isChecked(),
+            "stock_id_filter": stock_id_filter,
+            "taiex_price": taiex_price, "stock_price": stock_price,
+            "stock_institutional": stock_institutional, "stock_margin": stock_margin,
+            "recompute_candidates": self.backfill_recompute_candidates_checkbox.isChecked(),
+        }
+
+    def _on_backfill_start(self) -> None:
+        if self._backfill_worker is not None and self._backfill_worker.isRunning():
+            return
+        params = self._collect_backfill_params()
+        if params is None:
+            return
+
+        self.backfill_log.clear()
+        self.backfill_status_label.setText("狀態：回補中...")
+        self.backfill_start_btn.setEnabled(False)
+        self.backfill_cancel_btn.setEnabled(True)
+
+        self._backfill_worker = BackfillWorker(params)
+        self._backfill_worker.progress.connect(self._on_backfill_progress)
+        self._backfill_worker.finished_ok.connect(self._on_backfill_finished)
+        self._backfill_worker.failed.connect(self._on_backfill_failed)
+        self._backfill_worker.cancelled.connect(self._on_backfill_cancelled)
+        self._backfill_worker.start()
+
+    def _on_backfill_progress(self, message: str) -> None:
+        self.backfill_log.append(message)
+
+    def _on_backfill_finished(self, summary: dict) -> None:
+        self.backfill_status_label.setText("狀態：閒置")
+        self.backfill_start_btn.setEnabled(True)
+        self.backfill_cancel_btn.setEnabled(False)
+        parts = []
+        if "taiex_dates" in summary:
+            parts.append(f"大盤{summary['taiex_dates']}筆")
+        if "indicators" in summary:
+            parts.append(f"均線/SAR快取{summary['indicators']}筆")
+        if "candidates" in summary:
+            parts.append(f"歷史候選清單{summary['candidates']}筆")
+        detail = "、".join(parts) if parts else "沒有新資料寫入"
+        self.backfill_log.append(f"完成：{detail}")
+        # 回補可能動到目前正在看的股票/大盤/候選清單，比照_on_fetch_finished()視情況刷新
+        self._refresh_date_list()
+        self._reload_candidates()
+        current_tab = self.tabs.currentIndex()
+        if current_tab == TAB_STOCK_DETAIL and self._current_stock_id:
+            self._rerender_chart()
+        elif current_tab == TAB_MARKET:
+            self._refresh_market_tab()
+        QMessageBox.information(self, "完成", f"回補完成：{detail}")
+
+    def _on_backfill_failed(self, message: str) -> None:
+        self.backfill_status_label.setText("狀態：閒置")
+        self.backfill_start_btn.setEnabled(True)
+        self.backfill_cancel_btn.setEnabled(False)
+        self.backfill_log.append(f"失敗：{message}")
+        QMessageBox.warning(self, "失敗", f"回補失敗：{message}")
+
+    def _on_backfill_cancelled(self) -> None:
+        self.backfill_status_label.setText("狀態：閒置")
+        self.backfill_start_btn.setEnabled(True)
+        self.backfill_cancel_btn.setEnabled(False)
+        self.backfill_log.append("已取消。")
+
+    def _on_backfill_cancel_clicked(self) -> None:
+        if self._backfill_worker is not None and self._backfill_worker.isRunning():
+            self._backfill_worker.requestInterruption()
+            self.backfill_log.append("正在取消...")
+
+    def _on_backfill_refresh_stock_info(self) -> None:
+        if self._stock_info_worker is not None and self._stock_info_worker.isRunning():
+            return
+        self.backfill_refresh_stock_info_btn.setEnabled(False)
+        self.backfill_refresh_stock_info_btn.setText("整理中...")
+        self._stock_info_worker = StockInfoRefreshWorker()
+        self._stock_info_worker.finished_ok.connect(self._on_backfill_stock_info_finished)
+        self._stock_info_worker.failed.connect(self._on_backfill_stock_info_failed)
+        self._stock_info_worker.start()
+
+    def _on_backfill_stock_info_finished(self, count: int) -> None:
+        self.backfill_refresh_stock_info_btn.setEnabled(True)
+        self.backfill_refresh_stock_info_btn.setText("重新整理股票清單")
+        QMessageBox.information(self, "完成", f"股票基本資料已更新：{count}筆")
+
+    def _on_backfill_stock_info_failed(self, message: str) -> None:
+        self.backfill_refresh_stock_info_btn.setEnabled(True)
+        self.backfill_refresh_stock_info_btn.setText("重新整理股票清單")
+        QMessageBox.warning(self, "失敗", f"股票基本資料更新失敗：{message}")
 
     def _on_watchlist_add_group(self) -> None:
         if self.portfolio_conn is None:
