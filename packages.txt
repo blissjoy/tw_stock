@@ -1,12 +1,4 @@
-# Streamlit Community Cloud部署用的Debian系統套件清單(apt-get)，跟requirements.txt(pip
-# 套件)分開，Streamlit Cloud建置時會自動讀取這個檔案——2026-08-05新增，供weasyprint
-# (dashboard/app.py的個股報表PDF匯出)使用。套件名稱依官方文件(Debian≥11/Ubuntu≥20.04、
-# 從wheel安裝，不需要build工具)：
-# https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#debian-ubuntu
 libpango-1.0-0
 libpangoft2-1.0-0
 libharfbuzz-subset0
-
-# 中文字型：weasyprint排版靠系統fontconfig找字型，Debian容器預設沒有裝任何中文字型，
-# 沒有這個套件的話PDF裡的中文字會顯示成缺字方框(tofu)，不是排版bug。
 fonts-noto-cjk

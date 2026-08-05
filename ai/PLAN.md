@@ -6747,3 +6747,16 @@ Turso)；④手動塞一筆`manual_fetch`紀錄模擬冷卻中，確認正確顯
 按鈕正確隱藏；⑤回補資料分頁在改名後(`admin_action_rate_limit`)確認
 仍正常渲染表單，沒有因為重構而斷掉。`.env.example`/`README.md`同步更新
 成`ADMIN_ACCESS_CODE`。
+
+## 第一次實際部署到Streamlit Community Cloud：修正packages.txt不支援註解（2026-08-05）
+
+實際在share.streamlit.io建立app、接上GitHub repo(`blissjoy/tw_stock`，public，
+已確認可以免費部署)+Turso/FinMind/ADMIN_ACCESS_CODE等secrets後，第一次部署
+建置失敗：`packages.txt`裡的中文註解行(`#`開頭)被Streamlit Cloud的apt
+處理邏輯整行/整段文字當成套件名稱丟給`apt-get install`(不是當成註解跳過)，
+炸出一長串`E: Unable to locate package ...`。查證[官方文件](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/app-dependencies)
+確認：`packages.txt`格式就是「一行一個套件名稱」，沒有提到支援`#`註解語法
+(不像`requirements.txt`/`.env`那樣)——這是這個repo目前唯一一個不能寫中文
+說明註解的設定檔，修法是把`packages.txt`裡的4個套件名稱(`libpango-1.0-0`/
+`libpangoft2-1.0-0`/`libharfbuzz-subset0`/`fonts-noto-cjk`)說明搬到這裡
+(ai/PLAN.md第10批已經寫過理由)，檔案本身只留純套件名稱清單。
