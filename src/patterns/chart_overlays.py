@@ -113,11 +113,22 @@ def compute_trendlines(df: pd.DataFrame, ma_window: int = 5) -> dict[str, TrendL
 
 def trendline_to_xy(line: TrendLine, df: pd.DataFrame) -> tuple[list, list[float]]:
     """把一條TrendLine換算成圖表要畫的(日期陣列, 價格陣列)，從起點畫到資料最後一天(切線畫法
-    慣例是延伸到最新一天，不是只畫在原本取點的兩點之間)。"""
+    慣例是延伸到最新一天，不是只畫在原本取點的兩點之間)。
+
+    dates用.to_pydatetime()轉成原生datetime.datetime，不留原始的pd.Timestamp——
+    2026-08-05發現：既有互動圖表路徑(fig.to_html())靠PlotlyJSONEncoder認得
+    pd.Timestamp沒問題，但src/presentation/chart_data.py新增的報表PDF用kaleido
+    (fig.to_image())走orjson直接序列化，一串純量Timestamp放進list裡不會被
+    orjson的OPT_SERIALIZE_NUMPY路徑處理，直接丟TypeError: Type is not JSON
+    serializable: Timestamp。datetime.datetime是orjson原生支援的型別，對既有
+    互動圖表行為完全沒有影響(pd.Timestamp本來就是datetime.datetime的子類別，
+    語意相同)。用hasattr防呆是因為部分測試(tests/test_chart_overlays.py的
+    _flat_df())刻意用單純整數索引的DataFrame，不是真正的DatetimeIndex。
+    """
     start_x = max(line.a.x, 0)
     end_x = len(df) - 1
     xs = list(range(start_x, end_x + 1))
-    dates = [df.index[x] for x in xs]
+    dates = [d.to_pydatetime() if hasattr(d, "to_pydatetime") else d for d in (df.index[x] for x in xs)]
     prices = [line.at(x) for x in xs]
     return dates, prices
 

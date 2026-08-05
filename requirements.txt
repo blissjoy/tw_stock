@@ -33,3 +33,13 @@ markdown>=3.7
 gspread>=6.1
 google-auth>=2.32
 google-auth-oauthlib>=1.2
+
+# 個股報表PDF匯出(dashboard/app.py)：2026-08-05新增。weasyprint把組好的HTML字串轉PDF，
+# 選它不選Playwright headless Chromium是因為部署到Streamlit Community Cloud的負擔輕很多
+# (只需要透過packages.txt裝系統層Pango/Cairo/GDK-Pixbuf函式庫，不用整包~300MB的Chromium
+# 執行檔)；代價是weasyprint不執行JavaScript，圖表不能用chart_render.py那份互動HTML，改用
+# kaleido(Plotly官方推薦的靜態圖匯出引擎，fig.to_image()會自動偵測使用，不需要額外import)
+# 把Figure轉成PNG再嵌入報表HTML。weasyprint在Windows本機安裝需要另外裝GTK3執行期函式庫
+# (pip本身不會帶，見README)，Streamlit Cloud的Debian容器透過packages.txt裝系統套件即可。
+weasyprint>=62.0
+kaleido>=0.2.1

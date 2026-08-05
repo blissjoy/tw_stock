@@ -967,10 +967,19 @@ def build_candlestick_figure(
         ), row=1, col=1)
 
     if show_support_resistance and sr_levels:
+        # x用.to_pydatetime()轉成原生datetime.datetime，不要留原始的pd.Timestamp純量——
+        # 2026-08-05發現：Plotly自己的to_html()/to_json()(既有互動圖表路徑)靠
+        # PlotlyJSONEncoder認得pd.Timestamp，但kaleido(報表PDF用的靜態圖匯出路徑，見
+        # dashboard/app.py的_build_report_chart_image_html())用orjson直接序列化，
+        # 兩個純量Timestamp放進list裡不會被orjson的OPT_SERIALIZE_NUMPY路徑處理，
+        # 直接丟TypeError: Type is not JSON serializable: Timestamp。datetime.datetime
+        # 是orjson原生支援的型別，對既有互動圖表行為完全沒有影響(pd.Timestamp本來就是
+        # datetime.datetime的子類別，語意相同)。
+        sr_x_start, sr_x_end = df.index[0].to_pydatetime(), df.index[-1].to_pydatetime()
         for level in sr_levels:
             color = SR_ROLE_COLORS.get(level["role"], "#999999")
             fig.add_trace(go.Scatter(
-                x=[df.index[0], df.index[-1]], y=[level["price"], level["price"]], mode="lines",
+                x=[sr_x_start, sr_x_end], y=[level["price"], level["price"]], mode="lines",
                 name=f"{level['role']} {level['price']:.2f}",
                 line=dict(color=color, dash="dot", width=1),
             ), row=1, col=1)

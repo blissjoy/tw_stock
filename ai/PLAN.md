@@ -6625,3 +6625,76 @@ AppTest`無瀏覽器headless驗證(這個session沒有載入瀏覽器自動化�
 小時59分鐘」冷卻倒數，不渲染表單。全程只對本機DB複本操作，沒有對使用者
 正式的主DB Turso帳號執行過這個功能。桌面版`desktop/`目錄完全沒有變動
 (git status確認)，不受影響。
+
+## web/桌面版功能對齊 第10批：個股報表PDF匯出，weasyprint（2026-08-05）
+
+背景：使用者先前要求研究PDF匯出技術後再決定做法，確認**用weasyprint(HTML→PDF)**
+取代原本考慮的Playwright headless Chromium，理由是部署到Streamlit Community
+Cloud的負擔遠低於整包~300MB的Chromium執行檔，只需要透過`packages.txt`裝
+系統層Pango/Cairo/GDK-Pixbuf函式庫。
+
+**架構決定：不重構桌面版，web端獨立寫一組新的HTML字串產生函式**，逐字
+比照desktop/main_window.py對應方法搬過來(簽名改成明確傳入`conn`/`stock_id`，
+不像desktop方法綁在`self.conn`)：`_build_report_quote_html()`／
+`_build_report_institutional_html()`／`_build_report_margin_html()`(固定顯示
+「當日」，不做當日/累計切換)／`_build_report_dealer_html()`／
+`_build_report_chip_html()`(後兩者是「尚未串接資料來源」提示，跟desktop一致，
+不假造資料)照抄`_build_overview_*_html()`；`_institutional_flow_analysis_html()`／
+`_margin_maintenance_analysis_html()`是既有Streamlit widget版
+(`_render_institutional_flow_analysis()`/`_render_margin_maintenance_analysis()`)
+的HTML字串版本，判讀邏輯/書籍引用文字完全一致；`_render_rule_match_blocks_html()`／
+`_format_reference_html_as_anchors()`／`_build_report_reference_appendix_html()`
+照抄桌面版對應方法，「原文與頁碼」在PDF裡改成跳到附錄章節的站內錨點連結
+(`#note-N`)，不是桌面版開新視窗的`ruledoc:///`(PDF裡沒有「開新視窗」這回事，
+附錄直接嵌入使用者自己整理的筆記全文)；`_build_report_analysis_html()`組
+技術面/籌碼面規則清單+總結文字，不含`jumpto:///`跳轉連結(PDF是一次印完的
+靜態文件，不需要頁內導覽按鈕)。
+
+**圖表改用kaleido靜態PNG，不是`<iframe>`**：weasyprint不執行JavaScript，
+桌面版`<iframe>`嵌入`chart_render.py`那份含JS十字準星/資訊框的做法完全沒用。
+`_build_report_chart_image_html()`呼叫既有`build_candlestick_figure()`
+(固定開啟全部均線/切線/支撐壓力/MACD/KD/SAR，不受頁面上「圖表」區塊當下
+勾選狀態影響)，`fig.to_image(format="png", width=1200)`轉PNG bytes、
+base64編碼包成`<img>`標籤。
+
+**過程中發現並修正一個既有的真實bug(不是這批新寫的程式碼本身的問題，是
+kaleido暴露出既有函式的一個相容性缺口)**：`src/patterns/chart_overlays.py`的
+`trendline_to_xy()`跟`src/presentation/chart_data.py`畫支撐壓力線的地方，
+都直接把`df.index[x]`(pandas `Timestamp`純量)放進`go.Scatter`的x值list——
+既有的互動圖表路徑(`fig.to_html()`)靠Plotly自己的`PlotlyJSONEncoder`認得
+`Timestamp`沒問題，但這次新增的kaleido路徑(`fig.to_image()`)走`orjson`直接
+序列化，遇到list裡的純量`Timestamp`會直接丟`TypeError: Type is not JSON
+serializable: Timestamp`(注意：`orjson`的`OPT_SERIALIZE_NUMPY`能處理整段
+numpy陣列，但不會處理list裡個別的`Timestamp`純量，這是兩条完全不同的
+序列化路徑，成因不是「這批新寫的程式碼寫錯」，是既有函式從來沒被kaleido
+這種走法呼叫過，缺口一直都在，只是沒被觸發)。修法：兩處都改用
+`.to_pydatetime()`轉成原生`datetime.datetime`(orjson原生支援的型別，
+`pd.Timestamp`本來就是其子類別，語意完全相同，對既有互動圖表行為零影響)；
+`trendline_to_xy()`額外用`hasattr()`防呆，因為`tests/test_chart_overlays.py`
+的`_flat_df()`測試fixture刻意用單純整數索引，不是真正的`DatetimeIndex`。
+
+新增`packages.txt`(Streamlit Cloud部署用，之前沒有這個檔案)：weasyprint
+系統依賴(`libpango-1.0-0`/`libpangoft2-1.0-0`/`libharfbuzz-subset0`，依
+官方文件Debian≥11/Ubuntu≥20.04+wheel安裝的套件組合)+`fonts-noto-cjk`
+(Debian容器預設沒有中文字型，沒裝的話PDF裡的中文會是缺字方框，不是排版
+bug)。`requirements.txt`新增`weasyprint`/`kaleido`。
+
+**⚠️ 已跟使用者確認、刻意跳過的驗證範圍**：weasyprint在Windows本機需要
+額外安裝MSYS2+透過pacman裝Pango才能真的執行`weasyprint.HTML(...).
+write_pdf()`(系統層級安裝，不是單純pip)，跟使用者確認後**沒有**在本機
+安裝MSYS2，因此`weasyprint.HTML(...).write_pdf()`這一步本身(HTML→PDF
+二進位轉換)**沒有在本機實際驗證過**，留到部署到Streamlit Cloud(用
+`packages.txt`裝系統套件)後才能驗證。kaleido(圖表PNG匯出)沒有這個問題，
+已本機驗證可正常運作。
+
+真實驗證：`pytest tests/ -q`1014個測試全數通過(含修正`trendline_to_xy()`
+後回歸測試仍通過)。改用stub掉`weasyprint`模組(攔截`HTML(string=...)`收到
+的字串，`write_pdf()`回傳假bytes，不影響前面所有HTML組裝+kaleido圖表產生
+邏輯是真的執行)搭配`streamlit.testing.v1.AppTest`headless驗證，對本機
+`data/tw_stock.db`複本查詢2317(鴻海)：確認完整報表HTML成功組裝(48萬字元)、
+標題含股票代號、圖表是base64內嵌`<img>`(不是`<iframe>`)、個股明細5個區塊
+標題+內容都存在(交易資訊表格數字/顏色正確、法人買賣總覽、主力進出與大戶
+籌碼「尚未串接資料來源」提示正確顯示)、個股分析技術面/籌碼面子標題存在、
+附錄章節17個`cite-`錨點/15個`note-`錨點全部正確互相對應、沒有斷連結。額外
+把組出來的HTML存成檔案直接檢視原始內容，確認中文字/表格排版/顏色標記都
+正確，跟desktop對應方法逐字比對過的結果一致。

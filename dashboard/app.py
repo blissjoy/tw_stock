@@ -13,16 +13,20 @@ src/data/config.py 既有的讀取邏輯不必為了 Streamlit 另外寫一套�
 
 from __future__ import annotations
 
+import base64
+import html
 import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import markdown
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src import rule_docs  # noqa: E402
 from src.data.yfinance_client import TAIEX_STOCK_ID  # noqa: E402
 from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
@@ -613,6 +617,481 @@ def main() -> None:
 
         with st.expander("大戶籌碼", expanded=True):
             st.caption("⚠️ 尚未串接資料來源（需要股權分散/大戶持股統計資料，目前資料庫schema還沒有對應的表）。")
+
+    # ------------------------------------------------------------------
+    # 個股報表PDF匯出（2026-08-05新增，見ai/PLAN.md第10批）
+    # ------------------------------------------------------------------
+    #
+    # 桌面版用QWebEnginePage.printToPdf()對含JS的HTML(chart_render.py那份互動圖表)
+    # 直接印成PDF。weasyprint不執行JavaScript，這裡改成：①圖表用kaleido把Plotly
+    # Figure轉成靜態PNG直接嵌入(不是<iframe>)；②個股明細5個區塊/個股分析/附錄的HTML
+    # 字串產生邏輯逐字照抄desktop/main_window.py對應的_build_overview_*_html()／
+    # _render_rule_match_blocks()／_build_report_reference_appendix()方法，只是簽名
+    # 改成明確傳入stock_id(不像desktop方法綁在self.conn)。不重構桌面版、不共用這組
+    # 函式——理由跟這個session其餘web端函式一致：桌面版方法已經穩定運作、沒有測試
+    # 覆蓋，貿然抽成共用模組風險大於效益。
+
+    def _build_report_quote_html(stock_id: str) -> str:
+        """「交易資訊」表格，照抄desktop/main_window.py的_build_overview_quote_html()。"""
+        quote = stock_detail_data.load_quote_summary(conn, stock_id)
+        if quote is None:
+            return "<p>查無成交資料。</p>"
+        c = _colored_num
+        estimated_suffix = "（估）" if quote["avg_price_is_estimated"] else ""
+        avg_price_text = f"{quote['avg_price']:,.2f}{estimated_suffix}" if quote["avg_price"] is not None else "-"
+        trading_money_text = (
+            f"{quote['trading_money_billion']:,.2f}{estimated_suffix}"
+            if quote["trading_money_billion"] is not None else "-"
+        )
+        cost_summary = stock_detail_data.load_latest_institutional_cost_summary(conn, stock_id)
+        foreign_cost = cost_summary["外資"] if cost_summary else None
+        trust_cost = cost_summary["投信"] if cost_summary else None
+        foreign_cost_text = f"{foreign_cost:,.2f}" if foreign_cost is not None else "不適用"
+        trust_cost_text = f"{trust_cost:,.2f}" if trust_cost is not None else "不適用"
+        rows = [
+            ("成交", f"<b>{c(quote['close'], 2)}</b>", "昨收", f"{quote['prev_close']:,.2f}" if quote["prev_close"] is not None else "-"),
+            ("開盤", f"{quote['open']:,.2f}", "漲跌幅", c(quote["change_pct"], 2, signed=True, suffix="%")),
+            ("最高", f"{quote['high']:,.2f}", "漲跌", c(quote["change"], 2, signed=True)),
+            ("最低", f"{quote['low']:,.2f}", "總量", f"{quote['volume_lots']:,} 張"),
+            ("均價", avg_price_text, "昨量", f"{quote['prev_volume_lots']:,} 張" if quote["prev_volume_lots"] is not None else "-"),
+            ("成交金額(億)", trading_money_text, "振幅", c(quote["amplitude_pct"], 2, suffix="%") if quote["amplitude_pct"] is not None else "-"),
+            ("外資持有成本(預估)", foreign_cost_text, "投信持有成本(預估)", trust_cost_text),
+        ]
+        table = f'<p style="color:#666666;">資料時間：{quote["date"]}</p><table cellspacing="0" cellpadding="4" width="100%">'
+        for label1, value1, label2, value2 in rows:
+            table += (
+                f'<tr><td width="15%" style="color:#666666;">{label1}</td><td width="35%">{value1}</td>'
+                f'<td width="15%" style="color:#666666;">{label2}</td><td width="35%">{value2}</td></tr>'
+            )
+        table += "</table>"
+        return table
+
+    def _institutional_flow_analysis_html(flow: dict | None, momentum: dict | None) -> str:
+        """法人籌碼分析文字，跟_render_institutional_flow_analysis()同一套判讀邏輯
+        (理論依據見該函式docstring)，這裡回傳HTML字串而不是呼叫st.markdown()。"""
+        if flow is None and momentum is None:
+            return ""
+        lines = ['<p style="margin-top:10px;"><b>📊 法人籌碼分析</b></p>']
+        streak_lines_start = len(lines)
+
+        if flow is not None:
+            sanhua = flow["三大法人"]
+            if sanhua["is_sell_warning"]:
+                lines.append(
+                    f'<p style="color:#27ae60;">⚠️ 三大法人已連續賣超{sanhua["streak_days"]}天，'
+                    "達到停損觀察門檻（依朱家泓《抓住飆股輕鬆賺》淘汰法選股排除規則第8項："
+                    "三大法人連續賣超應避開，建議留意停損／減碼）。</p>"
+                )
+            elif sanhua["is_buy_watch"]:
+                lines.append(
+                    f'<p style="color:#c0392b;">三大法人已連續買超{sanhua["streak_days"]}天，'
+                    "短線動能偏多，但書中沒有給「連續買超代表安全」的保證，僅供參考。</p>"
+                )
+
+            invtrust = flow["投信"]
+            if invtrust["is_buy_watch"]:
+                lines.append(
+                    f'<p style="color:#c0392b;">📈 投信已連續買超{invtrust["streak_days"]}天'
+                    "（依陳家豐《看懂籌碼 股市賺大錢》：投信受法規限制(單一個股持股上限10%、"
+                    "單日買進不得超過成交量10%)須分批布局，連續加碼3~5天且個股剛脫離下跌"
+                    "整理通常是切入時機——本畫面沒有另外判斷「是否剛脫離整理區」，需自行"
+                    "對照K線圖）。</p>"
+                )
+            elif invtrust["is_sell_warning"]:
+                lines.append(
+                    f'<p style="color:#27ae60;">投信已連續賣超{invtrust["streak_days"]}天，'
+                    "留意是否轉向保守（書中提到投信若轉向防禦型持股，代表對後市看淡）。</p>"
+                )
+
+            foreign = flow["外資"]
+            if foreign["is_buy_watch"] or foreign["is_sell_warning"]:
+                direction_text = "買超" if foreign["is_buy_watch"] else "賣超"
+                lines.append(
+                    f'<p style="color:#999999;">外資已連續{direction_text}{foreign["streak_days"]}天——'
+                    "⚠️ 陳家豐書中提醒：外資買賣單只有在中小型股(非權值股)才有參考價值，"
+                    "權值股/大型股的外資買賣受全球布局、期貨套利、指數調整干擾，不宜直接"
+                    "採信本訊號判斷多空。</p>"
+                )
+
+            dealer = flow["自營商"]
+            if dealer["is_buy_watch"] or dealer["is_sell_warning"]:
+                direction_text = "買超" if dealer["is_buy_watch"] else "賣超"
+                lines.append(
+                    f'<p style="color:#999999;">自營商連續{direction_text}{dealer["streak_days"]}天——'
+                    "⚠️ 陳家豐書中建議「自營商首先剔除」，操作週期短、常忽買忽賣，不建議"
+                    "用連續性判斷趨勢，僅供參考。</p>"
+                )
+
+            if len(lines) == streak_lines_start:
+                lines.append(f"<p>近期法人買賣方向尚未達連續{INSTITUTIONAL_STREAK_THRESHOLD}天門檻，暫無明顯訊號。</p>")
+
+        if momentum:
+            trend_colors = {
+                "買超力道增強": "#c0392b", "由賣轉買": "#c0392b",
+                "賣壓加重": "#27ae60", "由買轉賣": "#27ae60",
+            }
+            group_titles = {
+                "外資": "📐 外資買賣力道變化（近期比前期）",
+                "投信": "📐 投信買賣力道變化（近期比前期）",
+                "外資+投信": "📐 外資＋投信合計買賣力道變化（近期比前期，不含自營商）",
+            }
+            for group in stock_detail_data.MOMENTUM_GROUPS:
+                periods = momentum.get(group)
+                if not periods:
+                    continue
+                lines.append(f'<p style="margin-top:6px;"><b>{group_titles[group]}</b></p>')
+                for label, info in periods.items():
+                    current_lots = info["current"] / 1000
+                    prior_lots = info["prior"] / 1000
+                    trend = info["trend"]
+                    color = trend_colors.get(trend, "#999999")
+                    verb = "持續買進" if trend in ("買超力道增強", "由賣轉買") else ("持續賣出" if trend in ("賣壓加重", "由買轉賣") else "力道趨緩，方向未明確轉變")
+                    lines.append(
+                        f'<p style="color:{color};">近{label}合計買賣超{current_lots:+,.0f}張，'
+                        f"較前{label}（{prior_lots:+,.0f}張）{trend}——{verb}。</p>"
+                    )
+
+        return "".join(lines)
+
+    def _margin_maintenance_analysis_html(maintenance: dict | None) -> str:
+        """融資維持率分析文字，跟_render_margin_maintenance_analysis()同一套判讀
+        邏輯(理論依據見該函式docstring)，這裡回傳HTML字串而不是呼叫st.markdown()。"""
+        if maintenance is None or maintenance["ratio"] is None:
+            return ""
+        ratio_pct = maintenance["ratio"] * 100
+        state = maintenance["state"]
+        lines = [
+            '<p style="margin-top:10px;"><b>📊 融資維持率分析</b></p>',
+            f"<p>估算融資維持率：{ratio_pct:.1f}%（狀態：{state}；融資成數估算採書中預設"
+            "的6成，非個股實際規定，僅供參考）</p>",
+        ]
+        if state == "已跌破斷頭線":
+            lines.append(
+                '<p style="color:#27ae60;">⚠️ 估算已跌破斷頭線(120%)，代表融資部位可能面臨'
+                "券商強制賣出的斷頭賣壓（依陳家豐《看懂籌碼》第2篇第4章）。</p>"
+            )
+        elif state == "警戒區(爹不疼娘不愛)":
+            lines.append(
+                '<p style="color:#e67e22;">融資維持率落在135%以下的警戒區——書中提醒：'
+                "主力通常不會在這個階段進場，因為要面對層層融資套牢賣壓，此時股票容易"
+                "「爹不疼、娘不愛」，若後續跌破120%，可留意超跌反彈機會。</p>"
+            )
+        if maintenance["oversold_rebound_signal"]:
+            lines.append(
+                '<p style="color:#c0392b;">📈 已連續多日低於120%斷頭線，符合書中「超跌'
+                "反彈」訊號條件——僅適合手腳靈活、能嚴設停利的短線操作，不是長線買進"
+                "依據。</p>"
+            )
+        return "".join(lines)
+
+    def _build_report_institutional_html(stock_id: str) -> str:
+        """「法人買賣總覽」報表區塊：累計表格+預估持股成本表格+法人籌碼分析文字，
+        照抄desktop/main_window.py的_build_overview_institutional_html()。"""
+        cumulative = stock_detail_data.load_institutional_cumulative(conn, stock_id)
+        if cumulative is None:
+            return "<p>查無法人買賣資料。</p>"
+        periods = list(stock_detail_data.INSTITUTIONAL_PERIODS.keys())
+        table = '<p style="color:#666666;">單位：張</p><table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0"><tr><td></td>'
+        for label in periods:
+            table += f"<td align='right'><b>{label}</b></td>"
+        table += "</tr>"
+        for group in stock_detail_data.INSTITUTIONAL_GROUPS:
+            table += f"<tr><td>{group}</td>"
+            for label in periods:
+                table += f"<td align='right'>{_colored_num(cumulative[group][label] / 1000, 0, signed=True)}</td>"
+            table += "</tr>"
+        table += "</table>"
+
+        cost = stock_detail_data.load_institutional_estimated_cost(conn, stock_id)
+        if cost:
+            cost_parts = [
+                '<p style="margin-top:10px; color:#666666;">預估持股成本價（單位：元，淨賣出天期無累積部位，標示為不適用）</p>',
+                '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0"><tr><td></td>',
+            ]
+            for label in periods:
+                cost_parts.append(f"<td align='right'><b>{label}</b></td>")
+            cost_parts.append("</tr>")
+            for group in stock_detail_data.ESTIMATED_COST_GROUPS:
+                cost_parts.append(f"<tr><td>{group}</td>")
+                for label in periods:
+                    value = cost[group][label]
+                    cell = f"{value:,.2f}" if value is not None else '<span style="color:#999999;">不適用</span>'
+                    cost_parts.append(f"<td align='right'>{cell}</td>")
+                cost_parts.append("</tr>")
+            cost_parts.append("</table>")
+            table += "".join(cost_parts)
+
+        flow = stock_detail_data.load_institutional_flow_analysis(conn, stock_id)
+        momentum = stock_detail_data.load_institutional_momentum_analysis(conn, stock_id)
+        return table + _institutional_flow_analysis_html(flow, momentum)
+
+    def _build_report_margin_html(stock_id: str) -> str:
+        """「資券變化總覽」報表區塊：固定顯示「當日」表格(不做當日/累計切換，靜態
+        報表用當下最新狀態即可，跟頁面上「圖表」區塊的即時切換不同)+融資維持率
+        分析，照抄desktop/main_window.py的_build_overview_margin_html()當日分支。"""
+        maintenance = stock_detail_data.load_margin_maintenance_analysis(conn, stock_id)
+        analysis_html = _margin_maintenance_analysis_html(maintenance)
+
+        margin = stock_detail_data.load_margin_daily(conn, stock_id)
+        if margin is None:
+            return "<p>查無資券資料。</p>" + analysis_html
+        table = (
+            f'<p style="color:#666666;">資料時間：{margin["date"]}</p>'
+            '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0">'
+            "<tr><td></td><td align='right'><b>買進</b></td><td align='right'><b>賣出</b></td>"
+            "<td align='right'><b>現價</b></td><td align='right'><b>增減</b></td>"
+            "<td align='right'><b>餘額</b></td><td align='right'><b>使用率</b></td>"
+            "<td align='right'><b>連增連減</b></td></tr>"
+        )
+        for row_label, key in (("融資", "margin"), ("融券", "short")):
+            r = margin[key]
+            usage_rate_cell = f"{r['usage_rate']:.2f}%" if r["usage_rate"] is not None else "-"
+            table += (
+                f"<tr><td>{row_label}</td>"
+                f"<td align='right'>{r['buy']:,}</td><td align='right'>{r['sell']:,}</td>"
+                f"<td align='right'>{margin['close']:,.2f}</td>"
+                f"<td align='right'>{_colored_num(r['change'], 0, signed=True)}</td>"
+                f"<td align='right'>{r['balance']:,}</td>"
+                f"<td align='right'>{usage_rate_cell}</td>"
+                f"<td align='right'>{r['streak'] or '-'}</td></tr>"
+            )
+        table += "</table>"
+        offset_text = f"{margin['offset_loan_and_short']:,}" if margin["offset_loan_and_short"] is not None else "-"
+        ratio_text = f"{margin['short_to_margin_ratio_pct']:.2f}%" if margin["short_to_margin_ratio_pct"] is not None else "-"
+        table += f"<p>資券互抵：{offset_text} 張　券資比：{ratio_text}</p>"
+        return table + analysis_html
+
+    def _build_report_dealer_html() -> str:
+        """「主力進出」報表區塊，照抄desktop/main_window.py的_build_overview_dealer_html()
+        ——目前沒有券商分點籌碼資料來源，維持「尚未串接資料來源」的框架提示，不假造資料。"""
+        warning = (
+            "<p style=\"color:#999999;\">⚠️ 尚未串接資料來源（需要券商分點籌碼資料，"
+            "schema已預留broker_chips表，待FinMind付費方案開通後才能接上）。</p>"
+        )
+        cards = (
+            '<table cellspacing="8" cellpadding="10" width="100%" border="1" bordercolor="#e0e0e0">'
+            "<tr>"
+            "<td width='25%' align='center'><span style='color:#666666;'>主力買賣超(張)</span><br>"
+            "<span style='font-size:18pt; font-weight:bold;'>-</span></td>"
+            "<td width='25%' align='center'><span style='color:#666666;'>主力買超(張)</span><br>"
+            "<span style='font-size:18pt; font-weight:bold;'>-</span></td>"
+            "<td width='25%' align='center'><span style='color:#666666;'>主力賣超(張)</span><br>"
+            "<span style='font-size:18pt; font-weight:bold;'>-</span></td>"
+            "<td width='25%' align='center'><span style='color:#666666;'>買賣超佔成交量</span><br>"
+            "<span style='font-size:18pt; font-weight:bold;'>-</span></td>"
+            "</tr></table>"
+        )
+        broker_table = (
+            '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0">'
+            "<tr><td><b>買超券商</b></td><td align='right'><b>買進</b></td><td align='right'><b>賣出</b></td>"
+            "<td align='right'><b>買超張數</b></td>"
+            "<td><b>賣超券商</b></td><td align='right'><b>買進</b></td><td align='right'><b>賣出</b></td>"
+            "<td align='right'><b>賣超張數</b></td></tr>"
+            "<tr><td>-</td><td align='right'>-</td><td align='right'>-</td><td align='right'>-</td>"
+            "<td>-</td><td align='right'>-</td><td align='right'>-</td><td align='right'>-</td></tr>"
+            "</table>"
+        )
+        return warning + cards + broker_table
+
+    def _build_report_chip_html() -> str:
+        """「大戶籌碼」報表區塊，照抄desktop/main_window.py的_build_overview_chip_html()。"""
+        warning = (
+            "<p style=\"color:#999999;\">⚠️ 尚未串接資料來源（需要股權分散/大戶持股統計資料，"
+            "目前資料庫schema還沒有對應的表）。</p>"
+        )
+        table = (
+            '<table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0">'
+            "<tr><td>年度/日期</td><td>外資籌碼</td><td>大戶籌碼</td><td>董監持股</td><td>股價</td></tr>"
+            "<tr><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr></table>"
+        )
+        return warning + table
+
+    def _format_reference_html_as_anchors(reference: str, note_anchor_map: dict[str, str]) -> str:
+        """把「原文與頁碼」文字裡的.md檔名轉成跳到附錄的PDF內部錨點連結，照抄desktop/
+        main_window.py的_format_reference_html_as_anchors()——PDF匯出後沒有「開新
+        視窗」這回事，筆記全文改嵌在同一份文件的附錄章節，靠錨點連結跳轉。"""
+        parts: list[str] = []
+        last_end = 0
+        for match in rule_docs.MD_FILENAME_PATTERN.finditer(reference):
+            filename = match.group(0)
+            parts.append(html.escape(reference[last_end:match.start()]))
+            anchor_id = note_anchor_map.get(filename)
+            if anchor_id:
+                parts.append(f'<a href="#{anchor_id}">{html.escape(filename)}</a>')
+            else:
+                parts.append(html.escape(filename))
+            last_end = match.end()
+        parts.append(html.escape(reference[last_end:]))
+        return "".join(parts)
+
+    def _render_rule_match_blocks_html(matches: list[dict], note_anchor_map: dict[str, str] | None = None) -> str:
+        """把規則清單逐條組成HTML，照抄desktop/main_window.py的_render_rule_match_
+        blocks()。每個規則block加上id="cite-{rule_id}"，供附錄裡「回引用處」連結
+        回跳；note_anchor_map存在時把「原文與頁碼」轉成PDF內部錨點連結。"""
+        blocks = []
+        for m in matches:
+            block = f"<p id=\"cite-{html.escape(m['rule_id'])}\"><b>{html.escape(m['rule_id'])}　{html.escape(m['title'])}（信心{m['confidence']}%）</b><br>"
+            if m.get("note"):
+                note_lines = m["note"].split("\n")
+                block += f"目前狀態：{html.escape(note_lines[0])}<br>"
+                for extra_line in note_lines[1:]:
+                    block += f"　　{html.escape(extra_line)}<br>"
+            if m.get("description"):
+                block += f"分析：{html.escape(m['description'])}<br>"
+            if m.get("reference"):
+                reference_html = _format_reference_html_as_anchors(m["reference"], note_anchor_map or {})
+                block += f"<i>原文與頁碼：{reference_html}</i>"
+            block += "</p><hr>"
+            blocks.append(block)
+        return "".join(blocks)
+
+    def _build_report_reference_appendix_html(matches: list[dict]) -> tuple[str, dict[str, str]]:
+        """收集規則清單「原文與頁碼」實際引用到的筆記檔案(去重複，依第一次出現順序)，
+        組出報表「附錄：引用筆記全文」章節，跟{筆記檔名: 錨點id}對照表(供
+        _render_rule_match_blocks_html()的note_anchor_map參數)——照抄desktop/
+        main_window.py的_build_report_reference_appendix()。嵌入的是使用者自己
+        整理的分析筆記全文，不是書籍原文，避免版權疑慮。"""
+        seen: dict[str, Path] = {}
+        first_citing_rule: dict[str, str] = {}
+        for m in matches:
+            reference = m.get("reference")
+            if not reference:
+                continue
+            for filename, path in rule_docs.resolve_reference_files(reference):
+                if filename not in seen:
+                    seen[filename] = path
+                    first_citing_rule[filename] = m["rule_id"]
+        if not seen:
+            return "", {}
+
+        anchor_ids = {filename: f"note-{i}" for i, filename in enumerate(seen)}
+        blocks = ['<h2 id="report-appendix">附錄：引用筆記全文</h2>']
+        for filename, path in seen.items():
+            anchor_id = anchor_ids[filename]
+            back_link = f'<a href="#cite-{html.escape(first_citing_rule[filename])}">🔙 回引用處（{html.escape(first_citing_rule[filename])}）</a>'
+            try:
+                content = path.read_text(encoding="utf-8")
+                body_html = markdown.markdown(content, extensions=["tables", "fenced_code"])
+            except OSError as exc:
+                body_html = f"<p>(讀取失敗：{html.escape(str(exc))})</p>"
+            blocks.append(f'<h3 id="{anchor_id}">{html.escape(filename)}</h3>{body_html}<p>{back_link}</p><hr>')
+        return "".join(blocks), anchor_ids
+
+    def _build_report_analysis_html(stock_id: str) -> tuple[str, str]:
+        """個股分析(技術面/籌碼面規則清單+總結文字)，回傳(analysis_html,
+        appendix_html)——照抄desktop/main_window.py的_build_report_html()裡組
+        analysis_html/appendix_html那段，不含jumpto:///跳轉連結(PDF是一次印完的
+        靜態文件，不需要頁內導覽按鈕)。"""
+        price_df = load_price_history(conn, stock_id)
+        trend_df = load_price_history(conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        tech_matches = analyze_stock_signals(price_df, trend_df=trend_df) if not price_df.empty else []
+        chip_matches = stock_detail_data.analyze_chip_signals(conn, stock_id)
+        appendix_html, note_anchor_map = _build_report_reference_appendix_html([*tech_matches, *chip_matches])
+
+        def section_summary(matches: list[dict]) -> str:
+            if not matches:
+                return "<p>目前沒有符合任何已接上規則庫的訊號。</p>"
+            summary = summarize_signal_matches(matches)
+            top = summary["top_match"]
+            top_note = (top.get("note") or "").split("\n")[0] if top else ""
+            return (
+                f"<p>本次共觸發 {summary['total']} 條規則"
+                f"（多頭傾向{summary['bullish']}條、空頭傾向{summary['bearish']}條、"
+                f"其他{summary['other']}條 — 依規則標題文字粗略分類，僅供參考）。<br>"
+                f"信心最高的訊號：{html.escape(top['rule_id'])}　{html.escape(top['title'])}"
+                f"（{top['confidence']}%）"
+                + (f"<br>目前狀態：{html.escape(top_note)}" if top_note else "")
+                + "</p>"
+            )
+
+        analysis_html = (
+            "<h3>技術面</h3>" + section_summary(tech_matches) + _render_rule_match_blocks_html(tech_matches, note_anchor_map)
+            + "<h3>籌碼面</h3>" + section_summary(chip_matches) + _render_rule_match_blocks_html(chip_matches, note_anchor_map)
+        )
+        return analysis_html, appendix_html
+
+    def _build_report_chart_image_html(stock_id: str) -> str:
+        """報表用圖表：固定開啟全部均線/切線/支撐壓力/MACD/KD/SAR，不受頁面上
+        「圖表」區塊目前的勾選狀態影響(報表是靜態文件，用固定的完整版本，不是
+        使用者當下畫面的篩選快照)。weasyprint不執行JavaScript，不能像頁面上的
+        即時圖表用chart_render.py那份含十字準星/資訊框的HTML+JS，改用kaleido
+        (Plotly官方推薦的靜態圖匯出引擎)把Figure轉成PNG，base64編碼後直接嵌入
+        <img>標籤——不是<iframe>。"""
+        price_df = load_price_history(conn, stock_id)
+        if price_df.empty:
+            return "<p>查無價格資料，無法產生圖表。</p>"
+        holidays, _holidays_ok = load_holidays_for_chart(price_df)
+        trendlines = chart_overlays.compute_trendlines(price_df)
+        all_levels = chart_overlays.compute_support_resistance_levels(price_df)
+        sr_levels = chart_overlays.nearest_support_resistance(all_levels, float(price_df["close"].iloc[-1]))
+        fig = build_candlestick_figure(
+            price_df, holidays=holidays, ma_periods=FULL_PERIODS,
+            trendlines=trendlines, show_trendline_keys=tuple(trendlines.keys()),
+            sr_levels=sr_levels, show_support_resistance=True,
+            show_macd=True, show_kd=True, show_sar=True,
+        )
+        png_bytes = fig.to_image(format="png", width=1200)
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        return f'<img src="data:image/png;base64,{b64}" style="width:100%;">'
+
+    def _build_full_report_html(stock_id: str, stock_label: str) -> str:
+        """組合圖表/個股明細/個股分析/附錄成完整報表HTML文件，照抄desktop/
+        main_window.py的_build_report_html()整體結構(含CSS)，差別只在圖表改用
+        kaleido靜態PNG。字型堆疊多加'Noto Sans CJK TC'/'Noto Sans TC'：本機
+        Windows有內建的'Microsoft JhengHei UI'，但Streamlit Cloud的Debian容器
+        沒有，要靠packages.txt裝的fonts-noto-cjk套件+這個字型堆疊才能正確顯示
+        中文，不然weasyprint排版出來的PDF中文字會是缺字方框。"""
+        detail_builders = {
+            "交易資訊": _build_report_quote_html,
+            "法人買賣總覽": _build_report_institutional_html,
+            "主力進出": lambda _sid: _build_report_dealer_html(),
+            "資券變化總覽": _build_report_margin_html,
+            "大戶籌碼": lambda _sid: _build_report_chip_html(),
+        }
+        detail_html = "".join(
+            f"<h3>{html.escape(title)}</h3>{builder(stock_id)}" for title, builder in detail_builders.items()
+        )
+
+        analysis_html, appendix_html = _build_report_analysis_html(stock_id)
+        chart_html = _build_report_chart_image_html(stock_id)
+
+        return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body {{ font-family: 'Microsoft JhengHei UI', 'Noto Sans CJK TC', 'Noto Sans TC', sans-serif; padding: 0 16px; }}
+h1 {{ font-size: 20px; }}
+h2 {{ font-size: 16px; border-bottom: 2px solid #2980b9; padding-bottom: 4px; margin-top: 32px; }}
+h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
+</style></head>
+<body>
+<h1 id="report-top">{html.escape(stock_label)} 個股報表</h1>
+<h2>圖表</h2>
+{chart_html}
+<h2>個股明細</h2>
+{detail_html}
+<h2>個股分析</h2>
+{analysis_html}
+{appendix_html}
+</body></html>"""
+
+    def render_stock_report_section(stock_id: str) -> None:
+        """「產出報表」區塊：接在個股明細之後(對齊桌面版「圖表→個股分析→個股
+        明細→產出報表」的分頁順序，web版是同一頁面依序往下疊，不是分頁籤)。
+        weasyprint是同步阻塞呼叫，跟這個session其餘長時間操作(手動抓取今日資料/
+        回補資料)同一種st.spinner作法，PDF產出通常數秒內完成(kaleido圖表轉檔
+        是主要耗時來源)，不需要額外的進度條。"""
+        st.markdown("## 產出報表")
+        if st.button("🖨 產生PDF報表", key=f"report_pdf_btn_{stock_id}"):
+            import weasyprint
+
+            stock_name = chart_data.get_stock_name(conn, stock_id)
+            stock_label = f"{stock_id} {stock_name}" if stock_name else stock_id
+            with st.spinner("正在產生PDF報表..."):
+                report_html = _build_full_report_html(stock_id, stock_label)
+                pdf_bytes = weasyprint.HTML(string=report_html).write_pdf()
+            st.download_button(
+                "⬇️ 下載PDF", data=pdf_bytes, file_name=f"{stock_id}_報表.pdf",
+                mime="application/pdf", key=f"report_pdf_download_{stock_id}",
+            )
 
     def _portfolio_summary_text(df: pd.DataFrame, cost_label: str, value_label: str, profit_label: str) -> str:
         """算庫存清單／觀察清單頂部的摘要文字：總成本/總市值/累積損益(含%)/今日資產
@@ -1573,6 +2052,7 @@ def main() -> None:
         if detail_stock_id:
             render_price_chart(detail_stock_id, widget_key="detail")
             render_stock_overview_section(detail_stock_id)
+            render_stock_report_section(detail_stock_id)
         else:
             st.info("請輸入股票代號或名稱查詢，或到「選股」分頁點選候選股票。")
 
