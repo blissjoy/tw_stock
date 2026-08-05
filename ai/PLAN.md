@@ -6960,3 +6960,60 @@ AppTest`headless驗證：個股資訊查詢2317後正確出現「圖表」/「�
 中發現一個小的視覺瑕疵(非本次改動目標)：均線/切線勾選框因為欄位較窄，
 文字被擠成直排(例如「MA5」疊成三行)，留待之後版面微調，不影響功能，
 已知會告知使用者。
+
+## web/桌面版功能對齊 第13批：「選股」分頁移除全域標題列、調整排版順序
+（2026-08-05）
+
+背景：延續大盤/個股資訊的對齊工作，使用者提供web版跟桌面版的選股分頁
+截圖對比，提出幾個問題：①web版最上方一大塊「為什麼要顯示」的標題/狀態
+區塊；②「更新日期」應該在桌面版藍線下方(篩選區塊旁邊)，不是web版現在
+的位置；③下拉選單太大、位置跟桌面版不同難以辨識；④SAR/朱家泓的預設
+勾選狀態看起來不一致；⑤之後桌面版的記憶功能(QSettings)在web版是否要用
+cookie/localStorage做。
+
+**先確認並回覆的部分**：①SAR/朱家泓的「真正預設值」(`chart_data.
+CANDIDATE_SAR_FLIP_ENABLED_DEFAULT`/`CANDIDATE_ZHU_RULE_ONLY_DEFAULT`，
+都是`True`)web/桌面版程式碼完全一致，不是bug——桌面版截圖SAR有勾/朱
+家泓沒勾是桌面版既有的`QSettings`記憶功能(記住使用者自己上次的選擇)
+造成的個人化差異，不是設計預設值不同。②記憶功能web版要考慮跨瀏覽器/
+裝置的獨立記憶(cookie/localStorage)，Streamlit沒有原生API，需要另外
+評估(URL query params／自寫JS橋接localStorage)，使用者確認「當下不做，
+先處理版面差異」，這批不含記憶功能實作。
+
+查證`desktop/main_window.py`的`_build_screener_tab()`(第1022行起)實際
+元件順序：候選清單日期(`date_bar`)→市場/產業別/成交量(`market_industry_
+bar`)→篩選條件(`filter_bar`)→篩選方法(`method_bar`，含套用篩選按鈕)→
+🔄立即重新篩選/▶手動抓取今日資料/候選清單內搜尋框/**`self.status_label`**
+(靠右對齊，顯示股價更新至/候選清單算至/下次更新時間，`top_bar`)→加入
+庫存/加入觀察清單(`bulk_action_bar`)→表格。**桌面版完全沒有**等同於web版
+`st.title("📈 台股每日選股")`+caption的全域大標題(那是本機視窗標題列的
+事，`dashboard/app.py:147`的`st.set_page_config(page_title=...)`已經
+把瀏覽器分頁標題設好，內容區塊裡的`st.title()`純粹是web版多出來的重複
+資訊)；「股價更新至/候選清單算至/下次更新時間」文字桌面版只在「選股」
+分頁自己的按鈕列裡，不是跨分頁都看得到的全域資訊。
+
+實作：①刪除`main()`裡`title_col, status_col = st.columns([4, 1])`那整段
+全域標題/狀態列(原本每個分頁最上方都會顯示)；②「候選清單日期」selectbox
+搬到`TAB_SCREENER`分支最前面(原本擠在按鈕列後面，跟桌面版擺最前面的順序
+不一致)；③按鈕列從`button_col1, button_col2`兩欄擴充成`button_col1,
+button_col2, search_col, status_col`四欄，🔄/▶按鈕(含既有密碼+冷卻保護，
+完全不動那段邏輯)之後接搜尋框、股價更新至/候選清單算至/更新中或中斷
+警告(從刪掉的全域標題搬過來的邏輯)；④候選清單內搜尋框(`candidate_
+search_query`)從結果區搬到按鈕列，原本結果區那個重複的`st.text_input`
+呼叫直接刪除(兩個`st.text_input`用同一個`key`會丟`StreamlitAPIException`，
+必須整段刪除不能只是留著不用)。下拉選單「太大」的部分：查證是Streamlit
+原生`st.selectbox`/`st.multiselect`的高度/padding天生比Qt的`QComboBox`
+大，這是框架層級的預設樣式差異，**這次不做自訂CSS覆蓋**(Streamlit內部
+DOM class不是公開穩定API，版本升級容易失效，維護風險大於效益)，改善
+範圍限於排版順序/位置對齊桌面版，高度差異誠實跟使用者說明是platform
+限制。
+
+真實驗證：`pytest tests/ -q`1020個測試全數通過(尤其確認拿掉重複
+`text_input`後沒有出現重複key的例外)。`streamlit.testing.v1.AppTest`
+headless驗證：全域「📈 台股每日選股」標題確認完全移除(逐一切換全部7個
+分頁都沒有)；選股分頁確認候選清單日期selectbox排在市場selectbox之前
+(元件註冊順序驗證)；搜尋框只出現一次(沒有重複key)；股價更新至/候選清單
+算至文字正確顯示在選股分頁。**用Playwright實際截圖**確認視覺效果：頁面
+直接從分頁列開始(沒有大標題)、候選清單日期在最上方、篩選區塊順序跟
+桌面版一致、按鈕列同一排有🔄立即重新篩選/手動抓取狀態提示/搜尋候選清單
+框/股價更新至三行狀態文字，整體結構明顯更接近使用者提供的桌面版截圖。

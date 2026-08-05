@@ -1770,41 +1770,13 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     attempt_id = admin_action_rate_limit.record_attempt_start(conn, "backfill", params)
                     _run_backfill(params, attempt_id)
 
-    title_col, status_col = st.columns([4, 1])
-    with title_col:
-        st.title("📈 台股每日選股")
-        st.caption("資料來源：TWSE / TPEx(透過FinMind) — 盤中每小時自動更新，收盤後取得最終數字")
-    with status_col:
-        status = pipeline_status.read_status() or {}
-        if status.get("status") == "running" and pipeline_status.is_stale(status):
-            # process被強制中止(kill/當機/斷電)時，Python的except/finally完全沒機會執行，
-            # 狀態檔案會永久停在最後一次心跳的"running"——is_stale()判斷太久沒更新，這裡
-            # 不能再顯示「更新中」誤導使用者，要明確標示可能已經中斷。
-            st.markdown("**:red[⚠ 上次自動更新可能已中斷，請重新手動抓取]**")
-        elif status.get("status") == "running":
-            stage, progress = status.get("stage"), status.get("progress")
-            detail = f"　{stage} {progress}檔" if stage and progress else ""
-            st.markdown(f"**:orange[🔄 更新中...{detail}]**")
-        else:
-            def _fmt(ts: str | None) -> str:
-                if not ts:
-                    return "尚無資料"
-                try:
-                    return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
-                except ValueError:
-                    return ts
-
-            # 股價資料跟候選清單是兩件各自獨立更新的東西：股價可能已經更新到今天，但候選
-            # 清單是幾分鐘前手動按「立即重新篩選」才重算的，兩個時間點不會永遠一致，混在
-            # 一起顯示會讓使用者誤判「候選清單是不是也跟著更新了」，所以分開各顯示一行。
-            st.caption(f"股價更新至　{_fmt(get_latest_update_time(conn))}")
-            st.caption(f"候選清單算至　{_fmt(get_latest_candidate_update_time(conn))}")
-            # 2026-08-04新增：`.github/workflows/daily_pipeline.yml`的排程自2026-07-23起
-            # 被註解暫停(Turso帳號寫入額度用完，架構改成本機優先運作)，只留workflow_dispatch
-            # 可以手動觸發——web版現在其實沒有任何自動更新機制，不能沿用桌面版「下次更新
-            # 時間」那套邏輯(那是讀Windows工作排程器寫死的時間表，跟這裡的情境不同)，改成
-            # 明確提醒使用者目前是純手動更新，避免誤以為資料會自動保持最新。
-            st.caption("⚠️ 目前無自動排程更新中（GitHub Actions 排程已暫停，資料需手動觸發「▶ 手動抓取今日資料」更新）")
+    # 2026-08-05拿掉這裡原本的全域「📈 台股每日選股」標題+股價更新至/候選清單算至
+    # 狀態列——桌面版完全沒有等同的東西(那是本機視窗標題列的事，不會出現在分頁內容
+    # 裡)，`st.set_page_config(page_title=..., ...)`(本檔案開頭)已經把瀏覽器分頁
+    # 標題設好了，這裡再放一次是純web版多出來的重複資訊。狀態列邏輯(股價更新至/
+    # 候選清單算至/下次更新時間/更新中/中斷警告)搬到「選股」分頁自己的按鈕列，比照
+    # 桌面版desktop/main_window.py的self.status_label(只在_build_screener_tab()
+    # 裡，不是全域的)。
 
     # 三個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+個股
     # 分析)——原本候選清單跟個股圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選
@@ -1847,6 +1819,16 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 render_analysis_fn()
 
     elif active_tab == TAB_SCREENER:
+        # 2026-08-05改版：候選清單日期選單搬到最前面(比照桌面版desktop/main_window.py
+        # 的_build_screener_tab()第一個元件date_bar，選了立即切換，不用等「套用篩選」)，
+        # 原本擠在按鈕列後面、跟其他篩選條件的deferred-apply順序混在一起，使用者反映
+        # 位置跟桌面版不一致、難以辨識。
+        candidate_dates = list_candidate_dates(conn)
+        selected_date = (
+            st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
+            if candidate_dates else None
+        )
+
         # ⚠️ 2026-08-01修正：篩選條件(以下勾選框/下拉/天數輸入)原本每改一個就立刻用
         # apply_candidate_filters()重新查DB+套用篩選——Streamlit本來就是「互動一次
         # 整個腳本重跑一次」的架構，沒辦法避免rerun本身，但rerun時"是否要重新套用
@@ -1920,7 +1902,13 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     "industries": selected_industries, "min_volume_lots": int(min_volume_lots_input),
                 }
 
-        button_col1, button_col2 = st.columns([1, 1])
+        # 按鈕列：🔄立即重新篩選/▶手動抓取今日資料/候選清單內搜尋框/狀態文字都在同一列，
+        # 比照桌面版desktop/main_window.py的top_bar(self.refresh_btn/self.fetch_btn/
+        # self.candidate_search_input/self.status_label依序排開，靠右對齊)。搜尋框
+        # 2026-08-05從結果區搬過來(原本跟表格擠在一起，現在跟桌面版一樣緊接在按鈕
+        # 旁邊)，狀態文字2026-08-05從整個頁面最上方的全域標題列搬過來(桌面版的
+        # status_label只在「選股」分頁裡，不是跨分頁都看得到的全域資訊)。
+        button_col1, button_col2, search_col, status_col = st.columns([1, 1.5, 1.5, 2])
         with button_col1:
             if st.button("🔄 立即重新篩選"):
                 # 只用資料庫裡目前已有的資料重算訊號，不重新對外抓取TWSE/TPEx資料(那個很慢，
@@ -1979,11 +1967,50 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                             st.error(f"抓取失敗：{exc}")
                         st.rerun()
 
-        candidate_dates = list_candidate_dates(conn)
-        selected_date = (
-            st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
-            if candidate_dates else None
-        )
+        with search_col:
+            # 候選清單內搜尋：純顯示層過濾，不透過「套用篩選」按鈕(不是資料查詢，即時
+            # 生效)，跟桌面版_on_candidate_search()「找到後自動選取捲動」的做法不同——
+            # Streamlit的dataframe沒有程式化捲動/選取特定列的API，改成直接篩掉不符合
+            # 的列，達到同樣「從一長串候選清單快速縮小範圍」的目的。
+            search_query = st.text_input(
+                "搜尋候選清單（代號或名稱）", key="candidate_search_query", label_visibility="collapsed",
+                placeholder="搜尋候選清單（代號或名稱）",
+            )
+
+        with status_col:
+            status = pipeline_status.read_status() or {}
+            if status.get("status") == "running" and pipeline_status.is_stale(status):
+                # process被強制中止(kill/當機/斷電)時，Python的except/finally完全沒機會
+                # 執行，狀態檔案會永久停在最後一次心跳的"running"——is_stale()判斷太久沒
+                # 更新，這裡不能再顯示「更新中」誤導使用者，要明確標示可能已經中斷。
+                st.markdown("**:red[⚠ 上次自動更新可能已中斷，請重新手動抓取]**")
+            elif status.get("status") == "running":
+                stage, progress = status.get("stage"), status.get("progress")
+                detail = f"　{stage} {progress}檔" if stage and progress else ""
+                st.markdown(f"**:orange[🔄 更新中...{detail}]**")
+            else:
+                def _fmt_status_ts(ts: str | None) -> str:
+                    if not ts:
+                        return "尚無資料"
+                    try:
+                        return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
+                    except ValueError:
+                        return ts
+
+                # 股價資料跟候選清單是兩件各自獨立更新的東西：股價可能已經更新到今天，但
+                # 候選清單是幾分鐘前手動按「立即重新篩選」才重算的，兩個時間點不會永遠
+                # 一致，混在一起顯示會讓使用者誤判「候選清單是不是也跟著更新了」，所以
+                # 分開各顯示一行。
+                st.caption(f"股價更新至　{_fmt_status_ts(get_latest_update_time(conn))}")
+                st.caption(f"候選清單算至　{_fmt_status_ts(get_latest_candidate_update_time(conn))}")
+                # `.github/workflows/daily_pipeline.yml`的排程自2026-07-23起被註解暫停
+                # (Turso帳號寫入額度用完，架構改成本機優先運作)，只留workflow_dispatch
+                # 可以手動觸發——web版現在其實沒有任何自動更新機制，不能沿用桌面版「下次
+                # 更新時間」那套邏輯(那是讀Windows工作排程器寫死的時間表，跟這裡的情境
+                # 不同)，改成明確提醒使用者目前是純手動更新，避免誤以為資料會自動保持
+                # 最新。
+                st.caption("⚠️ 目前無自動排程更新中（GitHub Actions 排程已暫停，資料需手動觸發「▶ 手動抓取今日資料」更新）")
+
         applied = st.session_state["applied_filters"]
         candidates_df, latest_date, is_intraday = load_stock_universe_for_date(
             conn, target_date=selected_date, market=applied.get("market"),
@@ -2006,11 +2033,8 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             st.subheader(f"候選清單（{latest_date}，共 {len(candidates_df)} 檔）")
             if is_intraday:
                 st.markdown("**:red[⚠ 尚未收盤，本頁為盤中即時資料，收盤後數字可能改變]**")
-            # 候選清單內搜尋：純顯示層過濾，不透過「套用篩選」按鈕(不是資料查詢，即時生效)，
-            # 跟桌面版_on_candidate_search()「找到後自動選取捲動」的做法不同——Streamlit的
-            # dataframe沒有程式化捲動/選取特定列的API，改成直接篩掉不符合的列，達到同樣
-            # 「從一長串候選清單快速縮小範圍」的目的。
-            search_query = st.text_input("搜尋候選清單（代號或名稱）", key="candidate_search_query")
+            # search_query已經在上面按鈕列的search_col裡取得(2026-08-05搬過去，比照
+            # 桌面版搜尋框跟🔄/▶按鈕同一列的位置)，這裡直接用。
             if search_query:
                 q = search_query.strip().lower()
                 candidates_df = candidates_df[
