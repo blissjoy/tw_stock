@@ -6698,3 +6698,52 @@ write_pdf()`(系統層級安裝，不是單純pip)，跟使用者確認後**沒�
 附錄章節17個`cite-`錨點/15個`note-`錨點全部正確互相對應、沒有斷連結。額外
 把組出來的HTML存成檔案直接檢視原始內容，確認中文字/表格排版/顏色標記都
 正確，跟desktop對應方法逐字比對過的結果一致。
+
+## 雲端部署準備：「▶ 手動抓取今日資料」按鈕補上跟回補資料同一套額度保護（2026-08-05）
+
+背景：確認要開始準備正式部署web版到Streamlit Cloud，過程中討論到兩件事：
+①庫存清單/觀察清單目前沒有存取限制，使用者決定**這個階段先不放實際持股
+資料**，觀察清單流出去沒關係，所以暫時不用加密碼門檻(之後如果要開放給
+其他人用自己的Turso資料庫存自己的庫存，那是完全不同量級的多租戶帳號系統
++per-user憑證加密儲存+session化連線，先不做，等真的要開放給別人時才啟動
+這個規劃)；②主DB的Turso帳號額度已經確認恢復正常。
+
+檢視部署前的風險清單時發現：「選股」分頁的「▶ 手動抓取今日資料」按鈕
+(既有功能，不是這次新加的)完全沒有任何防護，但風險跟回補資料是同一類
+——會對主DB Turso帳號寫入、呼叫FinMind額度，且`dry_run=False`會觸發
+**真實的LINE推播/Email通知**。公開網址部署後，任何訪客都能點這顆按鈕，
+不只消耗額度，還會讓使用者自己的LINE/Email被陌生訪客觸發的通知洗版。
+使用者確認：比照回補資料，加上密碼+冷卻時間保護。
+
+實作：既然要保護的動作從1個變成2個，把原本只給回補資料用的基礎設施
+改名成更通用的名稱：`src/data/config.py`的`get_backfill_access_code()`
+→`get_admin_access_code()`(環境變數`BACKFILL_ACCESS_CODE`→
+`ADMIN_ACCESS_CODE`)；`src/data/backfill_rate_limit.py`→`src/data/
+admin_action_rate_limit.py`，資料表`backfill_attempts`→`admin_action_
+attempts`，新增`kind`欄位('backfill'/'manual_fetch')讓兩種動作的冷卻
+時間互相獨立計算(`record_attempt_start()`/`get_last_attempt()`/
+`seconds_until_next_allowed()`都改成多吃一個`kind`參數)——理由：兩者
+風險同一類但操作規模差很多(回補資料是日期區間×股票清單，手動抓取只抓
+當天)，共用同一個冷卻時鐘會互相卡住，不合理。`src/data/storage.py`的
+`_migrate_schema()`補上`DROP TABLE IF EXISTS backfill_attempts`(舊表名，
+確認過沒有任何實際部署用過、沒有真實資料，直接砍掉，不用ALTER TABLE)。
+
+「▶ 手動抓取今日資料」新增的保護邏輯：冷卻中(`MANUAL_FETCH_COOLDOWN_
+SECONDS`，先抓1小時，比回補資料的6小時短很多——這個動作規模小很多，
+沒必要限制到跟回補資料一樣嚴格)時完全不顯示按鈕，只顯示倒數；沒冷卻時
+顯示密碼欄+按鈕，密碼錯誤時顯示錯誤、**不會**呼叫`run_daily_pipeline()`；
+密碼正確才呼叫`record_attempt_start(conn, "manual_fetch", {})`+執行+
+`record_attempt_result()`(成功/失敗都記，跟回補資料同一個防重試炸額度
+的設計)。
+
+真實驗證：`pytest tests/ -q`1015個測試全數通過(新增`tests/test_admin_
+action_rate_limit.py`，含跨kind獨立冷卻的測試，取代舊的`tests/test_
+backfill_rate_limit.py`)。`streamlit.testing.v1.AppTest`headless驗證
+(本機`data/tw_stock.db`/`data/portfolio.db`複本，不影響正式資料)：①沒設
+`ADMIN_ACCESS_CODE`時手動抓取按鈕正確隱藏、顯示停用提示；②設定後按鈕+
+密碼欄正確渲染；③密碼錯誤時顯示錯誤、**確認沒有**觸發真的`run_daily_
+pipeline()`(沒有出現「抓取完成」訊息，避免驗證過程真的打外部API/寫入
+Turso)；④手動塞一筆`manual_fetch`紀錄模擬冷卻中，確認正確顯示倒數、
+按鈕正確隱藏；⑤回補資料分頁在改名後(`admin_action_rate_limit`)確認
+仍正常渲染表單，沒有因為重構而斷掉。`.env.example`/`README.md`同步更新
+成`ADMIN_ACCESS_CODE`。

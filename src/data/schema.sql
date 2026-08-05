@@ -219,17 +219,22 @@ CREATE TABLE IF NOT EXISTS delisted_stocks (
     noted_at        TEXT NOT NULL  -- 我們自己記錄下這件事的時間(不是真正下市當下)
 );
 
--- web版「回補資料」功能的Turso寫入速率限制用，見src/data/backfill_rate_limit.py
--- (2026-08-05新增)。只有web版有這個表的實際使用(桌面版一律寫本機sqlite，沒有
--- Turso額度風險，但schema.sql本機/Turso共用，桌面版建表但不使用不影響任何事)。
+-- web版對主DB Turso帳號有實質額度風險的「高風險動作」(回補資料、手動抓取今日資料)
+-- 共用的速率限制紀錄表，見src/data/admin_action_rate_limit.py。2026-08-05新增，
+-- 一開始只給回補資料用(表名一度叫backfill_attempts)，後來手動抓取今日資料按鈕
+-- 發現是同一類風險(公開網址下任何訪客都能觸發、對Turso寫入+耗FinMind額度+手動
+-- 抓取還會觸發真實LINE/Email通知)，改成用kind欄位分開追蹤但共用同一張表/同一組
+-- 密碼(ADMIN_ACCESS_CODE)。只有web版有這個表的實際使用(桌面版一律寫本機sqlite，
+-- 沒有Turso額度風險，但schema.sql本機/Turso共用，桌面版建表但不使用不影響任何事)。
 -- 冷卻計算基準是「這次嘗試開始寫入的時間」(不是完成時間)：即使這次執行途中失敗，
 -- Turso額度也已經被消耗掉一部分，不能因為「還沒完成」就允許立刻重試，否則變成
 -- 可以無限重試炸額度的漏洞。
-CREATE TABLE IF NOT EXISTS backfill_attempts (
+CREATE TABLE IF NOT EXISTS admin_action_attempts (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,     -- 'backfill' 或 'manual_fetch'，各自獨立算冷卻時間
     started_at   TEXT NOT NULL,     -- ISO8601 UTC，冷卻計算基準
     finished_at  TEXT,              -- 完成/失敗時才填
     status       TEXT NOT NULL,     -- 'running'/'done'/'failed'
-    params_json  TEXT NOT NULL,     -- 這次回補的參數(方便事後追查)
+    params_json  TEXT NOT NULL,     -- 這次動作的參數(方便事後追查)
     result_json  TEXT               -- 完成後的summary
 );

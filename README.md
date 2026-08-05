@@ -165,6 +165,7 @@ TWSE/yfinance造成明顯負擔；但如果之後有更高頻率的需求(例如
 | `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` / `NOTIFY_EMAIL_TO` | Email通知 | Gmail 開啟兩步驟驗證後產生「應用程式密碼」 |
 | `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`（可選） | 之後恢復雲端部署時的雲端資料庫 | 註冊 [turso.tech](https://turso.tech) 建立資料庫 |
 | `TURSO_PORTFOLIO_DATABASE_URL` / `TURSO_PORTFOLIO_AUTH_TOKEN`（可選） | 庫存清單/觀察清單雲端持久化，跟上面主DB**分開的另一個**Turso資料庫 | 同樣在 [turso.tech](https://turso.tech) 另外建立一個資料庫 |
+| `ADMIN_ACCESS_CODE`（可選，web版佈署到公開網址時建議設定） | web版「回補資料」分頁+「▶ 手動抓取今日資料」按鈕共用的存取密碼——這兩個動作都會對主DB的Turso帳號寫入、消耗FinMind額度，手動抓取還會觸發真實LINE/Email通知，公開網址下任何訪客都能觸發，未設定時這兩個功能會顯示「已停用」 | 自己設一組字串即可，不是向外部服務申請 |
 
 ⚠️ 庫存清單/觀察清單(`data/portfolio.db`)刻意用**跟主DB分開的第二個Turso資料庫**，不是
 共用同一個——主DB的Turso帳號曾經寫入額度用完被封鎖過(見下方說明)，獨立開一個資料庫讓

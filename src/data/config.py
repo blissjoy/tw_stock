@@ -70,12 +70,16 @@ def get_turso_portfolio_credentials() -> tuple[str, str]:
     return url, token
 
 
-def get_backfill_access_code() -> str | None:
-    """回傳BACKFILL_ACCESS_CODE，未設定時回傳None(不丟例外)——web版「回補資料」是
-    可選的高風險功能(見src/data/backfill_rate_limit.py)，沒設定密碼時應該是「功能
-    停用顯示提示」而不是crash整頁，跟其他必要憑證(get_turso_credentials()等)的
+def get_admin_access_code() -> str | None:
+    """回傳ADMIN_ACCESS_CODE，未設定時回傳None(不丟例外)。2026-08-05從原本的
+    get_backfill_access_code()改名：一開始只給web版「回補資料」用，後來web版
+    「▶ 手動抓取今日資料」按鈕(對主DB Turso帳號寫入+呼叫FinMind額度+觸發真實
+    LINE/Email通知，見src/data/admin_action_rate_limit.py)發現是同一類風險(公開
+    網址下任何訪客都能觸發)，改用同一組密碼統一保護這兩個「會實際消耗額度/
+    對外發送通知」的動作，不用各自維護一組密碼。沒設定時應該是「功能停用顯示
+    提示」而不是crash整頁，跟其他必要憑證(get_turso_credentials()等)的
     「丟RuntimeError」慣例刻意不同。"""
-    return os.environ.get("BACKFILL_ACCESS_CODE") or None
+    return os.environ.get("ADMIN_ACCESS_CODE") or None
 
 
 def get_line_channel_token() -> str:

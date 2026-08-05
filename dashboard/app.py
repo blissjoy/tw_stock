@@ -69,11 +69,14 @@ TAB_OPTIONS = [
     TAB_INVENTORY, TAB_WATCHLIST, TAB_BACKFILL,
 ]
 
-# web版「回補資料」的冷卻時間(見src/data/backfill_rate_limit.py)——同一時間只能有
-# 一次嘗試在跑，完成後這段時間內不能再次觸發，理由跟30天上限一樣是保護主DB的Turso
-# 帳號額度(曾經被用完封鎖過，見.github/workflows/daily_pipeline.yml開頭註解)。
+# web版對主DB Turso帳號有實質額度風險的動作的冷卻時間(見src/data/admin_action_
+# rate_limit.py)——同一種動作同一時間只能有一次嘗試在跑，完成後這段時間內不能再次
+# 觸發，理由是保護主DB的Turso帳號額度(曾經被用完封鎖過，見.github/workflows/
+# daily_pipeline.yml開頭註解)。「回補資料」跟「手動抓取今日資料」風險同一類(公開
+# 網址下任何訪客都能觸發)但操作規模差很多，各自獨立設定冷卻秒數。
 BACKFILL_COOLDOWN_SECONDS = 6 * 60 * 60
 BACKFILL_MAX_RANGE_DAYS = 30
+MANUAL_FETCH_COOLDOWN_SECONDS = 60 * 60
 
 # 黃豐凱籌碼分析法(見src/presentation/huang_chip_data.py)接在觀察清單表格既有欄位
 # 之後的額外欄位——照抄desktop/main_window.py的_HUANG_CHIP_HEADERS，J欄(大量K參考)
@@ -117,8 +120,8 @@ def main() -> None:
     from scripts import backfill_history
     from scripts.backfill_taiex import backfill_taiex_range
     from scripts.daily_pipeline import run_daily_pipeline
-    from src.data import backfill_rate_limit, portfolio_storage, storage
-    from src.data.config import get_backfill_access_code
+    from src.data import admin_action_rate_limit, portfolio_storage, storage
+    from src.data.config import get_admin_access_code
     from src.data.connection import get_default_connection, get_default_portfolio_connection
     from src.data.trading_calendar import holidays_between
     from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL
@@ -1525,7 +1528,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         才需要)指標重算→(打勾才需要)候選清單重算。跟desktop不同的是這裡沒有背景
         執行緒，整個function同步阻塞執行到完成，也不支援中途取消。不論成功/失敗都
         會呼叫record_attempt_result()，讓冷卻時間確實算數(見src/data/
-        backfill_rate_limit.py的模組docstring)。
+        admin_action_rate_limit.py的模組docstring)。
         """
         summary: dict = {}
         progress_bar = st.progress(0.0, text="準備開始...")
@@ -1603,7 +1606,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                         summary["candidates"] = n
 
             progress_bar.progress(1.0, text="完成")
-            backfill_rate_limit.record_attempt_result(conn, attempt_id, "done", summary)
+            admin_action_rate_limit.record_attempt_result(conn, attempt_id, "done", summary)
             parts = []
             if "taiex_dates" in summary:
                 parts.append(f"大盤{summary['taiex_dates']}天")
@@ -1614,7 +1617,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             detail = "、".join(parts) if parts else "沒有新資料寫入"
             st.success(f"回補完成：{detail}")
         except Exception as exc:  # noqa: BLE001
-            backfill_rate_limit.record_attempt_result(conn, attempt_id, "failed", {"error": str(exc)})
+            admin_action_rate_limit.record_attempt_result(conn, attempt_id, "failed", {"error": str(exc)})
             st.error(f"回補失敗：{exc}")
         finally:
             progress_bar.empty()
@@ -1638,17 +1641,17 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             "都不能再次觸發"
         )
 
-        access_code = get_backfill_access_code()
+        access_code = get_admin_access_code()
         if access_code is None:
-            st.warning("尚未設定 BACKFILL_ACCESS_CODE，此功能已停用。")
+            st.warning("尚未設定 ADMIN_ACCESS_CODE，此功能已停用。")
             return
 
-        remaining = backfill_rate_limit.seconds_until_next_allowed(conn, BACKFILL_COOLDOWN_SECONDS)
+        remaining = admin_action_rate_limit.seconds_until_next_allowed(conn, "backfill", BACKFILL_COOLDOWN_SECONDS)
         if remaining > 0:
             hours, rem = divmod(int(remaining), 3600)
             minutes = rem // 60
             st.warning(f"距離下次可以回補還要等 {hours} 小時 {minutes} 分鐘。")
-            last = backfill_rate_limit.get_last_attempt(conn)
+            last = admin_action_rate_limit.get_last_attempt(conn, "backfill")
             if last:
                 result_text = f"，結果：{last['result']}" if last.get("result") else ""
                 st.caption(f"上一次嘗試：{last['started_at']}，狀態：{last['status']}{result_text}")
@@ -1734,7 +1737,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
 
             if confirm_clicked:
                 # 防止兩個分頁/兩次點擊之間的race：密碼比對前再檢查一次冷卻。
-                remaining = backfill_rate_limit.seconds_until_next_allowed(conn, BACKFILL_COOLDOWN_SECONDS)
+                remaining = admin_action_rate_limit.seconds_until_next_allowed(conn, "backfill", BACKFILL_COOLDOWN_SECONDS)
                 if remaining > 0:
                     st.error("剛剛已經有其他嘗試觸發，請稍後再試。")
                 elif password_input != access_code:
@@ -1742,7 +1745,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 else:
                     params = {k: v for k, v in pending.items() if k != "estimate_trading_days"}
                     st.session_state["pending_backfill_params"] = None
-                    attempt_id = backfill_rate_limit.record_attempt_start(conn, params)
+                    attempt_id = admin_action_rate_limit.record_attempt_start(conn, "backfill", params)
                     _run_backfill(params, attempt_id)
 
     title_col, status_col = st.columns([4, 1])
@@ -1899,21 +1902,54 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     run_screen_and_store(conn)
                 st.success("已重新計算完成，候選清單已更新。")
         with button_col2:
-            if st.button("▶ 手動抓取今日資料"):
-                # 跟桌面版「▶ 手動抓取今日資料」按鈕呼叫同一份run_daily_pipeline()，行為一致
-                # (含TWSE官方端點優先、收盤前查無資料時退回yfinance盤中即時價備援)。Streamlit
-                # 沒有背景執行緒機制，這裡是同步阻塞呼叫，按下去要等整個抓取跑完(TWSE+TPEx合計
-                # 實測約1分鐘內)才會回應，用進度條讓使用者知道還在跑、跑到哪裡，不是卡住。
-                progress_bar = st.progress(0.0, text="準備開始...")
+            # ⚠️ 2026-08-05加上密碼+冷卻保護(比照回補資料，見ai/PLAN.md第9批)：這顆
+            # 按鈕會對主DB的Turso帳號寫入、呼叫FinMind額度，dry_run=False還會觸發真實
+            # LINE/Email通知——公開網址下任何訪客都能點，风险跟回補資料同一類，只是
+            # 操作規模小很多(單日而非日期區間)，冷卻時間也短很多(見MANUAL_FETCH_
+            # COOLDOWN_SECONDS)。
+            manual_fetch_access_code = get_admin_access_code()
+            manual_fetch_remaining = (
+                admin_action_rate_limit.seconds_until_next_allowed(conn, "manual_fetch", MANUAL_FETCH_COOLDOWN_SECONDS)
+                if manual_fetch_access_code is not None else 0.0
+            )
+            if manual_fetch_access_code is None:
+                st.caption("⚠️ 尚未設定 ADMIN_ACCESS_CODE，「手動抓取今日資料」已停用。")
+            elif manual_fetch_remaining > 0:
+                minutes = int(manual_fetch_remaining) // 60
+                st.caption(f"⏳ 距離下次可手動抓取還要等 {minutes} 分鐘。")
+            else:
+                manual_fetch_password = st.text_input(
+                    "存取密碼", type="password", key="manual_fetch_password_input",
+                    label_visibility="collapsed", placeholder="輸入存取密碼",
+                )
+                if st.button("▶ 手動抓取今日資料"):
+                    if manual_fetch_password != manual_fetch_access_code:
+                        st.error("密碼錯誤。")
+                    else:
+                        # 跟桌面版「▶ 手動抓取今日資料」按鈕呼叫同一份run_daily_pipeline()，行為
+                        # 一致(含TWSE官方端點優先、收盤前查無資料時退回yfinance盤中即時價備援)。
+                        # Streamlit沒有背景執行緒機制，這裡是同步阻塞呼叫，按下去要等整個抓取跑完
+                        # (TWSE+TPEx合計實測約1分鐘內)才會回應，用進度條讓使用者知道還在跑、跑到
+                        # 哪裡，不是卡住。
+                        attempt_id = admin_action_rate_limit.record_attempt_start(conn, "manual_fetch", {})
+                        progress_bar = st.progress(0.0, text="準備開始...")
 
-                def _on_progress(stage: str, done: int, total: int) -> None:
-                    progress_bar.progress(done / total if total else 0.0, text=f"{stage} 下載進度：{done}/{total}檔")
+                        def _on_progress(stage: str, done: int, total: int) -> None:
+                            progress_bar.progress(done / total if total else 0.0, text=f"{stage} 下載進度：{done}/{total}檔")
 
-                with st.spinner("正在抓取TWSE/TPEx今日資料並重新選股..."):
-                    candidates = run_daily_pipeline(conn, dry_run=False, on_progress=_on_progress)
-                progress_bar.empty()
-                st.success(f"抓取完成，候選清單共{len(candidates)}檔。")
-                st.rerun()
+                        try:
+                            with st.spinner("正在抓取TWSE/TPEx今日資料並重新選股..."):
+                                candidates = run_daily_pipeline(conn, dry_run=False, on_progress=_on_progress)
+                            admin_action_rate_limit.record_attempt_result(
+                                conn, attempt_id, "done", {"candidate_count": len(candidates)},
+                            )
+                            progress_bar.empty()
+                            st.success(f"抓取完成，候選清單共{len(candidates)}檔。")
+                        except Exception as exc:  # noqa: BLE001
+                            admin_action_rate_limit.record_attempt_result(conn, attempt_id, "failed", {"error": str(exc)})
+                            progress_bar.empty()
+                            st.error(f"抓取失敗：{exc}")
+                        st.rerun()
 
         candidate_dates = list_candidate_dates(conn)
         selected_date = (

@@ -40,6 +40,11 @@ def _migrate_schema(conn) -> None:
     if "listing_type" not in stocks_columns:
         conn.execute("ALTER TABLE stocks ADD COLUMN listing_type TEXT")
 
+    # backfill_attempts是admin_action_attempts表2026-08-05改名前的舊表名(見schema.sql
+    # 該表的說明)，還沒有任何實際部署使用過(只在本機測試建立過、沒有真實資料)，直接砍掉，
+    # 不用比照上面的ALTER TABLE補欄位。
+    conn.execute("DROP TABLE IF EXISTS backfill_attempts")
+
 
 def init_db(db_path: str | Path, check_same_thread: bool = True) -> sqlite3.Connection:
     """依 schema.sql 建立(或沿用既有)本機檔案資料庫，回傳已開啟的連線。
