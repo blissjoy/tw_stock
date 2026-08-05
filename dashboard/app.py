@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -59,7 +59,17 @@ TAB_STOCK_DETAIL = "個股資訊"
 TAB_INDUSTRY_ROTATION = "產業輪動"
 TAB_INVENTORY = "庫存清單"
 TAB_WATCHLIST = "觀察清單"
-TAB_OPTIONS = [TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL, TAB_INDUSTRY_ROTATION, TAB_INVENTORY, TAB_WATCHLIST]
+TAB_BACKFILL = "回補資料"
+TAB_OPTIONS = [
+    TAB_MARKET, TAB_SCREENER, TAB_STOCK_DETAIL, TAB_INDUSTRY_ROTATION,
+    TAB_INVENTORY, TAB_WATCHLIST, TAB_BACKFILL,
+]
+
+# web版「回補資料」的冷卻時間(見src/data/backfill_rate_limit.py)——同一時間只能有
+# 一次嘗試在跑，完成後這段時間內不能再次觸發，理由跟30天上限一樣是保護主DB的Turso
+# 帳號額度(曾經被用完封鎖過，見.github/workflows/daily_pipeline.yml開頭註解)。
+BACKFILL_COOLDOWN_SECONDS = 6 * 60 * 60
+BACKFILL_MAX_RANGE_DAYS = 30
 
 # 黃豐凱籌碼分析法(見src/presentation/huang_chip_data.py)接在觀察清單表格既有欄位
 # 之後的額外欄位——照抄desktop/main_window.py的_HUANG_CHIP_HEADERS，J欄(大量K參考)
@@ -100,13 +110,23 @@ def main() -> None:
 
     import sqlite3
 
+    from scripts import backfill_history
+    from scripts.backfill_taiex import backfill_taiex_range
     from scripts.daily_pipeline import run_daily_pipeline
-    from src.data import portfolio_storage, storage
+    from src.data import backfill_rate_limit, portfolio_storage, storage
+    from src.data.config import get_backfill_access_code
     from src.data.connection import get_default_connection, get_default_portfolio_connection
+    from src.data.trading_calendar import holidays_between
     from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL
     from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
     from src.presentation import huang_chip_data
-    from src.screener.daily_screener import analyze_stock_signals, run_screen_and_store, summarize_signal_matches
+    from src.screener.daily_screener import (
+        analyze_stock_signals,
+        recompute_indicators_for_range,
+        run_screen_and_store,
+        run_screen_and_store_for_range,
+        summarize_signal_matches,
+    )
 
     try:
         for key, value in st.secrets.items():
@@ -1020,6 +1040,232 @@ def main() -> None:
 
         st.caption("ps: 大戶/散戶持股變化僅支持觀察清單")
 
+    def _run_backfill(params: dict, attempt_id: int) -> None:
+        """實際執行回補寫入，呼叫順序照抄桌面版desktop/main_window.py的
+        BackfillWorker.run()：大盤價→(TWSE/TPEx分流)個股價/法人/資券→(股價有補到
+        才需要)指標重算→(打勾才需要)候選清單重算。跟desktop不同的是這裡沒有背景
+        執行緒，整個function同步阻塞執行到完成，也不支援中途取消。不論成功/失敗都
+        會呼叫record_attempt_result()，讓冷卻時間確實算數(見src/data/
+        backfill_rate_limit.py的模組docstring)。
+        """
+        summary: dict = {}
+        progress_bar = st.progress(0.0, text="準備開始...")
+        try:
+            with st.spinner("正在回補資料..."):
+                start, end = params["start"], params["end"]
+                force_overwrite = params["force_overwrite"]
+                stock_id_filter = set(params["stock_id_filter"])
+
+                if params["taiex_price"]:
+                    progress_bar.progress(0.05, text="回補大盤股價中...")
+                    written = backfill_taiex_range(conn, start, end, force_overwrite=force_overwrite)
+                    summary["taiex_dates"] = len(written)
+
+                any_stock_item = params["stock_price"] or params["stock_institutional"] or params["stock_margin"]
+                affected_stock_ids: set[str] = set()
+                if any_stock_item:
+                    known = {
+                        r[0]: {"stock_id": r[0], "name": r[1], "industry": r[2], "market": r[3]}
+                        for r in conn.execute(
+                            "SELECT stock_id, name, industry, market FROM stocks WHERE market IN ('TWSE', 'TPEx')"
+                        ).fetchall()
+                    }
+                    unknown = stock_id_filter - known.keys()
+                    if unknown:
+                        st.warning(f"以下股票代號查無資料，已略過：{', '.join(sorted(unknown))}")
+                    scope_rows = [known[sid] for sid in stock_id_filter if sid in known]
+                    affected_stock_ids = {r["stock_id"] for r in scope_rows}
+                    twse_ids = {r["stock_id"] for r in scope_rows if r["market"] == "TWSE"}
+                    tpex_rows = [r for r in scope_rows if r["market"] == "TPEx"]
+
+                    if twse_ids:
+                        progress_bar.progress(0.2, text="回補TWSE個股資料中...")
+
+                        def _twse_progress(done: int, total: int) -> None:
+                            progress_bar.progress(
+                                0.2 + 0.3 * (done / total if total else 0), text=f"TWSE回補中...{done}/{total}天",
+                            )
+
+                        backfill_history.backfill_twse(
+                            conn, date.fromisoformat(start), date.fromisoformat(end),
+                            include_price=params["stock_price"], include_institutional=params["stock_institutional"],
+                            include_margin=params["stock_margin"], force_overwrite=force_overwrite,
+                            stock_id_filter=twse_ids, on_progress=_twse_progress,
+                        )
+
+                    if tpex_rows:
+                        progress_bar.progress(0.5, text="回補TPEx個股資料中...")
+
+                        def _tpex_progress(done: int, total: int) -> None:
+                            progress_bar.progress(
+                                0.5 + 0.3 * (done / total if total else 0), text=f"TPEx回補中...{done}/{total}檔",
+                            )
+
+                        backfill_history.backfill_tpex(
+                            conn, tpex_rows, date.fromisoformat(start), date.fromisoformat(end),
+                            include_price=params["stock_price"], include_institutional=params["stock_institutional"],
+                            include_margin=params["stock_margin"], force_overwrite=force_overwrite,
+                            on_progress=_tpex_progress,
+                        )
+
+                if params["stock_price"] and any_stock_item and affected_stock_ids:
+                    progress_bar.progress(0.85, text="重算均線/SAR快取中...")
+                    n = recompute_indicators_for_range(conn, list(affected_stock_ids), start, end)
+                    summary["indicators"] = n
+                    if params["recompute_candidates"]:
+                        def _candidates_progress(done: int, total: int) -> None:
+                            progress_bar.progress(
+                                0.9 + 0.1 * (done / total if total else 0), text=f"候選清單重算中...{done}/{total}天",
+                            )
+
+                        n = run_screen_and_store_for_range(
+                            conn, list(affected_stock_ids), start, end, on_progress=_candidates_progress,
+                        )
+                        summary["candidates"] = n
+
+            progress_bar.progress(1.0, text="完成")
+            backfill_rate_limit.record_attempt_result(conn, attempt_id, "done", summary)
+            parts = []
+            if "taiex_dates" in summary:
+                parts.append(f"大盤{summary['taiex_dates']}天")
+            if "indicators" in summary:
+                parts.append(f"指標{summary['indicators']}筆")
+            if "candidates" in summary:
+                parts.append(f"歷史候選清單{summary['candidates']}筆")
+            detail = "、".join(parts) if parts else "沒有新資料寫入"
+            st.success(f"回補完成：{detail}")
+        except Exception as exc:  # noqa: BLE001
+            backfill_rate_limit.record_attempt_result(conn, attempt_id, "failed", {"error": str(exc)})
+            st.error(f"回補失敗：{exc}")
+        finally:
+            progress_bar.empty()
+        st.rerun()
+
+    def render_backfill_tab() -> None:
+        """「回補資料」分頁：跟桌面版desktop/main_window.py的_build_backfill_tab()/
+        BackfillWorker共用同一組底層回補函式，但web版額外加上Turso額度保護
+        (ai/PLAN.md第9批)——桌面版一律寫本機sqlite沒有這個風險，完全不受這裡的限制。
+        規則(顯示在頁面上，不是只有後端悄悄擋)：①只能指定股票代號清單，不開放
+        「全市場」；②單次日期區間有上限；③按下「確認送出」執行寫入時需要密碼；
+        ④不論成功/失敗，完成後有冷卻時間內不能再次觸發。
+        """
+        st.info(
+            "⚠️ 這個功能會對主資料庫的Turso帳號做批次寫入，過去發生過額度用完被封鎖的"
+            "事故，因此web版加上以下限制(桌面版不受影響，可以自由使用)：\n"
+            "- 只能指定股票代號清單，不開放「全市場」範圍\n"
+            f"- 單次日期區間最多{BACKFILL_MAX_RANGE_DAYS}天\n"
+            "- 按下「確認送出，開始回補」實際執行寫入時需要輸入存取密碼\n"
+            f"- 不論這次成功或失敗，完成後{BACKFILL_COOLDOWN_SECONDS // 3600}小時內"
+            "都不能再次觸發"
+        )
+
+        access_code = get_backfill_access_code()
+        if access_code is None:
+            st.warning("尚未設定 BACKFILL_ACCESS_CODE，此功能已停用。")
+            return
+
+        remaining = backfill_rate_limit.seconds_until_next_allowed(conn, BACKFILL_COOLDOWN_SECONDS)
+        if remaining > 0:
+            hours, rem = divmod(int(remaining), 3600)
+            minutes = rem // 60
+            st.warning(f"距離下次可以回補還要等 {hours} 小時 {minutes} 分鐘。")
+            last = backfill_rate_limit.get_last_attempt(conn)
+            if last:
+                result_text = f"，結果：{last['result']}" if last.get("result") else ""
+                st.caption(f"上一次嘗試：{last['started_at']}，狀態：{last['status']}{result_text}")
+            return
+
+        st.subheader("回補設定")
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            start_date = st.date_input("開始日期", key="backfill_start_date")
+        with date_col2:
+            end_date = st.date_input("結束日期", key="backfill_end_date")
+
+        stock_codes_input = st.text_input(
+            "股票代號（逗號分隔，必填，例如 2317, 2330）", key="backfill_stock_codes",
+        )
+
+        st.markdown("回補項目：")
+        item_col1, item_col2, item_col3, item_col4 = st.columns(4)
+        with item_col1:
+            taiex_price = st.checkbox("大盤股價", value=True, key="backfill_taiex_price")
+        with item_col2:
+            stock_price = st.checkbox("個股股價明細", value=True, key="backfill_stock_price")
+        with item_col3:
+            stock_institutional = st.checkbox("個股三大法人買賣超", value=True, key="backfill_stock_institutional")
+        with item_col4:
+            stock_margin = st.checkbox("個股融資融券(資券)", value=True, key="backfill_stock_margin")
+
+        force_overwrite = st.checkbox(
+            "強制覆蓋（忽略已有資料，全部重新抓取）", value=False, key="backfill_force_overwrite",
+        )
+        recompute_candidates = st.checkbox(
+            "同時回補歷史候選清單訊號（較耗時）", value=False, key="backfill_recompute_candidates",
+        )
+
+        if st.button("🔍 預覽並驗證"):
+            errors = []
+            if start_date > end_date:
+                errors.append("開始日期不能晚於結束日期。")
+            elif (end_date - start_date).days > BACKFILL_MAX_RANGE_DAYS:
+                errors.append(f"日期區間最多{BACKFILL_MAX_RANGE_DAYS}天。")
+
+            stock_codes = {c.strip() for c in stock_codes_input.split(",") if c.strip()}
+            if not stock_codes:
+                errors.append("請輸入至少一個股票代號。")
+
+            if not (taiex_price or stock_price or stock_institutional or stock_margin):
+                errors.append("請至少勾選一項回補項目。")
+
+            if errors:
+                for msg in errors:
+                    st.error(msg)
+            else:
+                holidays = set(holidays_between(start_date.year, end_date.year))
+                trading_day_estimate = sum(
+                    1 for i in range((end_date - start_date).days + 1)
+                    if (start_date + timedelta(days=i)).weekday() < 5
+                    and (start_date + timedelta(days=i)).isoformat() not in holidays
+                )
+                st.session_state["pending_backfill_params"] = {
+                    "start": start_date.isoformat(), "end": end_date.isoformat(),
+                    "force_overwrite": force_overwrite,
+                    "stock_id_filter": sorted(stock_codes),
+                    "taiex_price": taiex_price, "stock_price": stock_price,
+                    "stock_institutional": stock_institutional, "stock_margin": stock_margin,
+                    "recompute_candidates": recompute_candidates,
+                    "estimate_trading_days": trading_day_estimate,
+                }
+
+        pending = st.session_state.get("pending_backfill_params")
+        if pending:
+            st.success(
+                f"預計影響 {len(pending['stock_id_filter'])} 檔股票、最多 "
+                f"{pending['estimate_trading_days']} 個交易日。"
+            )
+            password_input = st.text_input("存取密碼", type="password", key="backfill_password_input")
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                confirm_clicked = st.button("✅ 確認送出，開始回補", key="backfill_confirm")
+            with cancel_col:
+                if st.button("取消", key="backfill_cancel"):
+                    st.session_state["pending_backfill_params"] = None
+                    st.rerun()
+
+            if confirm_clicked:
+                # 防止兩個分頁/兩次點擊之間的race：密碼比對前再檢查一次冷卻。
+                remaining = backfill_rate_limit.seconds_until_next_allowed(conn, BACKFILL_COOLDOWN_SECONDS)
+                if remaining > 0:
+                    st.error("剛剛已經有其他嘗試觸發，請稍後再試。")
+                elif password_input != access_code:
+                    st.error("密碼錯誤。")
+                else:
+                    params = {k: v for k, v in pending.items() if k != "estimate_trading_days"}
+                    st.session_state["pending_backfill_params"] = None
+                    attempt_id = backfill_rate_limit.record_attempt_start(conn, params)
+                    _run_backfill(params, attempt_id)
+
     title_col, status_col = st.columns([4, 1])
     with title_col:
         st.title("📈 台股每日選股")
@@ -1369,6 +1615,9 @@ def main() -> None:
 
     elif active_tab == TAB_WATCHLIST:
         render_watchlist_tab()
+
+    elif active_tab == TAB_BACKFILL:
+        render_backfill_tab()
 
 
 if __name__ == "__main__":

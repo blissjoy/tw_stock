@@ -70,6 +70,14 @@ def get_turso_portfolio_credentials() -> tuple[str, str]:
     return url, token
 
 
+def get_backfill_access_code() -> str | None:
+    """回傳BACKFILL_ACCESS_CODE，未設定時回傳None(不丟例外)——web版「回補資料」是
+    可選的高風險功能(見src/data/backfill_rate_limit.py)，沒設定密碼時應該是「功能
+    停用顯示提示」而不是crash整頁，跟其他必要憑證(get_turso_credentials()等)的
+    「丟RuntimeError」慣例刻意不同。"""
+    return os.environ.get("BACKFILL_ACCESS_CODE") or None
+
+
 def get_line_channel_token() -> str:
     """回傳 LINE_CHANNEL_ACCESS_TOKEN（LINE Messaging API 頻道存取權杖，用於 broadcast 推播）。"""
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")

@@ -218,3 +218,18 @@ CREATE TABLE IF NOT EXISTS delisted_stocks (
     reason          TEXT,   -- 簡短原因，例如"兩種市場後綴皆查無資料"
     noted_at        TEXT NOT NULL  -- 我們自己記錄下這件事的時間(不是真正下市當下)
 );
+
+-- web版「回補資料」功能的Turso寫入速率限制用，見src/data/backfill_rate_limit.py
+-- (2026-08-05新增)。只有web版有這個表的實際使用(桌面版一律寫本機sqlite，沒有
+-- Turso額度風險，但schema.sql本機/Turso共用，桌面版建表但不使用不影響任何事)。
+-- 冷卻計算基準是「這次嘗試開始寫入的時間」(不是完成時間)：即使這次執行途中失敗，
+-- Turso額度也已經被消耗掉一部分，不能因為「還沒完成」就允許立刻重試，否則變成
+-- 可以無限重試炸額度的漏洞。
+CREATE TABLE IF NOT EXISTS backfill_attempts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at   TEXT NOT NULL,     -- ISO8601 UTC，冷卻計算基準
+    finished_at  TEXT,              -- 完成/失敗時才填
+    status       TEXT NOT NULL,     -- 'running'/'done'/'failed'
+    params_json  TEXT NOT NULL,     -- 這次回補的參數(方便事後追查)
+    result_json  TEXT               -- 完成後的summary
+);

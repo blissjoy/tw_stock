@@ -6570,3 +6570,58 @@ rowid`。`pytest tests/ -q`1007個測試全數通過(既有測試沒有涵蓋這
 不要又造成額度問題」的要求。本機啟動Streamlit(不設`PORTFOLIO_DB_PATH`)
 確認伺服器能正常啟動連線，桌面版`desktop/main.py`固定`PORTFOLIO_DB_
 PATH`不受影響。
+
+## web/桌面版功能對齊 第9批：回補資料網頁化，帶Turso額度保護（2026-08-05）
+
+背景：`回補資料`是原本使用者要求「最後再討論」的web/桌面版對齊項目，
+桌面版`desktop/main_window.py`的`_build_backfill_tab`/`BackfillWorker`
+本質是「選日期區間×股票範圍，逐日逐股批次寫入」，量級可以到幾千~幾十萬
+列——正是`.github/workflows/daily_pipeline.yml`開頭記錄的那次事故(主DB
+Turso帳號寫入額度用完被封鎖)的同一類操作。跟使用者討論後決定：這個功能
+要搬到web版，但必須加上嚴格的額度保護，確認的規則：①分頁可以自由點進去
+填表單，但按下「確認回補」執行寫入的那一刻才需要輸入密碼；②單次日期
+區間最多30天；③冷卻時間6小時內只能觸發一次，**不論這次成功/失敗/中途
+出錯都算用掉這次冷卻額度**(理由：只要嘗試就已經對Turso發出寫入，不能
+讓「失敗了」變成可以無限重試炸額度的漏洞，冷卻計時基準是「開始寫入的
+時間」不是「完成時間」)；④web版拿掉「全市場」範圍選項，只能指定股票
+代號清單；⑤這些規則要顯示在UI上。**桌面版完全不受影響、不加任何限制**
+(一律寫本機sqlite，沒有Turso額度風險)。
+
+實作：`src/data/schema.sql`新增`backfill_attempts`表(主DB，不是portfolio
+schema)，記錄每次嘗試的`started_at`/`finished_at`/`status`/`params_json`/
+`result_json`；新增`src/data/backfill_rate_limit.py`(`record_attempt_
+start()`回傳`lastrowid`——第8批剛修好的`.lastrowid` bug讓這裡可以直接用、
+`record_attempt_result()`、`get_last_attempt()`、`seconds_until_next_
+allowed()`)；`src/data/config.py`新增`get_backfill_access_code()`(跟其他
+憑證getter的「缺少就丟RuntimeError」慣例刻意不同，**沒設定時回傳None**，
+讓UI顯示「功能已停用」而不是crash整頁，因為這是可選的高風險功能)；
+`dashboard/app.py`新增`TAB_BACKFILL`+`render_backfill_tab()`：頁首規則
+說明、密碼未設定時顯示停用訊息、冷卻中時顯示倒數並完全不渲染表單、表單
+驗證(日期順序/30天上限/股票代號必填/至少勾一項)通過後存進
+`st.session_state["pending_backfill_params"]`顯示預估(交易日數用
+`trading_calendar.holidays_between()`估算，純本機算術不打Turso)+密碼欄，
+密碼正確才呼叫`record_attempt_start()`+同步執行(`st.spinner`+
+`st.progress`，Streamlit沒有背景執行緒，跟既有「▶手動抓取今日資料」按鈕
+同一種阻塞式作法，不支援desktop那種中途取消)+`record_attempt_result()`
+(成功/失敗都會呼叫，讓冷卻算數)。實際回補呼叫順序照抄桌面版
+`BackfillWorker.run()`：`backfill_taiex_range`→(依代號查`stocks`表分
+TWSE/TPEx)`backfill_history.backfill_twse`/`backfill_tpex`→(股價有補到才)
+`recompute_indicators_for_range`→(打勾才)`run_screen_and_store_for_range`。
+
+真實驗證：新增`tests/test_backfill_rate_limit.py`(7個測試，涵蓋無紀錄/
+冷卻中/已過冷卻/**failed狀態一樣算數冷卻**的邊界情況)。`pytest tests/ -q`
+1014個測試全數通過。UI流程改用Streamlit內建的`streamlit.testing.v1.
+AppTest`無瀏覽器headless驗證(這個session沒有載入瀏覽器自動化工具，
+`AppTest`可以直接跑script邏輯、檢查render結果，不需要瀏覽器)，對本機
+`data/tw_stock.db`/`data/portfolio.db`的複本(不是正式檔案)測試：①沒設
+`BACKFILL_ACCESS_CODE`時正確顯示停用警告、不渲染表單；②設定後表單正常
+渲染；③日期顛倒+沒填代號+沒勾項目→三個驗證錯誤同時正確顯示；④超過30天
+→正確擋下；⑤合法表單→正確進入pending狀態，顯示「預計影響1檔股票、最多
+2個交易日」+密碼欄；⑥密碼錯誤→顯示錯誤且pending state保留(不用重填
+表單)；⑦密碼正確→**選用本機DB複本裡已經有資料覆蓋的日期區間，
+`force_overwrite=False`讓`backfill_taiex_range`直接短路回傳，全程沒有
+打任何外部API**，確認執行完成、`backfill_attempts`表正確寫入1筆
+`status='done'`紀錄；⑧重新整理頁面→正確顯示「距離下次可以回補還要等5
+小時59分鐘」冷卻倒數，不渲染表單。全程只對本機DB複本操作，沒有對使用者
+正式的主DB Turso帳號執行過這個功能。桌面版`desktop/`目錄完全沒有變動
+(git status確認)，不受影響。
