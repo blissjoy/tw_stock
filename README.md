@@ -177,6 +177,33 @@ TWSE/yfinance造成明顯負擔；但如果之後有更高頻率的需求(例如
 python scripts/seed_turso_portfolio_from_local.py --local-db data/portfolio.db
 ```
 
+### 把憑證加到部署環境（Streamlit Community Cloud / GitHub Actions）
+
+`.env` 只有本機讀得到，部署到雲端後要另外在對應平台各自設定一次，兩邊是**完全獨立**的
+密鑰系統、互不相通：
+
+- **Streamlit Community Cloud**（web版實際在跑的地方，`TURSO_PORTFOLIO_DATABASE_URL`/
+  `TURSO_PORTFOLIO_AUTH_TOKEN`沒設定會直接讓app crash，因為`get_default_portfolio_
+  connection()`在沒有`PORTFOLIO_DB_PATH`時一定會嘗試連Turso）：
+  1. 到 [share.streamlit.io](https://share.streamlit.io)，找到已部署的app
+  2. 右下角「⋮」（或 App settings）→ **Settings → Secrets**
+  3. 用TOML格式貼上（一次貼全部變數，不是只貼缺的那兩個——每次儲存會整份覆蓋）：
+     ```toml
+     TURSO_DATABASE_URL = "libsql://your-database.turso.io"
+     TURSO_AUTH_TOKEN = "your-turso-auth-token"
+     TURSO_PORTFOLIO_DATABASE_URL = "libsql://your-portfolio-database.turso.io"
+     TURSO_PORTFOLIO_AUTH_TOKEN = "your-turso-portfolio-auth-token"
+     ADMIN_ACCESS_CODE = "your-admin-access-code"
+     FINMIND_API_TOKEN = "your-finmind-api-token"
+     ```
+  4. 存檔後app會自動重新啟動套用新的secrets（沒有自動重啟的話，「⋮」→ Reboot app）
+
+- **GitHub Actions**（只有`.github/workflows/daily_pipeline.yml`的排程用得到，這個排程
+  目前**還是註解停用狀態**，所以現在還不需要設定這裡——只有之後真的要恢復GitHub Actions
+  自動排程時才需要）：
+  1. GitHub repo 頁面 → **Settings → Secrets and variables → Actions**
+  2. 「New repository secret」，一個一個新增（跟上面同樣的變數名稱、同樣的值）
+
 ## （可選）之後恢復雲端部署
 
 ⚠️ 這一節目前是**暫停狀態**：2026-07-23實測發現Turso免費方案的帳號寫入額度用完，會直接在
