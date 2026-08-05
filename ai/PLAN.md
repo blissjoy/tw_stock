@@ -7053,3 +7053,33 @@ DEFAULT`、`CANDIDATE_ZHU_RULE_ONLY_DEFAULT`三個常數；SAR翻轉勾選框、
 發生(這正是這三個常數當初被建立要防範的bug類型)。
 
 驗證：`pytest tests/ -q`1020個測試全數通過。
+
+---
+
+## 產業輪動分頁版面對齊桌面版
+（2026-08-05）
+
+背景：延續web/桌面版對齊工作，處理完「選股」的SAR預設值bug後，使用者
+選擇下一個要對齊的分頁是「產業輪動」。
+
+查證`desktop/main_window.py`的`_build_industry_rotation_tab()`(第1534
+行起)：「日期：」label+combo+stretch+靠右的`industry_update_label`(灰色
+「資料更新至：...」)全部放在同一個`QHBoxLayout`(`date_bar`)，下面直接
+接表格，**沒有**任何額外的「產業輪動（日期）」標題文字(分頁本身的名稱
+已經是`QTabWidget`的tab標籤)。
+
+比對web版`dashboard/app.py`當時的寫法：日期selectbox跟「資料更新至」
+caption分成兩列各自獨占一行，表格上方還多了一個`st.subheader(f"產業
+輪動（{latest_date}）")`——這個標題純粹重複上面選單已經顯示的日期，
+桌面版沒有對應的東西，跟先前「個股資訊」分頁拿掉多餘的「## 個股明細」
+/「## 產出報表」標題是同一類問題。
+
+修正：`date_col, update_col = st.columns([3, 1])`把日期選單跟「資料
+更新至」擺回同一列(比照「個股資訊」分頁`query_col, source_col`的既有
+寫法)；拿掉表格上方多出來的`st.subheader()`。
+
+真實驗證：`pytest tests/ -q`1020個測試全數通過。本機啟動Streamlit
+(`LOCAL_DB_PATH=data/tw_stock_dev.db`)搭配Playwright實際截圖確認：
+日期選單跟「資料更新至 2026-07-22 21:32」同一列(左右對齊)、表格直接
+接在下面(沒有重複標題)、平均漲跌幅%仍維持由高到低排序，視覺結構與
+桌面版一致。
