@@ -38,6 +38,7 @@ from src.presentation.chart_data import (  # noqa: E402
     build_candlestick_figure,
     get_latest_candidate_update_time,
     get_latest_update_time,
+    get_stock_update_time,
     list_candidate_dates,
     list_industries,
     list_price_dates,
@@ -180,18 +181,24 @@ def main() -> None:
 
     portfolio_conn = get_portfolio_conn()
 
-    def render_price_chart(stock_id: str, widget_key: str, is_market_overview: bool = False) -> None:
+    def render_price_chart(stock_id: str, widget_key: str, is_market_overview: bool = False):
+        """回傳(render_chart_and_summary, render_analysis_panel)兩個callable，不自己
+        決定排版——大盤只需要這兩塊(圖表/大盤分析各一個st.tabs()分頁)，但個股資訊
+        還要跟「個股明細」「產出報表」(來自這個函式外的render_stock_overview_
+        section()/render_stock_report_section())擠進同一組st.tabs()分頁列，版面
+        怎麼組交給呼叫端決定，這個函式只負責把內容算好、包成兩個「呼叫了才畫」的
+        函式。查無資料時回傳(None, None)。
+        """
         price_df = load_price_history(conn, stock_id)
         if price_df.empty:
             st.warning(f"查無股票代號 {stock_id} 的價格資料。")
-            return
+            return None, None
 
         holidays, holidays_ok = load_holidays_for_chart(price_df)
         if not holidays_ok:
             st.caption("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
 
         trendlines = chart_overlays.compute_trendlines(price_df)
-        analysis_state_key = f"{widget_key}_show_analysis"
 
         if is_market_overview:
             # 大盤只有一檔、資料量固定，不像個股資訊那樣需要讓使用者調整顯示項目——固定
@@ -206,33 +213,42 @@ def main() -> None:
             update_label = datetime.fromisoformat(update_ts).strftime("%Y-%m-%d %H:%M") if update_ts else "尚無資料"
             st.caption(f"資料更新至　{update_label}")
         else:
-            ma_options = [f"MA{n}" for n in FULL_PERIODS]
-            selected_ma_labels = st.multiselect("顯示均線", ma_options, default=ma_options, key=f"{widget_key}_ma_select")
-            selected_periods = tuple(int(label[2:]) for label in selected_ma_labels)
-
-            trendline_options = [chart_data.TRENDLINE_LABELS[key] for key in chart_data.TRENDLINE_LABELS if key in trendlines]
-            label_to_key = {v: k for k, v in chart_data.TRENDLINE_LABELS.items()}
-            col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
-            with col1:
-                if trendline_options:
-                    selected_trendline_labels = st.multiselect(
-                        "顯示切線／軌道線", trendline_options, default=trendline_options, key=f"{widget_key}_trendline_select",
+            # 2026-08-05改版：均線/切線改成勾選框分組(st.container(border=True)包一排
+            # st.checkbox)，比照桌面版desktop/main_window.py的QGroupBox(「顯示均線」/
+            # 「顯示切線／軌道線」各自一個帶邊框的群組，逐項checkbox勾選)，取代原本的
+            # st.multiselect下拉選單——桌面版原本就是這樣操作，不是下拉多選。
+            control_col1, control_col2, control_col3, control_col4, control_col5, control_col6 = st.columns(
+                [2, 2, 1, 1, 1, 1],
+            )
+            with control_col1:
+                with st.container(border=True):
+                    st.caption("顯示均線")
+                    ma_cols = st.columns(len(FULL_PERIODS))
+                    selected_periods = tuple(
+                        n for n, ma_col in zip(FULL_PERIODS, ma_cols)
+                        if ma_col.checkbox(f"MA{n}", value=True, key=f"{widget_key}_ma_{n}")
                     )
-                else:
-                    selected_trendline_labels = []
-                    st.caption("目前資料範圍內沒有找到符合「線不蓋線」條件的切線。")
-            with col2:
+            with control_col2:
+                with st.container(border=True):
+                    st.caption("顯示切線／軌道線")
+                    trendline_keys_available = list(trendlines.keys())
+                    if trendline_keys_available:
+                        trend_cols = st.columns(len(trendline_keys_available))
+                        selected_trendline_keys = tuple(
+                            key for key, trend_col in zip(trendline_keys_available, trend_cols)
+                            if trend_col.checkbox(chart_data.TRENDLINE_LABELS[key], value=True, key=f"{widget_key}_trend_{key}")
+                        )
+                    else:
+                        selected_trendline_keys = ()
+                        st.caption("目前資料範圍內沒有找到符合「線不蓋線」條件的切線。")
+            with control_col3:
                 show_sr = st.checkbox("顯示支撐壓力", value=True, key=f"{widget_key}_sr_checkbox")
-            with col3:
+            with control_col4:
                 show_macd = st.checkbox("顯示MACD", value=True, key=f"{widget_key}_macd_checkbox")
-            with col4:
+            with control_col5:
                 show_kd = st.checkbox("顯示KD", value=True, key=f"{widget_key}_kd_checkbox")
-            with col5:
+            with control_col6:
                 show_sar = st.checkbox("顯示SAR", value=True, key=f"{widget_key}_sar_checkbox")
-            with col6:
-                if st.button("📊 個股分析", key=f"{widget_key}_analysis_btn"):
-                    st.session_state[analysis_state_key] = not st.session_state.get(analysis_state_key, False)
-            selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
 
         # 短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比畫K線圖用的顯示窗口
         # (price_df，預設120天)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明；下面
@@ -316,7 +332,7 @@ def main() -> None:
                 _render_rule_matches(chip_matches)
             st.markdown(f'<a href="#{top_anchor}">🔼 回頂部</a>', unsafe_allow_html=True)
 
-        def _render_chart_and_summary(show_raw_table: bool) -> None:
+        def _render_chart_and_summary() -> None:
             # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到
             # 6條、會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。
             sr_levels = []
@@ -341,11 +357,10 @@ def main() -> None:
             # +40px留給桌面版同款的固定資訊框/軸數值標籤疊加空間(見chart_render.py)，避免
             # iframe高度剛好卡住把最上面幾列文字裁掉。
             st.components.v1.html(html_str, height=int(fig.layout.height or 700) + 40, scrolling=False)
-            # show_raw_table：桌面版圖表下方接的是文字型「最新交易日摘要」，沒有原始OHLCV
-            # 表格——這個表格是web版多出來的東西，只有個股資訊頁保留(show_raw_table=True)，
-            # 大盤頁拿掉(比照桌面版desktop/main_window.py的_refresh_market_tab())。
-            if show_raw_table:
-                st.dataframe(price_df.tail(20), use_container_width=True)
+            # 2026-08-05拿掉這裡原本多出來的st.dataframe(price_df.tail(20))原始資料
+            # 表格——桌面版desktop/main_window.py的「圖表」分頁(大盤跟個股資訊都一樣)
+            # 圖表下方接的是文字型「最新交易日摘要」，沒有原始OHLCV表格，這個表格純粹
+            # 是web版多出來的東西，兩邊分頁都拿掉，徹底跟桌面版一致。
 
             summary = latest_day_summary.summarize_latest_day(price_df, trend_df=trend_df)
             latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
@@ -369,27 +384,11 @@ def main() -> None:
             st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))
             st.caption("⚠️ 型態訊號的「高檔/低檔」判斷已接上趨勢位置模組(is_at_high/is_at_low)，但目前只用單一容忍帶門檻，還沒有初升/主升/末升等更細的子階段分類。")
 
-        if is_market_overview:
-            # 2026-08-05改版：大盤拆成「圖表」／「大盤分析」兩個橫向分頁(st.tabs()，
-            # Streamlit原生底線分頁樣式)，取代原本圖表+分析全部往下疊的單頁版面，比照
-            # 桌面版desktop/main_window.py的self.market_inner_tabs(QTabWidget)結構。
-            chart_tab, analysis_tab = st.tabs(["圖表", "大盤分析"])
-            with chart_tab:
-                _render_chart_and_summary(show_raw_table=False)
-            with analysis_tab:
-                st.markdown("### 📊 大盤分析")
-                _render_analysis_panel()
-        else:
-            _render_chart_and_summary(show_raw_table=True)
-            if st.session_state.get(analysis_state_key, False):
-                with st.expander("📊 個股分析", expanded=True):
-                    _render_analysis_panel()
-                    # 面板展開後可能撐得很長(訊號一多)，使用者反映展開後要收合得捲回最上面
-                    # 重新點一次上面col6的按鈕很麻煩——在展開內容最下方再放一個「收合」按鈕，
-                    # 點了直接把狀態設回False並rerun，不用捲動頁面。
-                    if st.button("🔼 收合個股分析", key=f"{widget_key}_analysis_collapse_btn"):
-                        st.session_state[analysis_state_key] = False
-                        st.rerun()
+        # 2026-08-05改版：不在這裡自己決定排版(st.tabs()或堆疊)，回傳兩個callable交給
+        # 呼叫端組裝——大盤只需要跟「大盤分析」拼成2個分頁，個股資訊還要跟「個股明細」/
+        # 「產出報表」拼成同一組4個分頁的st.tabs()，這個函式不知道、也不需要知道外面
+        # 還有哪些分頁，只負責把「圖表」跟「分析」這兩塊內容準備好。
+        return _render_chart_and_summary, _render_analysis_panel
 
     def _colored_num(value, decimals: int = 0, signed: bool = False, suffix: str = "") -> str:
         """數字上紅(正)下綠(負)——跟K棒既有的紅漲綠跌配色一致，照抄desktop/main_window.py
@@ -526,10 +525,10 @@ def main() -> None:
         個股專屬邊界，見_build_market_tab()跟_build_stock_detail_tab()是分開的
         兩份inner tabs，大盤那份沒有「個股明細」)。主力進出/大戶籌碼目前資料庫
         schema還沒有對應的資料來源(見stock_detail_data.py模組docstring)，維持
-        桌面版同樣的「尚未串接資料來源」提示，不假造資料。
+        桌面版同樣的「尚未串接資料來源」提示，不假造資料。2026-08-05拿掉開頭原本
+        的「## 個股明細」標題——桌面版對應的inner tab內容本身沒有重複標題(分頁
+        標籤本身就是標題)，這個函式現在是被包在st.tabs()的「個股明細」分頁裡呼叫。
         """
-        st.markdown("## 個股明細")
-
         with st.expander("交易資訊", expanded=True):
             quote = stock_detail_data.load_quote_summary(conn, stock_id)
             if quote is None:
@@ -1099,12 +1098,13 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
 </body></html>"""
 
     def render_stock_report_section(stock_id: str) -> None:
-        """「產出報表」區塊：接在個股明細之後(對齊桌面版「圖表→個股分析→個股
-        明細→產出報表」的分頁順序，web版是同一頁面依序往下疊，不是分頁籤)。
+        """「產出報表」分頁內容，對齊桌面版「圖表→個股分析→個股明細→產出報表」的
+        分頁順序(desktop/main_window.py的self.detail_inner_tabs第4個分頁)。
         weasyprint是同步阻塞呼叫，跟這個session其餘長時間操作(手動抓取今日資料/
         回補資料)同一種st.spinner作法，PDF產出通常數秒內完成(kaleido圖表轉檔
-        是主要耗時來源)，不需要額外的進度條。"""
-        st.markdown("## 產出報表")
+        是主要耗時來源)，不需要額外的進度條。2026-08-05拿掉開頭原本的「## 產出
+        報表」標題——桌面版對應的inner tab內容本身沒有重複標題，這個函式現在是
+        被包在st.tabs()的「產出報表」分頁裡呼叫。"""
         if st.button("🖨 產生PDF報表", key=f"report_pdf_btn_{stock_id}"):
             import weasyprint
 
@@ -1838,7 +1838,13 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         # 「大盤分析」兩個分頁(跟桌面版一致，見desktop/main_window.py的_build_market_
         # tab()/_refresh_market_tab()說明)。
         st.subheader(f"📈 {TAIEX_DISPLAY_NAME}")
-        render_price_chart(TAIEX_STOCK_ID, widget_key="taiex", is_market_overview=True)
+        render_chart_fn, render_analysis_fn = render_price_chart(TAIEX_STOCK_ID, widget_key="taiex", is_market_overview=True)
+        if render_chart_fn is not None:
+            chart_tab, analysis_tab = st.tabs(["圖表", "大盤分析"])
+            with chart_tab:
+                render_chart_fn()
+            with analysis_tab:
+                render_analysis_fn()
 
     elif active_tab == TAB_SCREENER:
         # ⚠️ 2026-08-01修正：篩選條件(以下勾選框/下拉/天數輸入)原本每改一個就立刻用
@@ -2101,16 +2107,42 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             # 手動查詢：清掉來源標籤(不是從候選清單點過來的)。
             st.session_state["detail_stock_id"] = resolve_stock_id(conn, query) or query.strip()
             st.session_state["detail_stock_source"] = None
+        # detail_stock_id要先算好(不是等source_col畫完才算)，因為「資料更新至」
+        # 要跟「來源」標籤一起放在source_col，需要先知道是哪一檔股票才能查
+        # get_stock_update_time()。
+        detail_stock_id = st.session_state.get("detail_stock_id")
         with source_col:
             source_date = st.session_state.get("detail_stock_source")
             if source_date:
                 st.caption(f"來源：{_format_month_day(source_date)}的選股策略")
+            if detail_stock_id:
+                # 「資料更新至」：比照桌面版desktop/main_window.py的stock_detail_
+                # update_label，用get_stock_update_time(conn, stock_id)——這檔股票
+                # 自己的updated_at，不是get_latest_update_time()的全DB最新時間，
+                # 理由是查已下市/久未更新的股票時要如實反映「這檔資料其實很舊」，
+                # 不能被其他股票同一天的更新誤導。
+                update_ts = get_stock_update_time(conn, detail_stock_id)
+                update_label = datetime.fromisoformat(update_ts).strftime("%Y-%m-%d %H:%M") if update_ts else "尚無資料"
+                st.caption(f"資料更新至　{update_label}")
 
-        detail_stock_id = st.session_state.get("detail_stock_id")
         if detail_stock_id:
-            render_price_chart(detail_stock_id, widget_key="detail")
-            render_stock_overview_section(detail_stock_id)
-            render_stock_report_section(detail_stock_id)
+            render_chart_fn, render_analysis_fn = render_price_chart(detail_stock_id, widget_key="detail")
+            if render_chart_fn is not None:
+                # 2026-08-05改版：拆成「圖表」／「個股分析」／「個股明細」／「產出報表」
+                # 4個橫向分頁(st.tabs())，取代原本圖表+分析+明細+報表全部往下疊的單頁
+                # 版面，比照桌面版desktop/main_window.py的self.detail_inner_tabs
+                # (QTabWidget)結構。
+                chart_tab, analysis_tab, detail_tab, report_tab = st.tabs(
+                    ["圖表", "個股分析", "個股明細", "產出報表"],
+                )
+                with chart_tab:
+                    render_chart_fn()
+                with analysis_tab:
+                    render_analysis_fn()
+                with detail_tab:
+                    render_stock_overview_section(detail_stock_id)
+                with report_tab:
+                    render_stock_report_section(detail_stock_id)
         else:
             st.info("請輸入股票代號或名稱查詢，或到「選股」分頁點選候選股票。")
 

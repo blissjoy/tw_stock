@@ -6903,3 +6903,60 @@ multiselect/checkbox元件、正確顯示「資料更新至　2026-08-05 17:00�
 還在、原始資料表格還在(4個dataframe元件)、「📊 個股分析」按鈕還在。
 沒有瀏覽器截圖工具可用，視覺效果(分頁底線樣式是否符合使用者參考截圖的
 風格)留待使用者本機肉眼確認。
+
+## web/桌面版功能對齊 第12批：「個股資訊」分頁對齊桌面版版面(拆成4個
+st.tabs()子分頁)（2026-08-05）
+
+背景：延續大盤分頁的對齊工作，使用者要求繼續看「個股資訊」。這次過程中
+意外發現一個之前完全不知道的能力缺口：先前一直以為這個session沒有瀏覽器
+截圖工具，使用者(平時用TypeScript+Playwright寫爬蟲)指出這不合理，一查
+才發現這台機器本來就裝了`playwright`套件+可用的Chromium，只是沒有現成
+的「瀏覽器工具」被載入——透過Bash直接執行Playwright Python腳本就能截圖，
+不需要額外的工具。已記錄成一筆feedback memory(`feedback_playwright_via_
+bash_available.md`)，避免下次又犯一樣的錯誤，這批驗證開始改用真的截圖
+確認，不是只靠AppTest邏輯斷言。
+
+查證後確認桌面版`_build_stock_detail_tab()`(`desktop/main_window.py:
+1256-1449`)+`_build_stock_overview_tab()`(同檔1456-1528)是`self.detail_
+inner_tabs`底下的**4個**內層分頁，不是原本以為的2個：①「圖表」(均線/
+切線各自是`QGroupBox`包一排`QCheckBox`勾選框，不是下拉式multiselect；
+圖表下方接文字型「最新交易日摘要」，沒有原始OHLCV表格)；②「個股分析」
+(內容前沒有多餘標題)；③「個股明細」(5個`_CollapsibleBox`，內容前沒有
+多餘標題)；④「產出報表」(🖨匯出PDF按鈕+PDF預覽)。搜尋列右側固定顯示
+「資料更新至：...」，用`chart_data.get_stock_update_time(conn, stock_
+id)`——**這檔股票自己的**`updated_at`，不是`get_latest_update_time()`
+的全DB最新時間，理由是查已下市/久未更新的股票時要如實反映「這檔資料
+其實很舊」，不能被其他股票同一天的更新誤導。
+
+實作：`render_price_chart()`從「自己決定排版」改成「回傳`(render_chart_
+and_summary, render_analysis_panel)`兩個callable，排版交給呼叫端」——
+因為個股資訊的4個分頁裡「個股明細」「產出報表」的內容來自函式外的
+`render_stock_overview_section()`/`render_stock_report_section()`，要
+組成同一組`st.tabs()`(4個分頁在同一條分頁列)，這個函式不能再自己決定
+「圖表」「個股分析」要怎麼呈現。個股資訊的均線/切線控制項從
+`st.multiselect`改成`st.container(border=True)`包一排`st.checkbox`(逐項
+勾選，比照桌面版`QGroupBox`的視覺分組效果)；拿掉「📊 個股分析」按鈕+
+`st.session_state`開關+「🔼 收合個股分析」這整套機制(分析內容現在是
+固定存在的分頁，不需要按鈕觸發展開/收合)；徹底拿掉`st.dataframe(price_
+df.tail(20))`原始資料表格(上一批只拿掉大盤那份，這次個股資訊也拿掉，
+兩邊圖表分頁都跟桌面版一致，只剩文字型摘要)；`render_stock_overview_
+section()`/`render_stock_report_section()`拿掉開頭多餘的「## 個股明細」
+/「## 產出報表」標題(分頁標籤本身就是標題)；`TAB_STOCK_DETAIL`/`TAB_
+MARKET`兩處呼叫端改成拿到callable後自己組`st.tabs()`；補上`get_stock_
+update_time`的import。
+
+真實驗證：`pytest tests/ -q`1020個測試全數通過。`streamlit.testing.v1.
+AppTest`headless驗證：個股資訊查詢2317後正確出現「圖表」/「個股分析」/
+「個股明細」/「產出報表」4個分頁(順序正確)；均線(MA5/10/20/60/120/240)
++切線(上升切線/上升軌道線/下降切線/下降軌道線)+SR/MACD/KD/SAR全部改成
+勾選框(不是multiselect)且key正確；沒有殘留`price_df.tail(20)`那種20列
+的原始表格(頁面上僅剩的3個表格都是「個股明細」裡列數遠小於20的合法小
+表)；「📊 個股分析」/「🔼 收合個股分析」按鈕都已移除；正確顯示「資料
+更新至」；大盤分頁在`render_price_chart()`回傳值型別改變後仍正常運作。
+**額外用Playwright實際截圖**(本機`data/tw_stock.db`複本，本次驗證的
+契機)確認4個分頁畫面：圖表分頁的均線/切線勾選框正確呈現為帶邊框的分組
+盒子(視覺上對應桌面版QGroupBox)、資料更新至時間戳顯示在右上角、個股
+分析/個股明細/產出報表分頁切換後內容正確對應，沒有殘留多餘標題。截圖
+中發現一個小的視覺瑕疵(非本次改動目標)：均線/切線勾選框因為欄位較窄，
+文字被擠成直排(例如「MA5」疊成三行)，留待之後版面微調，不影響功能，
+已知會告知使用者。
