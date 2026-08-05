@@ -180,7 +180,7 @@ def main() -> None:
 
     portfolio_conn = get_portfolio_conn()
 
-    def render_price_chart(stock_id: str, widget_key: str, always_show_analysis: bool = False) -> None:
+    def render_price_chart(stock_id: str, widget_key: str, is_market_overview: bool = False) -> None:
         price_df = load_price_history(conn, stock_id)
         if price_df.empty:
             st.warning(f"查無股票代號 {stock_id} 的價格資料。")
@@ -190,39 +190,49 @@ def main() -> None:
         if not holidays_ok:
             st.caption("⚠️ 假日清單暫時無法取得，圖表可能仍有國定假日空白。")
 
-        ma_options = [f"MA{n}" for n in FULL_PERIODS]
-        selected_ma_labels = st.multiselect("顯示均線", ma_options, default=ma_options, key=f"{widget_key}_ma_select")
-        selected_periods = tuple(int(label[2:]) for label in selected_ma_labels)
-
         trendlines = chart_overlays.compute_trendlines(price_df)
-        trendline_options = [chart_data.TRENDLINE_LABELS[key] for key in chart_data.TRENDLINE_LABELS if key in trendlines]
-        label_to_key = {v: k for k, v in chart_data.TRENDLINE_LABELS.items()}
-        col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
-        with col1:
-            if trendline_options:
-                selected_trendline_labels = st.multiselect(
-                    "顯示切線／軌道線", trendline_options, default=trendline_options, key=f"{widget_key}_trendline_select",
-                )
-            else:
-                selected_trendline_labels = []
-                st.caption("目前資料範圍內沒有找到符合「線不蓋線」條件的切線。")
-        with col2:
-            show_sr = st.checkbox("顯示支撐壓力", value=True, key=f"{widget_key}_sr_checkbox")
-        with col3:
-            show_macd = st.checkbox("顯示MACD", value=True, key=f"{widget_key}_macd_checkbox")
-        with col4:
-            show_kd = st.checkbox("顯示KD", value=True, key=f"{widget_key}_kd_checkbox")
-        with col5:
-            show_sar = st.checkbox("顯示SAR", value=True, key=f"{widget_key}_sar_checkbox")
         analysis_state_key = f"{widget_key}_show_analysis"
-        with col6:
-            # always_show_analysis=True(目前只有大盤分析用)時不需要這顆按鈕——大盤只有
-            # 一檔、資料量固定，不像候選清單那樣「選了才知道要分析誰」，直接常駐顯示
-            # 下面的分析框即可，不用多一次點擊。
-            if not always_show_analysis:
+
+        if is_market_overview:
+            # 大盤只有一檔、資料量固定，不像個股資訊那樣需要讓使用者調整顯示項目——固定
+            # 顯示全部均線/切線/支撐壓力/MACD/KD/SAR，比照桌面版desktop/main_window.py的
+            # _refresh_market_tab()(show_macd=True/show_kd=True/show_sar=True都是寫死的，
+            # 不是使用者可以關掉的checkbox)。改成顯示「資料更新至」時間戳，照抄「產業輪動」
+            # 分頁既有的寫法。
+            selected_periods = FULL_PERIODS
+            selected_trendline_keys = tuple(trendlines.keys())
+            show_sr = show_macd = show_kd = show_sar = True
+            update_ts = get_latest_update_time(conn)
+            update_label = datetime.fromisoformat(update_ts).strftime("%Y-%m-%d %H:%M") if update_ts else "尚無資料"
+            st.caption(f"資料更新至　{update_label}")
+        else:
+            ma_options = [f"MA{n}" for n in FULL_PERIODS]
+            selected_ma_labels = st.multiselect("顯示均線", ma_options, default=ma_options, key=f"{widget_key}_ma_select")
+            selected_periods = tuple(int(label[2:]) for label in selected_ma_labels)
+
+            trendline_options = [chart_data.TRENDLINE_LABELS[key] for key in chart_data.TRENDLINE_LABELS if key in trendlines]
+            label_to_key = {v: k for k, v in chart_data.TRENDLINE_LABELS.items()}
+            col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
+            with col1:
+                if trendline_options:
+                    selected_trendline_labels = st.multiselect(
+                        "顯示切線／軌道線", trendline_options, default=trendline_options, key=f"{widget_key}_trendline_select",
+                    )
+                else:
+                    selected_trendline_labels = []
+                    st.caption("目前資料範圍內沒有找到符合「線不蓋線」條件的切線。")
+            with col2:
+                show_sr = st.checkbox("顯示支撐壓力", value=True, key=f"{widget_key}_sr_checkbox")
+            with col3:
+                show_macd = st.checkbox("顯示MACD", value=True, key=f"{widget_key}_macd_checkbox")
+            with col4:
+                show_kd = st.checkbox("顯示KD", value=True, key=f"{widget_key}_kd_checkbox")
+            with col5:
+                show_sar = st.checkbox("顯示SAR", value=True, key=f"{widget_key}_sar_checkbox")
+            with col6:
                 if st.button("📊 個股分析", key=f"{widget_key}_analysis_btn"):
                     st.session_state[analysis_state_key] = not st.session_state.get(analysis_state_key, False)
-        selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
+            selected_trendline_keys = tuple(label_to_key[label] for label in selected_trendline_labels)
 
         # 短/中/長(日/週/月)趨勢分類器要重新取樣出週線/月線，需要比畫K線圖用的顯示窗口
         # (price_df，預設120天)更長的歷史，見chart_data.TREND_LOOKBACK_DAYS的說明；下面
@@ -306,68 +316,80 @@ def main() -> None:
                 _render_rule_matches(chip_matches)
             st.markdown(f'<a href="#{top_anchor}">🔼 回頂部</a>', unsafe_allow_html=True)
 
-        if always_show_analysis:
-            # 大盤分析：直接顯示在K線圖下方，不用外層st.expander的邊框「盒子」外觀，
-            # 也不限制高度，全部展開——大盤只有一檔、位置夠大，不需要像候選清單那樣
-            # 收合節省空間(內層技術面/籌碼面兩個小區塊還是各自可收合)。
-            st.markdown("### 📊 大盤分析")
-            _render_analysis_panel()
-        elif st.session_state.get(analysis_state_key, False):
-            with st.expander("📊 個股分析", expanded=True):
+        def _render_chart_and_summary(show_raw_table: bool) -> None:
+            # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到
+            # 6條、會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。
+            sr_levels = []
+            if show_sr:
+                all_levels = chart_overlays.compute_support_resistance_levels(price_df)
+                sr_levels = chart_overlays.nearest_support_resistance(all_levels, float(price_df["close"].iloc[-1]))
+
+            stock_name = chart_data.get_stock_name(conn, stock_id)
+            chart_title = f"{stock_id} {stock_name}" if stock_name else stock_id
+            # 十字準星：2026-08-04起改用render_chart_html()+st.components.v1.html()(iframe
+            # 執行原始HTML+JS)取代st.plotly_chart()，才能疊加貫穿價格/成交量/MACD/KD子圖的
+            # 十字線＋左上角動態資訊框，跟桌面版效果一致，見src/presentation/chart_render.py。
+            # 不傳title給build_candlestick_figure(改用render_chart_html的stock_label固定列
+            # 顯示代號+名稱，見該模組docstring)。
+            fig = build_candlestick_figure(
+                price_df, holidays=holidays, ma_periods=selected_periods,
+                trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
+                sr_levels=sr_levels, show_support_resistance=show_sr,
+                show_macd=show_macd, show_kd=show_kd, show_sar=show_sar,
+            )
+            html_str = render_chart_html(fig, price_df, stock_label=chart_title, div_id=f"tw-stock-chart-{widget_key}")
+            # +40px留給桌面版同款的固定資訊框/軸數值標籤疊加空間(見chart_render.py)，避免
+            # iframe高度剛好卡住把最上面幾列文字裁掉。
+            st.components.v1.html(html_str, height=int(fig.layout.height or 700) + 40, scrolling=False)
+            # show_raw_table：桌面版圖表下方接的是文字型「最新交易日摘要」，沒有原始OHLCV
+            # 表格——這個表格是web版多出來的東西，只有個股資訊頁保留(show_raw_table=True)，
+            # 大盤頁拿掉(比照桌面版desktop/main_window.py的_refresh_market_tab())。
+            if show_raw_table:
+                st.dataframe(price_df.tail(20), use_container_width=True)
+
+            summary = latest_day_summary.summarize_latest_day(price_df, trend_df=trend_df)
+            latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
+            st.markdown(f"**📋 最新交易日分析（{latest_date_label}）**")
+            # 短/中/長三種天期分開顯示、各自標示判斷依據的K棒週期(見R-INDICATOR-10：做短線看
+            # 日線、中期看週線、長期看月線)，不合併成單一「目前趨勢」——三者可能不一致(例如
+            # 日線走空、週線仍是多頭)，只看一種天期容易誤判。每個天期都附上「依據」(最近兩個
+            # 頭部/底部的實際價格、日期、頭頭高低/底底高低的判讀)，讓使用者能自己核對演算法的
+            # 判斷，不是只丟一個「多頭/空頭/盤整」結論字串——改成每行一種天期，不是併成一行，
+            # 附上依據後單行會過長不好讀。freshness額外用st.caption另起一行顯示(2026-07-26新增
+            # ——轉折點是事後才確認的，trend/reason用的可能是噴出/破底之前的舊轉折點，這一行
+            # 明確標註「最近一次確認轉折點的日期」跟「目前是否有還沒被確認的新波段正在進行中」，
+            # 讓使用者自己判斷trend/reason的結論夠不夠新鮮，見trend_state.py第四次修正說明)。
+            st.write("目前趨勢：")
+            for label, (timeframe, trend, reason, *freshness_rest) in summary["trend"].items():
+                st.write(f"　- {label}（{timeframe}）：{trend}（依據：{reason}）")
+                if freshness_rest:
+                    st.caption(f"　　{freshness_rest[0]}")
+            st.write(f"K棒名稱：{summary['candle_name']}")
+            st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
+            st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))
+            st.caption("⚠️ 型態訊號的「高檔/低檔」判斷已接上趨勢位置模組(is_at_high/is_at_low)，但目前只用單一容忍帶門檻，還沒有初升/主升/末升等更細的子階段分類。")
+
+        if is_market_overview:
+            # 2026-08-05改版：大盤拆成「圖表」／「大盤分析」兩個橫向分頁(st.tabs()，
+            # Streamlit原生底線分頁樣式)，取代原本圖表+分析全部往下疊的單頁版面，比照
+            # 桌面版desktop/main_window.py的self.market_inner_tabs(QTabWidget)結構。
+            chart_tab, analysis_tab = st.tabs(["圖表", "大盤分析"])
+            with chart_tab:
+                _render_chart_and_summary(show_raw_table=False)
+            with analysis_tab:
+                st.markdown("### 📊 大盤分析")
                 _render_analysis_panel()
-                # 面板展開後可能撐得很長(訊號一多)，使用者反映展開後要收合得捲回最上面
-                # 重新點一次上面col6的按鈕很麻煩——在展開內容最下方再放一個「收合」按鈕，
-                # 點了直接把狀態設回False並rerun，不用捲動頁面。
-                if st.button("🔼 收合個股分析", key=f"{widget_key}_analysis_collapse_btn"):
-                    st.session_state[analysis_state_key] = False
-                    st.rerun()
-        # 預設只顯示離現價最近的支撐/壓力各一條，不是把所有轉折點都疊上去(最多可能到6條、
-        # 會把圖擠得很亂)——書中真正有參考意義的本來就是離現價最近的那一層。
-        sr_levels = []
-        if show_sr:
-            all_levels = chart_overlays.compute_support_resistance_levels(price_df)
-            sr_levels = chart_overlays.nearest_support_resistance(all_levels, float(price_df["close"].iloc[-1]))
-
-        stock_name = chart_data.get_stock_name(conn, stock_id)
-        chart_title = f"{stock_id} {stock_name}" if stock_name else stock_id
-        # 十字準星：2026-08-04起改用render_chart_html()+st.components.v1.html()(iframe
-        # 執行原始HTML+JS)取代st.plotly_chart()，才能疊加貫穿價格/成交量/MACD/KD子圖的
-        # 十字線＋左上角動態資訊框，跟桌面版效果一致，見src/presentation/chart_render.py。
-        # 不傳title給build_candlestick_figure(改用render_chart_html的stock_label固定列
-        # 顯示代號+名稱，見該模組docstring)。
-        fig = build_candlestick_figure(
-            price_df, holidays=holidays, ma_periods=selected_periods,
-            trendlines=trendlines, show_trendline_keys=selected_trendline_keys,
-            sr_levels=sr_levels, show_support_resistance=show_sr,
-            show_macd=show_macd, show_kd=show_kd, show_sar=show_sar,
-        )
-        html_str = render_chart_html(fig, price_df, stock_label=chart_title, div_id=f"tw-stock-chart-{widget_key}")
-        # +40px留給桌面版同款的固定資訊框/軸數值標籤疊加空間(見chart_render.py)，避免
-        # iframe高度剛好卡住把最上面幾列文字裁掉。
-        st.components.v1.html(html_str, height=int(fig.layout.height or 700) + 40, scrolling=False)
-        st.dataframe(price_df.tail(20), use_container_width=True)
-
-        summary = latest_day_summary.summarize_latest_day(price_df, trend_df=trend_df)
-        latest_date_label = price_df.index[-1].strftime("%Y-%m-%d")
-        st.markdown(f"**📋 最新交易日分析（{latest_date_label}）**")
-        # 短/中/長三種天期分開顯示、各自標示判斷依據的K棒週期(見R-INDICATOR-10：做短線看
-        # 日線、中期看週線、長期看月線)，不合併成單一「目前趨勢」——三者可能不一致(例如
-        # 日線走空、週線仍是多頭)，只看一種天期容易誤判。每個天期都附上「依據」(最近兩個
-        # 頭部/底部的實際價格、日期、頭頭高低/底底高低的判讀)，讓使用者能自己核對演算法的
-        # 判斷，不是只丟一個「多頭/空頭/盤整」結論字串——改成每行一種天期，不是併成一行，
-        # 附上依據後單行會過長不好讀。freshness額外用st.caption另起一行顯示(2026-07-26新增
-        # ——轉折點是事後才確認的，trend/reason用的可能是噴出/破底之前的舊轉折點，這一行
-        # 明確標註「最近一次確認轉折點的日期」跟「目前是否有還沒被確認的新波段正在進行中」，
-        # 讓使用者自己判斷trend/reason的結論夠不夠新鮮，見trend_state.py第四次修正說明)。
-        st.write("目前趨勢：")
-        for label, (timeframe, trend, reason, *freshness_rest) in summary["trend"].items():
-            st.write(f"　- {label}（{timeframe}）：{trend}（依據：{reason}）")
-            if freshness_rest:
-                st.caption(f"　　{freshness_rest[0]}")
-        st.write(f"K棒名稱：{summary['candle_name']}")
-        st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
-        st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))
-        st.caption("⚠️ 型態訊號的「高檔/低檔」判斷已接上趨勢位置模組(is_at_high/is_at_low)，但目前只用單一容忍帶門檻，還沒有初升/主升/末升等更細的子階段分類。")
+        else:
+            _render_chart_and_summary(show_raw_table=True)
+            if st.session_state.get(analysis_state_key, False):
+                with st.expander("📊 個股分析", expanded=True):
+                    _render_analysis_panel()
+                    # 面板展開後可能撐得很長(訊號一多)，使用者反映展開後要收合得捲回最上面
+                    # 重新點一次上面col6的按鈕很麻煩——在展開內容最下方再放一個「收合」按鈕，
+                    # 點了直接把狀態設回False並rerun，不用捲動頁面。
+                    if st.button("🔼 收合個股分析", key=f"{widget_key}_analysis_collapse_btn"):
+                        st.session_state[analysis_state_key] = False
+                        st.rerun()
 
     def _colored_num(value, decimals: int = 0, signed: bool = False, suffix: str = "") -> str:
         """數字上紅(正)下綠(負)——跟K棒既有的紅漲綠跌配色一致，照抄desktop/main_window.py
@@ -1812,11 +1834,11 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
     st.divider()
 
     if active_tab == TAB_MARKET:
-        # 大盤只有一檔、資料量固定，不像候選清單那樣「選了才知道要分析誰」，切到這個分頁
-        # 就直接顯示K線圖(含MACD/KD/SAR)+規則比對清單，不需要按鈕才展開(跟桌面版一致，
-        # 見desktop/main_window.py的_refresh_market_tab()說明)。
+        # 大盤只有一檔、資料量固定，不像個股資訊那樣需要互動控制項，版面拆成「圖表」／
+        # 「大盤分析」兩個分頁(跟桌面版一致，見desktop/main_window.py的_build_market_
+        # tab()/_refresh_market_tab()說明)。
         st.subheader(f"📈 {TAIEX_DISPLAY_NAME}")
-        render_price_chart(TAIEX_STOCK_ID, widget_key="taiex", always_show_analysis=True)
+        render_price_chart(TAIEX_STOCK_ID, widget_key="taiex", is_market_overview=True)
 
     elif active_tab == TAB_SCREENER:
         # ⚠️ 2026-08-01修正：篩選條件(以下勾選框/下拉/天數輸入)原本每改一個就立刻用

@@ -6860,3 +6860,46 @@ MA60/MA120/MA240全部是None)，附上截圖。查證後發現：Turso上`^TWII
 用完即刪，沒有留在repo裡(跟`seed_turso_from_local.py`不同，那支是可
 重複使用的通用種子腳本，這支是針對這次特定事件、帶明確日期參數的分批
 補救工具，用途已經結束)。
+
+## web/桌面版功能對齊 第11批：「大盤」分頁對齊桌面版版面(拆成圖表/大盤分析
+兩個st.tabs()分頁)（2026-08-05）
+
+背景：使用者實際比對web版跟桌面版「大盤」分頁，要求盡量做到「長得一模
+一樣」。查證後確認4項落差：①大盤頁不該有均線/切線/支撐壓力/MACD/KD/
+SAR的互動控制項——桌面版`_refresh_market_tab()`固定全部顯示，這些控制項
+是`render_price_chart()`跟「個股資訊」共用時才需要的，不該套用到大盤；
+②多了桌面版沒有的`st.dataframe(price_df.tail(20))`原始資料表格，桌面版
+圖表下方接的是文字型「最新交易日摘要」；③版面結構是「單頁往下疊」，
+桌面版是「圖表」／「大盤分析」兩個子分頁(`QTabWidget`)分開，使用者反映
+單頁往下疊「資料太雜」；④缺少「資料更新至」時間戳(桌面版右上角固定
+顯示)。使用者額外提供一張網頁儀表板截圖(temp/1785930965019.jpg)參考
+橫向底線分頁的視覺風格，確認這正是Streamlit原生`st.tabs()`元件的預設
+外觀，不需要額外刻UI/寫CSS。
+
+**範圍界定**：`render_price_chart()`是大盤/個股資訊共用的函式，這次
+**只處理大盤**，個股資訊頁的控制項擺法/單頁堆疊版面維持現狀不動(它跟
+桌面版也不完全一樣，留到下一輪)。
+
+實作：把原本語意單一的`always_show_analysis: bool`參數改名成`is_market_
+overview: bool`(唯一呼叫端本來就只有大盤在傳`True`)，函式內部分流成
+兩條完全獨立的路徑：大盤時跳過整個controls_row、改用固定值(`ma_periods=
+FULL_PERIODS`、全部trendline keys、`show_sr=show_macd=show_kd=show_sar=
+True`)，並顯示「資料更新至」(照抄「產業輪動」分頁既有的`get_latest_
+update_time(conn)`寫法)；個股資訊路徑的multiselect/checkbox控制項邏輯
+完全不動。把「圖表本體+最新交易日分析」抽成`_render_chart_and_summary
+(show_raw_table: bool)`內部函式(`show_raw_table`控制要不要顯示那個
+`st.dataframe`原始表格，大盤傳`False`、個股資訊傳`True`保持現狀)，最後
+依`is_market_overview`分流輸出：大盤用`st.tabs(["圖表", "大盤分析"])`
+包住「`_render_chart_and_summary()`」跟「`_render_analysis_panel()`」；
+個股資訊維持原本的單頁堆疊+`st.expander`收合邏輯，完全不變。
+
+真實驗證：`pytest tests/ -q`1020個測試全數通過(這個函式本身沒有直接的
+單元測試，行為透過AppTest驗證)。`streamlit.testing.v1.AppTest`headless
+驗證(本機DB複本)：①大盤分頁確認沒有任何均線/切線/SR/MACD/KD/SAR的
+multiselect/checkbox元件、正確顯示「資料更新至　2026-08-05 17:00」、
+`st.tabs()`正確產生「圖表」/「大盤分析」兩個分頁、「圖表」分頁內沒有
+`st.dataframe`原始表格但有「最新交易日分析」文字、「大盤分析」分頁內容
+正確；②個股資訊分頁確認完全沒有受影響：均線/切線/SR/MACD/KD/SAR控制項
+還在、原始資料表格還在(4個dataframe元件)、「📊 個股分析」按鈕還在。
+沒有瀏覽器截圖工具可用，視覺效果(分頁底線樣式是否符合使用者參考截圖的
+風格)留待使用者本機肉眼確認。
