@@ -7017,3 +7017,39 @@ headless驗證：全域「📈 台股每日選股」標題確認完全移除(逐
 直接從分頁列開始(沒有大標題)、候選清單日期在最上方、篩選區塊順序跟
 桌面版一致、按鈕列同一排有🔄立即重新篩選/手動抓取狀態提示/搜尋候選清單
 框/股價更新至三行狀態文字，整體結構明顯更接近使用者提供的桌面版截圖。
+
+---
+
+## 選股分頁SAR翻轉預設勾選狀態——真的是bug，已修正
+（2026-08-05）
+
+背景：上一批處理選股版面對齊時，我曾回覆使用者「SAR/朱家泓的真正預設值
+web/桌面版程式碼完全一致，不是bug」。使用者要求「先修正 選股 預設是 sar
+打勾，朱老師 不勾，先查是不是bug」，要求重新查證而不是直接採信我先前的
+結論。
+
+重新查證`dashboard/app.py`目前的實際程式碼(第1869行)，發現我先前的回覆
+是錯的：`sar_flip_enabled = sar_col1.checkbox("SAR 翻轉", value=False,
+key="filter_sar_flip_enabled")`直接硬編碼`value=False`，完全沒有參照
+`chart_data.CANDIDATE_SAR_FLIP_ENABLED_DEFAULT`(`src/presentation/
+chart_data.py:203`，值為`True`)。對照`ai/PLAN.md`歷史紀錄(這個常數
+2026-08-01前後為了避免UI跟LINE/Email通知各自維護一份預設值、修改時忘記
+同步而新增，詳見約4619-4623行)，以及桌面版`desktop/main_window.py`
+初始化screener分頁時`self.sar_flip_checkbox.setChecked(self._app_
+settings().value("screener/sar_flip_enabled", chart_data.CANDIDATE_
+SAR_FLIP_ENABLED_DEFAULT, type=bool))`(沒有QSettings記錄過的全新使用者
+/瀏覽器會fallback到`True`)，可以確認web版SAR翻轉的預設值確實跟「真正
+設計預設值」不一致，是真的bug，不是我先前誤判的QSettings個人化差異。
+「朱家泓技術分析」勾選框(`value=True`)則本來就跟`CANDIDATE_ZHU_RULE_
+ONLY_DEFAULT`(`True`)一致，不需要修正。
+
+修正：`dashboard/app.py`從`src.presentation.chart_data`額外具名import
+`CANDIDATE_SAR_FLIP_ENABLED_DEFAULT`、`CANDIDATE_SAR_FLIP_OPTION_
+DEFAULT`、`CANDIDATE_ZHU_RULE_ONLY_DEFAULT`三個常數；SAR翻轉勾選框、
+方向下拉(原本硬編碼`index=0`對應「多頭」)、天數輸入(原本硬編碼`value=1`)
+三個欄位全部改成從`CANDIDATE_SAR_FLIP_OPTION_DEFAULT`讀取；朱家泓勾選框
+也從硬編碼`value=True`改成讀`CANDIDATE_ZHU_RULE_ONLY_DEFAULT`，避免同一
+類「常數存在但沒被實際引用、之後改常數卻忘了同步某個呼叫點」的問題再次
+發生(這正是這三個常數當初被建立要防範的bug類型)。
+
+驗證：`pytest tests/ -q`1020個測試全數通過。

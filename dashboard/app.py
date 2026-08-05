@@ -34,6 +34,9 @@ from src.presentation import chart_data, portfolio_data, stock_detail_data  # no
 from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_FILTER_DEFAULTS,
     CANDIDATE_FILTERS,
+    CANDIDATE_SAR_FLIP_ENABLED_DEFAULT,
+    CANDIDATE_SAR_FLIP_OPTION_DEFAULT,
+    CANDIDATE_ZHU_RULE_ONLY_DEFAULT,
     apply_candidate_filters,
     build_candlestick_figure,
     get_latest_candidate_update_time,
@@ -1866,10 +1869,18 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         # 放進上面CANDIDATE_FILTERS那組迴圈，改用獨立的sar_flip_option參數傳給
         # apply_candidate_filters(見src/presentation/chart_data.py)。
         sar_col1, sar_col2, sar_col3, zhu_col, apply_col = st.columns([1, 1, 1.3, 1.3, 1])
-        sar_flip_enabled = sar_col1.checkbox("SAR 翻轉", value=False, key="filter_sar_flip_enabled")
-        sar_flip_direction = sar_col2.selectbox("方向", ["多頭", "空頭"], index=0, key="filter_sar_flip_direction")
+        sar_flip_enabled = sar_col1.checkbox(
+            "SAR 翻轉", value=CANDIDATE_SAR_FLIP_ENABLED_DEFAULT, key="filter_sar_flip_enabled"
+        )
+        sar_flip_direction = sar_col2.selectbox(
+            "方向", ["多頭", "空頭"],
+            index=["多頭", "空頭"].index(CANDIDATE_SAR_FLIP_OPTION_DEFAULT["direction"]),
+            key="filter_sar_flip_direction",
+        )
         sar_flip_within_days = sar_col3.number_input(
-            "天數內翻轉", min_value=1, max_value=60, value=1, step=1, key="filter_sar_flip_within_days"
+            "天數內翻轉", min_value=1, max_value=60,
+            value=CANDIDATE_SAR_FLIP_OPTION_DEFAULT["within_days"], step=1,
+            key="filter_sar_flip_within_days",
         )
         sar_flip_option = (
             {"direction": sar_flip_direction, "within_days": int(sar_flip_within_days)}
@@ -1883,7 +1894,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。預設勾選，維持
         # 「候選清單=已觸發朱家泓規則的股票」這個原本的預設體驗。
         zhu_rule_only = zhu_col.checkbox(
-            "朱家泓技術分析", value=True, key="filter_zhu_rule_only",
+            "朱家泓技術分析", value=CANDIDATE_ZHU_RULE_ONLY_DEFAULT, key="filter_zhu_rule_only",
             help="勾選時只保留當天有觸發朱家泓規則的股票；取消勾選則不限制，均線/SAR等條件會對全市場掃描",
         )
 
