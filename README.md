@@ -153,6 +153,34 @@ TWSE/yfinance造成明顯負擔；但如果之後有更高頻率的需求(例如
 - **通知**：LINE Messaging API（broadcast，推播給自己）+ Gmail SMTP，跟DB是本機還是雲端無關，
   `run_daily_pipeline()`執行完就會直接發送。
 
+### 第9個排程：本機→Turso同步（`scripts/sync_local_to_turso.py`）
+
+web版部署到雲端後，如果同時也讓web版自己按「▶ 手動抓取今日資料」，同一天的法人/資券
+資料會被FinMind抓兩次(本機排程一次、web版一次)——FinMind是**每小時**限額(300~600次/
+小時，過去實測撞過402被限流)，不是Turso那種寬裕到「正常用量不到1%」的月額度，重複抓取
+是真的會撞到額度的風險。改成本機排程抓完資料後，直接把本機sqlite的資料**推**到Turso
+(完全不呼叫FinMind/TWSE)，web版不用自己再抓一次：
+
+```powershell
+schtasks /create /tn "tw_stock_sync_to_turso_2115" /tr "C:\path\to\python.exe D:\tw_stock\scripts\sync_local_to_turso.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 21:15
+```
+
+排在21:00那個排程之後15分鐘觸發，確保當天最後一次的本機資料都已經寫完。
+
+⚠️ **這個排程刻意只設一個時段，不要比照上面8個排程各自複製一份**：Turso免費方案每月
+1000萬列寫入額度，這支腳本一次同步約15.8萬列(最近10個交易日的股價/法人/資券/指標/
+候選清單)，**一天一次**約475萬列/月(占額度47.5%，留了一半以上餘裕給web版自己的手動
+抓取/回補資料功能)；如果比照本機8個排程各自觸發一次，一個月會逼近甚至超過額度上限。
+建立排程前，先手動跑一次`--dry-run`確認預計同步的列數合理，且不會意外連線到Turso：
+
+```bash
+python scripts/sync_local_to_turso.py --local-db data/tw_stock.db --dry-run
+```
+
+每次執行(含dry-run)都會在`data/sync_to_turso_log.jsonl`(append-only)記一筆執行紀錄
+(各表列數/成功或失敗)，排程是無人值守執行，之後要確認「昨晚同步到底有沒有跑」不用去翻
+工作排程器的記錄畫面。
+
 ## 需要的憑證（`.env`，可參考 `.env.example`）
 
 本機優先模式下，只有 `FINMIND_API_TOKEN`（取得TPEx股票清單/名稱/產業別）跟LINE/Email那組

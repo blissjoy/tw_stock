@@ -33,4 +33,8 @@ data/pipeline_run_history.jsonl
 # 讀寫、內容會隨token刷新不斷改變，不是人手動維護的設定(那些放在.env)，純本機憑證，不進版控
 data/google_oauth_token.json
 
+# scripts/sync_local_to_turso.py每次執行(含--dry-run)的追加式紀錄，跟data/pipeline_run_
+# history.jsonl同一個理由：純本機事後診斷用途，會持續增長，不需要進版控
+data/sync_to_turso_log.jsonl
+
 temp/

@@ -6760,3 +6760,61 @@ Turso)；④手動塞一筆`manual_fetch`紀錄模擬冷卻中，確認正確顯
 說明註解的設定檔，修法是把`packages.txt`裡的4個套件名稱(`libpango-1.0-0`/
 `libpangoft2-1.0-0`/`libharfbuzz-subset0`/`fonts-noto-cjk`)說明搬到這裡
 (ai/PLAN.md第10批已經寫過理由)，檔案本身只留純套件名稱清單。
+
+## 新增本機→Turso主DB定期同步腳本，避免FinMind額度重複消耗（2026-08-05）
+
+背景：web版部署成功、實際瀏覽正常後，討論雲端主DB要怎麼保持資料新鮮。原本
+想法是讓web版自己按「▶ 手動抓取今日資料」，但使用者指出一個之前沒考慮到的
+問題：這樣同一天的法人/資券資料會被FinMind抓兩次(本機Windows排程一次、
+web版手動觸發一次)——FinMind是**每小時**限額(300~600次/小時)，不是Turso
+那種寬裕到「正常用量不到1%」的月額度，過去也真的實測撞過402被限流(TPEx
+全市場約2400次請求會撐滿整個小時額度)，重複抓取是真實風險不是空想。改成
+本機排程抓完資料後直接把本機sqlite的資料**推**到Turso，完全不重新呼叫
+FinMind/TWSE，web版不用自己再抓一次。使用者要求「絕對確保不會有Turso額度
+問題」，這批的每個設計決定都用真實資料量算過。
+
+**額度安全性(用實際列數算過，不是猜測)**：查本機`data/tw_stock.db`「最近
+10個交易日」(範圍理由跟`daily_pipeline.py`的`INDICATOR_REFRESH_WINDOW_
+DAYS=10`一致，TWSE資料/均線指標可能事後被回補修正)實際列數：stock_prices
+23,032／institutional_investors 86,944／margin_trading 9,573／daily_
+indicators 22,957／daily_candidates 13,256／stocks(全表)2,496／delisted_
+stocks(全表)83，合計約15.8萬列/次。Turso免費方案每月1000萬列寫入，**這支
+腳本設計上一天只跑一次**(不是跟著本機8個排程各自跑一次)：15.8萬×30≈475萬
+列/月，只占額度47.5%，留超過一半餘裕給web版自己的手動抓取/回補資料(這兩個
+已經有密碼+冷卻保護，見前幾批)。若不小心跑到2次/天會逼近950萬/月，所以
+「一天恰好一次」是額度算式成立的前提，不是隨意選的，README/腳本docstring
+都明確寫出這個限制。
+
+實作：新增`scripts/sync_local_to_turso.py`，結構照抄既有`scripts/seed_
+turso_from_local.py`(一次性種子腳本)的`_recent_trading_dates()`/`_select_
+rows()`模式，但改成**可重複執行**且涵蓋更多表(舊種子腳本只copy了stocks/
+stock_prices/institutional_investors/margin_trading，這次補上daily_
+indicators/daily_candidates/daily_data_status/delisted_stocks，這幾張表
+之前從來沒被同步過)。全部依賴既有`storage.upsert_*()`函式(全部是INSERT
+... ON CONFLICT DO UPDATE，重複執行同一批資料是安全的)，沿用`TursoConnection.
+executemany()`既有的500列一批`.batch()`分批邏輯，不用重新設計批次/分頁。
+`SYNC_WINDOW_DAYS=10`常數刻意不`import`自`daily_pipeline.py`(那支腳本頂層
+import了yfinance/gspread/notify等一整組重量級依賴，只為了拿一個整數值不
+划算)，改用註解手動保持跟`INDICATOR_REFRESH_WINDOW_DAYS`同步。每張表寫入
+各自包一層try/except(照抄`daily_pipeline.py`通知段落的既有模式)，一張表
+失敗不會讓其他表跟著中斷。新增`--dry-run`旗標，只印出預計同步列數、完全
+不連線Turso，排進排程前/日常想確認差異量時都能安全使用。每次執行(含
+dry-run)在`data/sync_to_turso_log.jsonl`(照抄`pipeline_run_history.jsonl`
+的append-only慣例)記一筆執行紀錄，排程無人值守，之後能確認「昨晚有沒有
+跑、寫了多少」不用翻工作排程器記錄畫面。README「本機每日排程」章節補上
+第9個`schtasks`範例(21:15，本機最後一個21:00排程之後)，明確寫清楚「刻意
+只設一個時段，不要複製貼上到其他時段」。
+
+真實驗證：新增`tests/test_sync_local_to_turso.py`(5個測試，涵蓋窗口範圍
+正確性、全表copy不受窗口限制、重複執行同一批資料的冪等性、單一表失敗不
+影響其他表)。`pytest tests/ -q`1020個測試全數通過。`--dry-run`本機測試：
+故意設定假的`TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`確認dry-run仍能正常
+跑完(證明真的沒有連線)，印出的預計列數(158,350)跟手動查詢本機DB算出的
+估算值(158,346)量級吻合(差異來自查詢時間點不同，資料持續在更新)。**對
+正式Turso主DB執行了一次真的同步**(只跑一次，不是重複測試)：執行前後
+分別查詢8張表的列數，逐表核對差異都跟同步腳本回報的「這次寫入幾列」精確
+吻合(例如stock_prices從661,771變684,803，差23,032，跟同步腳本回報的
+`stock_prices: 23032`完全一致)，`daily_indicators`/`delisted_stocks`/
+`daily_data_status`這三張表確認從0筆變成有資料(之前的一次性種子腳本沒
+涵蓋這幾張表，這次是第一次同步)，全部8張表`status`都是`done`、沒有任何
+失敗。
