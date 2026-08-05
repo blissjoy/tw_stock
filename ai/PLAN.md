@@ -6514,3 +6514,59 @@ DB複本)+Playwright無頭瀏覽器：multiselect的"Select all"選項正確選�
 對齊計畫進度：第1~6項全部完成，剩「回補資料」(是否要上web需要先跟
 使用者確認，有資源濫用疑慮)、「產出報表PDF匯出」(技術風險最大，桌面版
 用Qt的printToPdf，web需要換一套做法)兩項。
+
+## 庫存/觀察清單接上Turso ＋ 修正TursoConnection的lastrowid bug（2026-08-05）
+
+背景：使用者確認web版最終目標是佈到雲端(Streamlit Community Cloud)，
+`get_default_portfolio_connection()`(`src/data/connection.py`)原本
+寫死只能連本機sqlite，雲端部署後容器檔案系統是ephemeral，資料完全
+不會保留。查完Turso帳號額度(免費方案5GB/1000萬列寫入/月，遠大於現有
+1.2GB主DB)、跟Supabase比較(免費方案500MB連現有主DB都放不下)後，
+使用者確認：**沿用Turso，但portfolio用獨立的第二個Turso資料庫**，不是
+塞進主DB——理由：①`ATTACH DATABASE`已確認對Turso不支援，跨DB查詢本來
+就得在Python層(pandas)合併，共用同一個資料庫沒有查詢上的好處；②主DB
+的Turso帳號曾經額度用完被封鎖過，獨立開一個新資料庫給portfolio用，讓
+使用者互動觸發的頻繁小額寫入跟每日排程的批次寫入額度互不影響；③Turso
+免費方案支援到100個資料庫，沒有額外成本。
+
+實作：`src/data/config.py`新增`get_turso_portfolio_credentials()`(照抄
+`get_turso_credentials()`，讀`TURSO_PORTFOLIO_DATABASE_URL`/`TURSO_
+PORTFOLIO_AUTH_TOKEN`)；`src/data/turso_client.py`把連線邏輯抽出`_connect
+(url, token)`私有函式，新增`get_portfolio_connection()`；`src/data/
+connection.py`的`get_default_portfolio_connection()`改成跟主DB一致的
+「有`PORTFOLIO_DB_PATH`環境變數就用本機、沒有就走Turso」邏輯(桌面版
+`desktop/main.py`用`os.environ.setdefault`固定指向本機檔案，不受影響)；
+`dashboard/app.py`的`get_portfolio_conn()`在Turso分支呼叫`ensure_
+portfolio_schema()`(try/except包住，失敗只顯示warning不crash，理由跟
+主DB的`get_conn()`一致：讀取功能不該被寫入被拒絕卡住)；新增一次性腳本
+`scripts/seed_turso_portfolio_from_local.py`把本機`data/portfolio.db`
+既有資料(2317鴻海3筆庫存批次、「預設觀察清單」群組9檔股票)複製到新的
+Turso portfolio資料庫；`.env.example`/`README.md`補上新環境變數說明。
+
+**過程中發現並修正一個TursoConnection的既有bug**：第一次執行種子腳本時
+`portfolio_storage.add_inventory_stock()`在`return cur.lastrowid`這行
+噴`AttributeError: '_ResultSetCursor' object has no attribute 'lastrowid'`
+——這是先前完全沒有任何呼叫方用到`.lastrowid`才沒被發現的既有缺口：
+`libsql_client.ResultSet`確實有記錄新插入列的id，但屬性名是`last_
+insert_rowid`(snake_case，語意上對應sqlite3的`lastrowid`但命名不同)，
+`turso_client.py`的`_ResultSetCursor`包裝類別原本沒有把這個值透傳出來。
+修法：`_ResultSetCursor.__init__()`新增`lastrowid`參數存成`self.
+lastrowid`(跟sqlite3.Cursor慣例一致的純屬性存取)，`TursoConnection.
+_wrap_result()`建構`_ResultSetCursor`時多傳入`result.last_insert_
+rowid`。`pytest tests/ -q`1007個測試全數通過(既有測試沒有涵蓋這個
+屬性，屬於這次才被實際使用場景揭露的真實缺口，不是既有測試對應的
+回歸)。
+
+真實驗證：修好bug後重新執行種子腳本，成功寫入Turso(回報庫存3筆/觀察
+清單1組9檔股票)；但檢查Turso實際列數時發現庫存變成4筆——第一次失敗
+執行時`INSERT`其實已經成功送出、只是接下來存取`.lastrowid`才crash，
+代表第一批(2317, 2026-04-09, 50股)已經被寫入過一次，這次重跑又整批
+寫了一次造成1筆重複。直接查出重複列的id(靠`created_at`時間戳分辨新舊)
+後用`DELETE FROM inventory_stocks WHERE id = 1`清掉多餘的那一筆，比對
+確認Turso資料庫3筆庫存/1組9檔觀察清單股票內容跟本機`data/portfolio.db`
+逐欄一致。額外對Turso連線做了幾次唯讀查詢(`list_inventory_rows`/
+`list_watchlist_groups`/`list_watchlist_rows`)確認資料層讀寫都正常，
+過程中的Turso操作都是單筆/唯讀，沒有批次操作，符合使用者「小心使用
+不要又造成額度問題」的要求。本機啟動Streamlit(不設`PORTFOLIO_DB_PATH`)
+確認伺服器能正常啟動連線，桌面版`desktop/main.py`固定`PORTFOLIO_DB_
+PATH`不受影響。

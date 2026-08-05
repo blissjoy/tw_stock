@@ -164,6 +164,17 @@ TWSE/yfinance造成明顯負擔；但如果之後有更高頻率的需求(例如
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE推播 | LINE Developers Console 建立 Messaging API 頻道，並用自己帳號加此bot為好友 |
 | `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` / `NOTIFY_EMAIL_TO` | Email通知 | Gmail 開啟兩步驟驗證後產生「應用程式密碼」 |
 | `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`（可選） | 之後恢復雲端部署時的雲端資料庫 | 註冊 [turso.tech](https://turso.tech) 建立資料庫 |
+| `TURSO_PORTFOLIO_DATABASE_URL` / `TURSO_PORTFOLIO_AUTH_TOKEN`（可選） | 庫存清單/觀察清單雲端持久化，跟上面主DB**分開的另一個**Turso資料庫 | 同樣在 [turso.tech](https://turso.tech) 另外建立一個資料庫 |
+
+⚠️ 庫存清單/觀察清單(`data/portfolio.db`)刻意用**跟主DB分開的第二個Turso資料庫**，不是
+共用同一個——主DB的Turso帳號曾經寫入額度用完被封鎖過(見下方說明)，獨立開一個資料庫讓
+「使用者互動觸發的頻繁小額寫入」跟「每日排程的批次寫入」的額度互不影響。本機/桌面版
+使用不需要設定這兩個變數(`desktop/main.py`已經固定指向本機檔案)；web版只要不設定
+`PORTFOLIO_DB_PATH`，就會自動改連這裡設定的Turso資料庫。第一次接上時，用下面指令把
+本機既有的庫存/觀察清單資料搬過去一次：
+```bash
+python scripts/seed_turso_portfolio_from_local.py --local-db data/portfolio.db
+```
 
 ## （可選）之後恢復雲端部署
 

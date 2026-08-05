@@ -50,6 +50,26 @@ def get_turso_credentials() -> tuple[str, str]:
     return url, token
 
 
+def get_turso_portfolio_credentials() -> tuple[str, str]:
+    """回傳 (TURSO_PORTFOLIO_DATABASE_URL, TURSO_PORTFOLIO_AUTH_TOKEN)。
+
+    2026-08-05新增：庫存清單/觀察清單(portfolio.db)雲端部署時的持久化儲存——刻意用
+    「跟主DB分開的第二個Turso資料庫」，不是共用get_turso_credentials()那組憑證，
+    理由見src/data/connection.py的get_default_portfolio_connection()說明：主DB的
+    Turso帳號曾經額度用完被封鎖過，獨立開一個資料庫讓「使用者互動觸發的頻繁小額寫入」
+    跟「每日排程的批次寫入」的額度互不影響。
+    """
+    url = os.environ.get("TURSO_PORTFOLIO_DATABASE_URL")
+    token = os.environ.get("TURSO_PORTFOLIO_AUTH_TOKEN")
+    if not url or not token:
+        raise RuntimeError(
+            "找不到 TURSO_PORTFOLIO_DATABASE_URL / TURSO_PORTFOLIO_AUTH_TOKEN，請先到 turso.tech "
+            "另外建立一個資料庫(跟主DB分開)取得憑證，在 .env 檔設定（可參考 .env.example）"
+            "或直接設定同名環境變數。"
+        )
+    return url, token
+
+
 def get_line_channel_token() -> str:
     """回傳 LINE_CHANNEL_ACCESS_TOKEN（LINE Messaging API 頻道存取權杖，用於 broadcast 推播）。"""
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")

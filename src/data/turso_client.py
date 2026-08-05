@@ -24,7 +24,7 @@ import re
 import time
 from typing import Any
 
-from src.data.config import get_turso_credentials
+from src.data.config import get_turso_credentials, get_turso_portfolio_credentials
 
 _NAMED_PARAM_RE = re.compile(r":(\w+)")
 _BATCH_CHUNK_SIZE = 500  # 每次.batch()呼叫送幾筆，避免單次HTTP請求過大
@@ -45,14 +45,16 @@ def _to_positional(sql: str, row: dict) -> tuple[str, tuple]:
 
 
 class _ResultSetCursor:
-    """把 libsql_client 的 ResultSet 包成 sqlite3.Cursor 慣用介面(fetchone/fetchall/description)，
-    讓 storage.py 既有的呼叫方式（例如 `fetchone()[0]`、`[d[0] for d in cur.description]`）
-    不必為了這個client另外改寫。"""
+    """把 libsql_client 的 ResultSet 包成 sqlite3.Cursor 慣用介面(fetchone/fetchall/description/
+    lastrowid)，讓 storage.py 既有的呼叫方式（例如 `fetchone()[0]`、`[d[0] for d in cur.description]`、
+    `cur.lastrowid`）不必為了這個client另外改寫。ResultSet本身用`last_insert_rowid`這個
+    snake_case屬性名(不是sqlite3.Cursor慣用的`lastrowid`)，這裡在建構時轉存成`lastrowid`。"""
 
-    def __init__(self, rows: list, columns: list[str]) -> None:
+    def __init__(self, rows: list, columns: list[str], lastrowid: int | None = None) -> None:
         self._rows = [tuple(r) for r in rows]
         self.description = [(name,) for name in columns]
         self._pos = 0
+        self.lastrowid = lastrowid
 
     def fetchone(self):
         if self._pos >= len(self._rows):
@@ -78,7 +80,10 @@ class TursoConnection:
 
     def _wrap_result(self, result: Any):
         if hasattr(result, "rows") and hasattr(result, "columns"):
-            return _ResultSetCursor(result.rows, list(result.columns))
+            return _ResultSetCursor(
+                result.rows, list(result.columns),
+                getattr(result, "last_insert_rowid", None),
+            )
         return result  # 底層已經是sqlite3風格cursor時（例如測試用sqlite3.Connection）直接透傳
 
     def execute(self, sql: str, params: dict | tuple | None = None):
@@ -169,12 +174,24 @@ def _force_https_scheme(url: str) -> str:
     return "https://" + url.split("://", 1)[1]
 
 
-def get_connection() -> TursoConnection:
-    """連線到 Turso 雲端資料庫，回傳的物件介面與 sqlite3.Connection 相容，
-    可直接傳給 src/data/storage.py 的所有 upsert_*/init_db 函式使用。
-    """
+def _connect(url: str, token: str) -> TursoConnection:
     import libsql_client
 
-    url, token = get_turso_credentials()
     raw_conn = libsql_client.create_client_sync(_force_https_scheme(url), auth_token=token)
     return TursoConnection(raw_conn)
+
+
+def get_connection() -> TursoConnection:
+    """連線到主DB用的Turso雲端資料庫，回傳的物件介面與 sqlite3.Connection 相容，
+    可直接傳給 src/data/storage.py 的所有 upsert_*/init_db 函式使用。
+    """
+    return _connect(*get_turso_credentials())
+
+
+def get_portfolio_connection() -> TursoConnection:
+    """連線到庫存清單/觀察清單專用的Turso雲端資料庫——2026-08-05新增，跟主DB用的是
+    「不同的Turso資料庫」(不同帳號憑證，見get_turso_portfolio_credentials()的說明)，
+    不是共用get_connection()那個資料庫加表，理由見src/data/connection.py的
+    get_default_portfolio_connection()。
+    """
+    return _connect(*get_turso_portfolio_credentials())

@@ -139,11 +139,17 @@ def main() -> None:
     @st.cache_resource
     def get_portfolio_conn():
         # 庫存清單/觀察清單專用連線，跟主DB(conn)分開——見src/data/portfolio_storage.py
-        # 開頭的說明。⚠️ get_default_portfolio_connection()目前硬編碼只能連本機sqlite，
-        # 沒有Turso分支(該函式docstring已明講是刻意延後的限制)，這代表如果之後要把
-        # web版部署回Streamlit Cloud，庫存清單資料不會跨環境同步(雲端檔案系統是
-        # ephemeral的)。目前專案是「本機優先」架構，這裡先直接沿用，不在這次範圍內解決。
-        return get_default_portfolio_connection()
+        # 開頭的說明。2026-08-05起get_default_portfolio_connection()也比照get_conn()
+        # 有Turso分支(用跟主DB分開的第二個Turso資料庫，見該函式docstring)，這裡同樣
+        # 只在走本機分支時略過ensure_schema(storage.init_db()內部已經呼叫過)，Turso
+        # 分支才需要自己呼叫+try/except，失敗只顯示警告不crash，理由跟get_conn()一致。
+        portfolio_conn = get_default_portfolio_connection()
+        if not os.environ.get("PORTFOLIO_DB_PATH"):
+            try:
+                portfolio_storage.ensure_portfolio_schema(portfolio_conn)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"⚠️ 無法確認庫存清單資料庫schema已建立（{exc}），若資料表原本就存在應不影響讀取。")
+        return portfolio_conn
 
     portfolio_conn = get_portfolio_conn()
 

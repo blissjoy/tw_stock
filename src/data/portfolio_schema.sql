@@ -3,9 +3,9 @@
 -- 是唯一權威來源(既有慣例，daily_candidates等表也都不重複存name)，查詢時用
 -- stock_id去主DB的stocks表JOIN取得名稱，避免兩份資料不同步。
 --
--- 這條DB連線永遠是本機sqlite檔案，不支援Turso(見src/data/connection.py的
--- get_default_portfolio_connection())——庫存/觀察清單是使用者個人資料，這次先不
--- 考慮多裝置雲端同步。
+-- 這條DB連線本機/Turso皆可(見src/data/connection.py的get_default_portfolio_
+-- connection())，2026-08-05起用跟主DB分開的第二個Turso資料庫(理由見該函式
+-- docstring)，不是共用主DB的schema.sql那個資料庫。
 
 PRAGMA foreign_keys = ON;
 
