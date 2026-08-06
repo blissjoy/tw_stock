@@ -7468,3 +7468,63 @@ checkbox不需要這個函式(checkbox的label本來就在同一行右側)。
 `OpenBLAS`記憶體不足crash)：第一版截圖label跟下拉間距太大(尤其
 「候選清單日期」)，調整比例後第二版截圖label緊貼著窄版下拉，視覺
 上明顯更接近使用者提供的參考截圖。
+
+---
+
+## 候選清單表格互動模式改版：checkbox跟導航分開、批次動作按鈕搬到表格上方
+（2026-08-06）
+
+背景：使用者反映候選清單table的操作方式很怪，要求改成「雙擊該列導去
+個股資訊、點checkbox把該股加入庫存/觀察清單」，而且加入庫存/觀察清單
+按鈕應該在表格上面不是下面。範圍web+桌面版一起改。
+
+**web版雙擊研究**：使用者不接受我第一次「Streamlit沒有雙擊事件」的
+回覆、要求先查清楚再回來討論。用WebSearch實際查證(不只查本機docstring)：
+`st.dataframe()`官方GitHub issue #10190(提議新增區分「單擊」跟「選取」
+的`on_click`參數，目前還是open的功能請求)、#10212都證實連「單擊vs選取」
+都還沒分開，更別說雙擊；唯一能做到真雙擊的方法是裝`streamlit-aggrid`
+第三方套件+自寫JS(`onCellDoubleClicked`)，而且社群討論裡「把JS事件傳
+回Python」本身就是公認的常見難題。權衡後跟使用者確認：不裝新套件、
+不用完全跟桌面版一樣的「雙擊」，改成selection_mode="multi-row"(原生
+checkbox多選，等同桌面版勾選欄)+明確的「🔍 查看個股資訊」按鈕(勾選
+剛好一檔才能點)。
+
+**web版實作**(`dashboard/app.py`)：`candidates_table`的`selection_mode`
+從`"single-row"`改成`"multi-row"`，拿掉原本「選取任一列就自動跳轉」
+的邏輯；拿掉獨立的`st.multiselect("批次動作：勾選要處理的股票", ...)`
+下拉(改用表格原生checkbox勾選，不用另外選一次)；「➕ 加入庫存」/
+「➕ 加入觀察清單」/「🔍 查看個股資訊」三顆按鈕搬到表格上方一列。技術
+關鍵：按鈕要畫在表格「上面」，但需要讀「使用者剛勾選了哪幾列」——利用
+Streamlit的widget key機制，這一輪script重新執行時，使用者上一次互動
+產生的`st.session_state["candidates_table"]["selection"]["rows"]`已經
+先寫好了(比這一輪真正呼叫`st.dataframe()`還早)，所以按鈕邏輯直接讀
+`st.session_state.get("candidates_table", {})`就能拿到目前的勾選狀態，
+不需要等表格重新render完才能用。
+
+**桌面版實作**(`desktop/main_window.py`)：查證後發現桌面版其實也有
+同樣的問題——`candidates_table`用`SelectionBehavior.SelectRows`+
+`itemSelectionChanged`訊號觸發跳轉，點勾選欄(欄0)那一格同樣會選取整列、
+觸發跳轉，跟web版是同一類bug，不是web版獨有。加入庫存/加入觀察清單
+按鈕原本就已經在表格上方(bulk_action_bar，2026-08-04就這樣設計)，這點
+不用改。修正：拿掉`itemSelectionChanged.connect(self._on_candidate_
+selected)`，改成`cellDoubleClicked.connect(...)`只在真正雙擊時觸發；
+`_on_candidate_selected()`改名成`_navigate_to_candidate_row(row)`，
+從讀`selectionModel().selectedRows()`改成直接吃row參數。候選清單內
+搜尋框(`_on_candidate_search()`)原本靠`selectRow()`間接觸發
+`itemSelectionChanged`來導航，這條路徑被拿掉後改成搜尋框自己主動呼叫
+`_navigate_to_candidate_row(row)`，維持「搜尋到→自動跳轉」的既有行為
+不變(這是搜尋框特有的語意，跟表格本身點列的行為分開)。`_checked_
+candidate_stock_ids()`(批次動作用)本來就是直接讀checkState()、不經過
+selectionModel()，不受這次修改影響。
+
+真實驗證：`pytest tests/ -q`1025個測試全數通過。web版用Playwright真實
+瀏覽器測試(AppTest沒有原生支援模擬dataframe checkbox勾選互動，改用
+真瀏覽器)：點候選清單第一欄checkbox後畫面停留在選股分頁(沒有誤跳轉)、
+`_checked_candidate_stock_ids()`等效的勾選狀態正確；點「🔍 查看個股
+資訊」後成功切到個股資訊分頁，右上角正確顯示「來源：8月6日的選股
+策略」。桌面版用`QT_QPA_PLATFORM=offscreen`煙霧測試：勾選checkbox+
+模擬選取列(`setCurrentCell`，過去會透過`itemSelectionChanged`觸發
+跳轉)確認畫面停留在選股分頁(`tabs.currentIndex()`不變)；`_checked_
+candidate_stock_ids()`正確回傳勾選的股票代號；呼叫`_navigate_to_
+candidate_row()`(模擬雙擊)確認正確跳轉到個股資訊分頁、`_current_
+stock_id`正確設定。

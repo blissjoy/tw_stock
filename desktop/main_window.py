@@ -972,7 +972,7 @@ class MainWindow(QMainWindow):
         self._current_stock_id: str | None = None
         # 目前「個股資訊」分頁顯示的股票是從候選清單哪一天的選股策略點進來的("YYYY-MM-DD"
         # 字串)；手動查詢時設為None，右上角的來源標籤(self.stock_source_label)就不顯示
-        # (見_on_candidate_selected()/_on_search())。
+        # (見_navigate_to_candidate_row()/_on_search())。
         self._current_stock_source: str | None = None
         # 追蹤上一次輪詢到的「候選清單算至」時間戳，供_poll_pipeline_status()偵測候選
         # 清單是否被外部(排程/Windows工作排程器背景觸發run_daily_pipeline())更新過，
@@ -1025,8 +1025,8 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         # 七個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+
         # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單、⑦回補資料——原本候選清單跟個股
-        # 圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選清單點選任一列會自動切到③
-        # 並代入該股票資料(見_on_candidate_selected())。①跟③都用同一套規則比對邏輯
+        # 圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選清單雙擊任一列會自動切到③
+        # 並代入該股票資料(見_navigate_to_candidate_row())。①跟③都用同一套規則比對邏輯
         # (_build_analysis_sections_html())，只是分析對象(大盤/個股)不同，渲染格式共用。
         # ⑤⑥移植自ref-project的庫存清單/觀察清單，用獨立的self.portfolio_conn(見
         # __init__())，不查主DB的候選清單/圖表相關資料。⑦是2026-08-04新增，取代原本
@@ -1051,8 +1051,8 @@ class MainWindow(QMainWindow):
         """「選股」分頁：候選清單篩選條件+候選清單本身，不含個股圖表/分析(那些移到
         「個股資訊」分頁，見_build_stock_detail_tab())——原本候選清單跟個股圖表擠在
         同一個分頁，使用者反映畫面太擁擠，拆開後這裡可以完整顯示候選清單，不用捲很久
-        才看得到後面的圖表。點選候選清單裡任一列會自動切到「個股資訊」分頁並代入該
-        股票資料(見_on_candidate_selected())。
+        才看得到後面的圖表。雙擊候選清單裡任一列會自動切到「個股資訊」分頁並代入該
+        股票資料(見_navigate_to_candidate_row())。
         """
         screener_scroll = QScrollArea()
         screener_scroll.setWidgetResizable(True)
@@ -1196,7 +1196,7 @@ class MainWindow(QMainWindow):
         self.fetch_btn.clicked.connect(self._on_fetch_clicked)
         # 在候選清單「內」搜尋(跟「個股資訊」分頁裡的self.search_input不同——那個是不限
         # 候選清單、對任意股票代號/名稱做全域查詢；這個只在目前候選清單的列裡找，找到就
-        # 選取+捲動過去，順便觸發_on_candidate_selected()連帶切到「個股資訊」分頁)。
+        # 選取+捲動過去，順便呼叫_navigate_to_candidate_row()連帶切到「個股資訊」分頁)。
         self.candidate_search_input = QLineEdit()
         self.candidate_search_input.setPlaceholderText("在候選清單中搜尋代號或名稱")
         self.candidate_search_input.setMaximumWidth(220)
@@ -1273,7 +1273,10 @@ class MainWindow(QMainWindow):
         # 原本單行的列高裡看不全。
         self.candidates_table.setWordWrap(True)
         self._candidates_header.toggled.connect(self._on_candidates_select_all_toggled)
-        self.candidates_table.itemSelectionChanged.connect(self._on_candidate_selected)
+        # 2026-08-06改版：改成雙擊才跳轉「個股資訊」分頁(見_navigate_to_candidate_row()
+        # 的說明)，不再用itemSelectionChanged(單擊/勾選checkbox都會觸發，會跟批次動作
+        # 的勾選操作互相干擾)。
+        self.candidates_table.cellDoubleClicked.connect(lambda row, _col: self._navigate_to_candidate_row(row))
         # 點欄位標題可以排序(股票代號/名稱/產業別/訊號用預設字串排序；進場價/停損價/
         # 漲跌幅/成交量用_NumericTableWidgetItem依實際數值排序，見該類別說明)。
         # _reload_candidates()填資料前後會暫時關掉/重新打開，避免QTableWidget在
@@ -1283,9 +1286,9 @@ class MainWindow(QMainWindow):
 
     def _build_stock_detail_tab(self) -> None:
         """「個股資訊」分頁：個股查詢+K線圖+均線/切線/支撐壓力/MACD/KD/SAR切換+個股分析+
-        最新交易日摘要。從「選股」分頁候選清單點選任一列時會自動切換到這個分頁並代入
+        最新交易日摘要。從「選股」分頁候選清單雙擊任一列時會自動切換到這個分頁並代入
         該股票資料，右上角顯示「來源：X月X日的選股策略」；使用者在這個分頁自己手動
-        查詢股票時則不顯示來源(見_on_candidate_selected()/_on_search())。
+        查詢股票時則不顯示來源(見_navigate_to_candidate_row()/_on_search())。
 
         這裡直接用QVBoxLayout(不是舊版候選清單+個股圖表共用的那個QSplitter)包在
         QScrollArea裡——候選清單移到獨立分頁後，不再需要讓使用者拖曳調整候選清單/
@@ -3159,12 +3162,20 @@ class MainWindow(QMainWindow):
         self.candidates_table.setSortingEnabled(True)
         self.candidates_table.resizeRowsToContents()  # 讓多行的訊號欄位撐開列高，完整顯示
 
-    def _on_candidate_selected(self) -> None:
-        rows = self.candidates_table.selectionModel().selectedRows()
-        if not rows:
+    def _navigate_to_candidate_row(self, row: int) -> None:
+        """把候選清單第row列的股票帶入「個股資訊」分頁並切換過去。⚠️ 2026-08-06改版：
+        使用者反映原本「點任一列(包含勾選欄checkbox本身)就會跳轉」很奇怪——勾選checkbox
+        是要做「加入庫存/加入觀察清單」批次動作，跟「查看這檔股票的個股資訊」是兩件事，
+        卻共用同一個itemSelectionChanged訊號(QTableWidget的SelectRows選取行為下，點
+        checkbox那一格也會選取整列)。改成雙擊(cellDoubleClicked)才觸發這個方法，單純
+        點一下(包含點checkbox)只會選取/勾選，不會跳轉；候選清單內搜尋(_on_candidate_
+        search())找到列後仍然要主動幫使用者跳轉過去，所以那裡改成直接呼叫這個方法，
+        不再依賴itemSelectionChanged間接觸發。
+        """
+        stock_id_item = self.candidates_table.item(row, 1)  # 欄位1：股票代號(欄位0是勾選欄)
+        if stock_id_item is None:
             return
-        stock_id = self.candidates_table.item(rows[0].row(), 1).text()  # 欄位1：股票代號(欄位0是勾選欄)
-        self._current_stock_id = stock_id
+        self._current_stock_id = stock_id_item.text()
         # 記錄來源候選清單日期(目前分頁選取的日期)，供「個股資訊」分頁右上角顯示
         # 「來源：X月X日的選股策略」。自動切到該分頁——切換會觸發_on_tab_changed()
         # 呼叫_rerender_chart()，這裡不用另外呼叫(也不應該在切換前就呼叫：分頁還沒
@@ -3174,10 +3185,11 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)
 
     def _on_candidate_search(self) -> None:
-        """在目前候選清單的列裡搜尋代號或名稱是否存在，找到就選取該列並捲動過去——
-        `selectRow()`會觸發`itemSelectionChanged`訊號，`_on_candidate_selected()`
-        因此會自動連帶更新下方的個股圖表/分析面板，這裡不用另外呼叫。找不到時明確
-        告知使用者，不要讓輸入框看起來像沒反應。"""
+        """在目前候選清單的列裡搜尋代號或名稱是否存在，找到就選取該列、捲動過去、並
+        主動跳轉到「個股資訊」分頁(見_navigate_to_candidate_row())——這是搜尋框特有的
+        「找到=想看這檔股票」語意，不是候選清單表格本身點列的行為(那個現在要雙擊才會
+        跳轉，見_navigate_to_candidate_row()的說明)。找不到時明確告知使用者，不要讓
+        輸入框看起來像沒反應。"""
         query = self.candidate_search_input.text().strip()
         if not query:
             return
@@ -3190,6 +3202,7 @@ class MainWindow(QMainWindow):
             if query_lower == stock_id.lower() or query in name:
                 self.candidates_table.selectRow(row)
                 self.candidates_table.scrollToItem(stock_id_item)
+                self._navigate_to_candidate_row(row)
                 return
         QMessageBox.information(self, "候選清單搜尋", f"目前候選清單中找不到「{query}」。")
 
