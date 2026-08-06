@@ -170,6 +170,22 @@ _INVENTORY_TREE_NUMERIC_COLUMNS = {
 }
 _INVENTORY_TREE_LOT_COUNT_COLUMN = _INVENTORY_TREE_HEADERS.index("批次數")
 
+# 「產業輪動」分頁改用QTreeWidget(2026-08-06新增，母子列結構跟_INVENTORY_TREE_
+# HEADERS同一個精神，見_build_industry_rotation_tab())的欄位結構：父列(產業彙總)
+# 用「產業別/股票代號」「漲跌幅(%)」(平均)「總成交張數」(合計)「股票數」，子列(個股
+# 明細)用「產業別/股票代號」(放股票代號)「名稱」「成交/開盤/最高/最低/漲跌/漲跌幅(%)/
+# 總成交張數」，「股票數」留空——兩種列共用同一組欄位定義，彼此不適用的欄位留空字串，
+# 跟_format_inventory_row()的is_lot參數是同一個模式。
+_INDUSTRY_TREE_HEADERS = [
+    "產業別 / 股票代號", "名稱", "成交", "開盤", "最高", "最低", "漲跌", "漲跌幅(%)",
+    "總成交張數", "股票數",
+]
+_INDUSTRY_TREE_NUMERIC_COLUMNS = {
+    _INDUSTRY_TREE_HEADERS.index(h)
+    for h in ["成交", "開盤", "最高", "最低", "漲跌", "漲跌幅(%)", "總成交張數", "股票數"]
+}
+_INDUSTRY_TREE_STOCK_COUNT_COLUMN = _INDUSTRY_TREE_HEADERS.index("股票數")
+
 
 def _format_month_day(date_str: str) -> str:
     """"YYYY-MM-DD" -> "X月X日"(不補零)，供「個股資訊」分頁右上角的來源標籤使用。
@@ -1548,6 +1564,13 @@ class MainWindow(QMainWindow):
         目前比較集中往哪個產業移動——跟chart_data.load_industry_rotation()的說明一樣，
         日期選單用chart_data.list_price_dates()(不受daily_candidates限制)。表格內容
         延後到分頁真正顯示時才查(見_on_tab_changed())，日期選單本身在建構時就可以填好。
+
+        ⚠️ 2026-08-06改版：使用者要求可以點開產業別、縮排列出該產業別底下每檔股票的
+        成交/開盤/最高/最低/漲跌/漲跌幅/總成交張數——原本的`QTableWidget`(單純的產業
+        彙總平面表格)改成`QTreeWidget`，比照「庫存清單」的母子列模式(見_build_
+        inventory_tab())：每個產業別一個父列(彙總數字)，點父列的「股票數」欄位或原生
+        展開箭頭才會展開底下該產業每一檔股票的明細子列(chart_data.load_industry_
+        rotation_stocks())，預設全部收合。
         """
         rotation_scroll = QScrollArea()
         rotation_scroll.setWidgetResizable(True)
@@ -1574,20 +1597,69 @@ class MainWindow(QMainWindow):
         date_bar.addWidget(self.industry_update_label)
         rotation_layout.addLayout(date_bar)
 
-        self.industry_table = QTableWidget()
-        self.industry_table.setColumnCount(4)
-        self.industry_table.setHorizontalHeaderLabels(["產業別", "成交量合計(張)", "平均漲跌幅(%)", "股票數"])
-        # 數值欄位靠右對齊(見_refresh_industry_rotation_tab()裡的setTextAlignment)時，
-        # 加一點padding-right留出呼吸空間，不要緊貼著儲存格右側格線，跟candidates_table
-        # 的做法一致。
-        self.industry_table.setStyleSheet("QTableWidget::item { padding-right: 10px; }")
-        header = self.industry_table.horizontalHeader()
+        self.industry_tree = QTreeWidget()
+        self.industry_tree.setColumnCount(len(_INDUSTRY_TREE_HEADERS))
+        self.industry_tree.setHeaderLabels(_INDUSTRY_TREE_HEADERS)
+        self.industry_tree.setStyleSheet("QTreeWidget::item { padding-right: 10px; }")
+        header = self.industry_tree.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.industry_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.industry_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.industry_table.setSortingEnabled(True)
-        rotation_layout.addWidget(self.industry_table, stretch=1)
+        self.industry_tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.industry_tree.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
+        self.industry_tree.setSortingEnabled(True)
+        self.industry_tree.itemClicked.connect(self._on_industry_tree_item_clicked)
+        rotation_layout.addWidget(self.industry_tree, stretch=1)
+
+    def _on_industry_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        if column != _INDUSTRY_TREE_STOCK_COUNT_COLUMN:
+            return
+        industry = item.data(0, Qt.ItemDataRole.UserRole)
+        if industry is None:
+            return  # 子列(個股)本身沒有設這個UserRole，點子列的這一欄不會誤觸發
+        if item.childCount() == 0:
+            # 第一次展開這個產業，之前還沒查過個股明細——即時查、補上子列。避免
+            # _refresh_industry_rotation_tab()每次重新整理都要對「全部」產業各查一次
+            # 個股明細(大部分產業使用者根本不會展開)，只在真的要展開時才查那一個產業。
+            self._populate_industry_stock_children(item, industry)
+        item.setExpanded(not item.isExpanded())
+
+    @staticmethod
+    def _format_industry_stock_row(row: pd.Series) -> list[str]:
+        """個股明細子列要顯示的文字，欄位結構跟父列(產業彙總列)共用同一組
+        `_INDUSTRY_TREE_HEADERS`，「產業別/股票代號」欄放股票代號、「股票數」欄留空
+        (股票數是產業層級的統計，子列不重複顯示)。"""
+        return [
+            row["stock_id"], row["name"],
+            f"{row['close']:.2f}" if pd.notna(row["close"]) else "-",
+            f"{row['open']:.2f}" if pd.notna(row["open"]) else "-",
+            f"{row['high']:.2f}" if pd.notna(row["high"]) else "-",
+            f"{row['low']:.2f}" if pd.notna(row["low"]) else "-",
+            f"{row['change']:+.2f}" if pd.notna(row["change"]) else "-",
+            f"{row['pct_change']:+.2f}" if pd.notna(row["pct_change"]) else "-",
+            f"{int(row['volume']) // 1000:,}" if pd.notna(row["volume"]) else "-",
+            "",
+        ]
+
+    def _populate_industry_stock_children(self, parent_item: QTreeWidgetItem, industry: str) -> None:
+        """幫一個產業別的父列補上個股明細子列，`_refresh_industry_rotation_tab()`
+        (還原重新整理前已展開的產業)、`_on_industry_tree_item_clicked()`(使用者第一次
+        點開某個產業)共用這個方法，避免兩處各寫一份幾乎一樣的填值邏輯。"""
+        if self.conn is None:
+            return
+        target_date = self.industry_date_combo.currentText() or None
+        _, latest_date = chart_data.load_industry_rotation(self.conn, target_date=target_date)
+        if latest_date is None:
+            return
+        stocks_df = chart_data.load_industry_rotation_stocks(self.conn, industry, latest_date)
+        self.industry_tree.setSortingEnabled(False)
+        for _, stock_row in stocks_df.iterrows():
+            child_item = _NumericTreeWidgetItem()
+            for col_idx, value in enumerate(self._format_industry_stock_row(stock_row)):
+                child_item.setText(col_idx, value)
+                if col_idx in _INDUSTRY_TREE_NUMERIC_COLUMNS:
+                    child_item.setTextAlignment(col_idx, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            parent_item.addChild(child_item)
+        self.industry_tree.setSortingEnabled(True)
 
     def _refresh_industry_rotation_tab(self) -> None:
         if self.conn is None:
@@ -1597,26 +1669,44 @@ class MainWindow(QMainWindow):
         )
         target_date = self.industry_date_combo.currentText() or None
         df, latest_date = chart_data.load_industry_rotation(self.conn, target_date=target_date)
-        self.industry_table.setSortingEnabled(False)
-        self.industry_table.setRowCount(0 if latest_date is None else len(df))
-        _NUMERIC_COLUMNS = {1, 2, 3}
-        for row_idx, row in df.reset_index(drop=True).iterrows():
-            values = [
-                row["industry"],
-                f"{int(row['total_volume']) // 1000:,}",
-                f"{row['avg_pct_change']:+.2f}" if pd.notna(row["avg_pct_change"]) else "-",
-                str(int(row["stock_count"])),
-            ]
-            for col_idx, value in enumerate(values):
-                item_cls = _NumericTableWidgetItem if col_idx in _NUMERIC_COLUMNS else QTableWidgetItem
-                item = item_cls(str(value))
-                if col_idx in _NUMERIC_COLUMNS:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.industry_table.setItem(row_idx, col_idx, item)
-        self.industry_table.setSortingEnabled(True)
-        # 2026-08-04新增：使用者要求預設用「平均漲跌幅(%)」(欄位index 2)由高到低排序，
-        # 一打開就能看到資金最集中流入的產業排最前面，不用先手動點一次欄位標題排序。
-        self.industry_table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
+        tree = self.industry_tree
+        # 重建前記錄目前已展開的產業別，重建後對這些產業的新父列重新setExpanded(True)——
+        # 比照_populate_inventory_tree()同一個理由，不然每次切換日期都會把使用者剛展開
+        # 看的產業收合回去。
+        expanded_industries = {
+            tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
+            for i in range(tree.topLevelItemCount())
+            if tree.topLevelItem(i).isExpanded()
+        }
+        tree.setSortingEnabled(False)
+        tree.clear()
+        if latest_date is not None:
+            for _, row in df.reset_index(drop=True).iterrows():
+                parent_item = _NumericTreeWidgetItem()
+                values = [
+                    row["industry"],
+                    "",  # 名稱：產業彙總列沒有對應的個股名稱
+                    "", "", "", "", "",  # 成交/開盤/最高/最低/漲跌：個股才有的欄位
+                    f"{row['avg_pct_change']:+.2f}" if pd.notna(row["avg_pct_change"]) else "-",
+                    f"{int(row['total_volume']) // 1000:,}",
+                    str(int(row["stock_count"])),
+                ]
+                for col_idx, value in enumerate(values):
+                    parent_item.setText(col_idx, str(value))
+                    if col_idx in _INDUSTRY_TREE_NUMERIC_COLUMNS:
+                        parent_item.setTextAlignment(col_idx, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                parent_item.setData(0, Qt.ItemDataRole.UserRole, row["industry"])
+                tree.addTopLevelItem(parent_item)
+
+                if row["industry"] in expanded_industries:
+                    self._populate_industry_stock_children(parent_item, row["industry"])
+                    parent_item.setExpanded(True)
+        tree.setSortingEnabled(True)
+        # 2026-08-04新增：使用者要求預設用「平均漲跌幅(%)」由高到低排序，一打開就能看到
+        # 資金最集中流入的產業排最前面，不用先手動點一次欄位標題排序；2026-08-06改用
+        # QTreeWidget後這個排序同時也對子列的「漲跌幅(%)」(同一欄)生效，個股明細展開
+        # 後預設一樣是漲跌幅由高到低。
+        tree.sortByColumn(_INDUSTRY_TREE_HEADERS.index("漲跌幅(%)"), Qt.SortOrder.DescendingOrder)
 
     # ------------------------------------------------------------------
     # 庫存清單／觀察清單(2026-08-02移植自ref-project，DB跟主DB分開放，見

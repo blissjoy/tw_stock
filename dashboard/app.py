@@ -46,6 +46,7 @@ from src.presentation.chart_data import (  # noqa: E402
     list_industries,
     list_price_dates,
     load_industry_rotation,
+    load_industry_rotation_stocks,
     load_stock_universe_for_date,
     load_holidays_for_chart,
     load_price_history,
@@ -2237,8 +2238,12 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 # 照抄桌面版的預設排序慣例(不用先手動點一次欄位標題排序)。
                 rotation_df = rotation_df.sort_values("avg_pct_change", ascending=False).reset_index(drop=True)
                 rotation_df["total_volume_lots"] = (rotation_df["total_volume"] // 1000).astype(int)
-                st.dataframe(
+                # 2026-08-06新增：點一列展開該產業別的個股明細，比照「庫存清單」分頁既有的
+                # 「彙總表格(可點選)→下方顯示明細表格」互動模式(Streamlit沒有原生的表格
+                # 展開列元件，這是跟桌面版QTreeWidget母子列最接近的等效做法)。
+                rotation_event = st.dataframe(
                     rotation_df, use_container_width=True, hide_index=True,
+                    on_select="rerun", selection_mode="single-row", key="industry_rotation_table",
                     column_order=["industry", "total_volume_lots", "avg_pct_change", "stock_count"],
                     column_config={
                         "industry": "產業別",
@@ -2247,6 +2252,40 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                         "stock_count": st.column_config.NumberColumn("股票數", format="%d"),
                     },
                 )
+                if rotation_event.selection.rows:
+                    selected_industry = str(rotation_df.iloc[rotation_event.selection.rows[0]]["industry"])
+                    stocks_df = load_industry_rotation_stocks(conn, selected_industry, latest_date)
+                    st.caption(f"{selected_industry}　個股明細（依漲跌幅由高到低排序）")
+                    if stocks_df.empty:
+                        st.info("查無個股明細。")
+                    else:
+                        stocks_display = stocks_df.copy()
+                        stocks_display["volume_lots"] = (stocks_df["volume"] // 1000).astype(int)
+                        st.dataframe(
+                            stocks_display, use_container_width=True, hide_index=True,
+                            column_order=["stock_id", "name", "close", "open", "high", "low", "change", "pct_change", "volume_lots"],
+                            column_config={
+                                "stock_id": "股票代號", "name": "名稱",
+                                "close": st.column_config.NumberColumn("成交", format="%.2f"),
+                                "open": st.column_config.NumberColumn("開盤", format="%.2f"),
+                                "high": st.column_config.NumberColumn("最高", format="%.2f"),
+                                "low": st.column_config.NumberColumn("最低", format="%.2f"),
+                                "change": st.column_config.NumberColumn("漲跌", format="%+.2f"),
+                                "pct_change": st.column_config.NumberColumn("漲跌幅(%)", format="%+.2f%%"),
+                                "volume_lots": st.column_config.NumberColumn("總成交張數", format="%d"),
+                            },
+                        )
+                        # 2026-08-06使用者明確要求驗證：個股明細的總成交張數加總，理論上要
+                        # 等於上面該產業列的「成交量合計(張)」——這裡兩者都是volume//1000
+                        # 後才加總/顯示，逐股先捨去小數再加總，理論上會小於等於「先加總原始
+                        # 股數再捨去一次」的產業合計數字(捨去誤差最多(股票數-1)張)，不是bug，
+                        # 只是張數轉換本身的無條件捨去特性；真正的不變量在原始股數層級精確
+                        # 成立(見chart_data.load_industry_rotation_stocks()的docstring跟
+                        # tests/test_chart_data.py的對應測試)。這裡如實顯示兩個數字，不用
+                        # 特別加註解釋文字混淆版面，使用者自己比對得出來。
+                        industry_total_lots = int(rotation_df.iloc[rotation_event.selection.rows[0]]["total_volume_lots"])
+                        stocks_total_lots = int(stocks_display["volume_lots"].sum())
+                        st.caption(f"個股總成交張數加總　{stocks_total_lots:,}　／　產業合計　{industry_total_lots:,}")
 
     with tab_inventory:
         if tab_inventory.open:

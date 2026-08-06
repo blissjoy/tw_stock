@@ -7273,3 +7273,70 @@ subheader正確隨分頁顯示/消失、無例外；額外驗證`_pending_active
 沒有跑真瀏覽器Playwright截圖驗證視覺效果(先前跑大盤重K線圖時曾撞到
 `OpenBLAS error: Memory allocation still failed`直接crash)，這點已
 告知使用者，建議之後記憶體充裕時再截圖覆核一次視覺效果。
+
+---
+
+## 產業輪動分頁新增「點開產業別看個股明細」(web+桌面版)
+（2026-08-06）
+
+背景：使用者要求「產業輪動」分頁可以點開產業別、縮排列出該產業別底下
+每檔股票的成交/開盤/最高/最低/漲跌/漲跌幅/總成交張數，預設依漲跌幅
+降冪排序；同時明確問「列出的股票各筆總成交張數加總，是否理應等於該
+產業別的成交量？」要求先驗證這個資料一致性問題。範圍web+桌面版都做。
+
+**資料一致性先確認**：`chart_data.load_industry_rotation()`(彙總查詢)
+的`total_volume`是`SUM(sp.volume)`，篩選條件`s.market != 'INDEX' AND
+s.industry IS NOT NULL AND sp.date = target_date`。只要新的個股明細
+查詢用完全相同的篩選條件(同日期/同產業/排除大盤)，兩者加總在**原始股數
+層級**理論上必須精確相等——這是設計上刻意保證的不變量，不是巧合。
+
+**新增`chart_data.load_industry_rotation_stocks(conn, industry, target_
+date)`**：回傳指定產業別當天的股票代號/名稱/開盤/最高/最低/成交/漲跌/
+漲跌幅(%)/volume(原始股數，不是張)，WHERE條件刻意跟`load_industry_
+rotation()`完全一致(docstring裡明講這是特意設計，呼叫端不能為了額外
+篩選改動這裡的WHERE)。漲跌/漲跌幅用跟`load_industry_rotation()`同一套
+「用前一交易日收盤價現算」邏輯，不用`stock_prices.spread`(yfinance回補
+的歷史資料這欄一律NULL，不可靠，理由跟`load_stock_universe_for_date()`
+一致)。依漲跌幅由高到低排序。
+
+⚠️ 顯示層的「張」轉換有已知、可接受的捨去誤差：呼叫端把volume(股)顯示
+成張(1張=1000股)時各自`//1000`，逐股先捨去小數再加總，理論上會小於等於
+「先加總原始股數、產業彙總只捨去一次」的數字，最大誤差是(股票數-1)張，
+不是bug——真正的不變量在原始股數層級精確成立，寫了測試斷言
+(`tests/test_chart_data.py`的`test_load_industry_rotation_stocks_
+volume_sum_matches_industry_aggregate`)。
+
+**web版**(`dashboard/app.py`)：產業彙總表格加上`on_select="rerun",
+selection_mode="single-row"`，比照「庫存清單」分頁既有的「點列→下方
+顯示明細表格」互動模式(Streamlit沒有原生的表格展開列元件，這是跟桌面版
+QTreeWidget母子列最接近的等效做法)。點一列後下方顯示該產業的個股明細
+表格+一行「個股總成交張數加總／產業合計」方便使用者自己核對(如實顯示
+兩個數字，不特別加解釋文字混淆版面)。
+
+**桌面版**(`desktop/main_window.py`)：`_build_industry_rotation_tab()`
+的`QTableWidget`(單純平面表格)改成`QTreeWidget`，比照「庫存清單」的
+母子列模式——新增`_INDUSTRY_TREE_HEADERS`(「產業別/股票代號」「名稱」
+「成交」「開盤」「最高」「最低」「漲跌」「漲跌幅(%)」「總成交張數」
+「股票數」10欄，父列/子列共用同一組欄位、彼此不適用的留空，跟
+`_format_inventory_row()`同一個模式)。點父列的「股票數」欄位或原生
+展開箭頭觸發展開，第一次展開時才即時查該產業的個股明細(`_populate_
+industry_stock_children()`，`_refresh_industry_rotation_tab()`跟
+`_on_industry_tree_item_clicked()`共用同一個方法，避免兩處各寫一份)，
+避免每次重新整理都要對全部產業各查一次(大部分產業使用者不會展開)；
+重新整理時記錄先前已展開的產業、重建後還原展開狀態，比照`_populate_
+inventory_tree()`同一個理由。預設排序改成「漲跌幅(%)」欄(索引7)由高到
+低，QTreeWidget的排序對父列(平均漲跌幅)跟子列(個股漲跌幅)同時生效，
+子列展開後自動也是漲跌幅降冪，符合使用者要求的預設排序。
+
+真實驗證：`pytest tests/ -q`1025個測試全數通過(新增5個`tests/test_
+chart_data.py`測試，含加總不變量斷言)。web版用`streamlit.testing.v1.
+AppTest`打正式本機DB(`data/tw_stock.db`)驗證：點選「其他電子業」(51檔
+股票)展開，個股總成交張數加總183,072、產業合計183,094，差22張，在
+51檔股票「至多50張」的捨去誤差範圍內，符合預期。桌面版沒有現成的
+headless測試框架(這個專案至今沒有desktop UI的自動化測試)，改用
+`QT_QPA_PLATFORM=offscreen`跑一支一次性的煙霧測試腳本(不進版控)，真的
+建構`MainWindow`、餵進兩檔同產業的測試股票，確認：①父列彙總數字正確
+(半導體業平均漲跌幅+0.50%、14張、2檔)；②點「股票數」欄展開後子列
+數字精確吻合(2330: 105.00/100.00/106.00/100.00/+5.00/+5.00/8張；2454:
+48.00/50.00/49.00/47.00/-2.00/-4.00/6張)；③加總不變量在原始股數層級
+精確相等(14000=14000)；④再點一次正確收合。

@@ -692,6 +692,56 @@ def load_industry_rotation(conn, target_date: str | None = None) -> tuple[pd.Dat
     return rotation_df, target_date
 
 
+def load_industry_rotation_stocks(conn, industry: str, target_date: str) -> pd.DataFrame:
+    """回傳指定產業別、指定日期的個股明細(股票代號/名稱/開盤/最高/最低/成交/漲跌/
+    漲跌幅(%)/總成交張數)，供「產業輪動」分頁展開單一產業列時使用。依漲跌幅由高到低
+    排序。查無資料回傳空DataFrame。
+
+    ⚠️ WHERE條件(market != 'INDEX'、industry比對、date比對)刻意跟load_industry_
+    rotation()的彙總查詢完全一致，這是特意的設計，不是巧合：這裡回傳的個股「volume」
+    加總理論上必須精確等於load_industry_rotation()算出的該產業「total_volume」——
+    兩者是同一批底層列，只是一個逐股列出、一個依industry分組加總，篩選條件只要有
+    一絲落差，加總就會兜不起來，使用者對帳時會發現。呼叫端如果要疊加「成交量>=N張」
+    這類額外篩選，那個篩選只能套用在「顯示」層(例如只在UI隱藏列)，不能改變這裡SQL
+    本身的WHERE條件，否則會破壞這個不變量。
+
+    漲跌/漲跌幅：用跟load_industry_rotation()相同的作法，以前一個交易日收盤價現算，
+    不用stock_prices.spread欄位——spread在yfinance回補的歷史資料裡一律是NULL，不可靠
+    (同一份理由見load_stock_universe_for_date()的說明)。
+
+    總成交張數：這裡回傳的volume欄位是原始股數(跟load_industry_rotation()的
+    total_volume同一個單位)，呼叫端要顯示「張」(1張=1000股)時才各自做//1000——這裡
+    不先轉換，避免呼叫端拿到的已經是四捨五入/無條件捨去後的數字，導致想加總驗證時
+    自己對不上(逐股先//1000再加總，可能因為捨去誤差比「先加總原始股數再//1000」的
+    產業合計數字小一點點，這是張數轉換本身無條件捨去造成的正常誤差，不是bug)。
+    """
+    cur = conn.execute(
+        """
+        SELECT s.stock_id AS stock_id, s.name AS name,
+               sp.open AS open, sp.high AS high, sp.low AS low, sp.close AS close,
+               sp.volume AS volume,
+               (sp.close - (SELECT sp2.close FROM stock_prices sp2
+                             WHERE sp2.stock_id = s.stock_id AND sp2.date < ?
+                             ORDER BY sp2.date DESC LIMIT 1)) AS change,
+               (sp.close - (SELECT sp2.close FROM stock_prices sp2
+                             WHERE sp2.stock_id = s.stock_id AND sp2.date < ?
+                             ORDER BY sp2.date DESC LIMIT 1))
+               / (SELECT sp2.close FROM stock_prices sp2
+                  WHERE sp2.stock_id = s.stock_id AND sp2.date < ?
+                  ORDER BY sp2.date DESC LIMIT 1) * 100 AS pct_change
+        FROM stocks s
+        JOIN stock_prices sp ON sp.stock_id = s.stock_id AND sp.date = ?
+        WHERE s.market != 'INDEX' AND s.industry = ?
+        """,
+        (target_date, target_date, target_date, target_date, industry),
+    )
+    columns = [d[0] for d in cur.description]
+    stocks_df = pd.DataFrame(cur.fetchall(), columns=columns)
+    if stocks_df.empty:
+        return stocks_df
+    return stocks_df.sort_values("pct_change", ascending=False).reset_index(drop=True)
+
+
 def resolve_stock_id(conn, query: str) -> str | None:
     """依使用者輸入(可能是股票代號、完整名稱、或名稱片段，例如"2330"／"台積電"／"台積")
     找出對應的stock_id，供「個股查詢」欄位使用。查詢優先順序：①股票代號完全相符

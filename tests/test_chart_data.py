@@ -21,6 +21,8 @@ from src.presentation.chart_data import (
     get_stock_update_time,
     list_candidate_dates,
     load_holidays_for_chart,
+    load_industry_rotation,
+    load_industry_rotation_stocks,
     load_ma_bullish_flags_from_table,
     load_price_history,
     load_sar_flip_flags_from_table,
@@ -526,6 +528,89 @@ def test_load_stock_universe_for_date_reports_intraday_false_when_status_flagged
     _, _, is_intraday = load_stock_universe_for_date(conn, target_date="2026-07-23")
 
     assert is_intraday is False
+
+
+def _seed_two_stocks_same_industry(conn, date: str) -> None:
+    upsert_stocks(conn, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體業", "updated_at": date},
+        {"stock_id": "2454", "name": "聯發科", "market": "TWSE", "industry": "半導體業", "updated_at": date},
+        {"stock_id": "2317", "name": "鴻海", "market": "TWSE", "industry": "電子業", "updated_at": date},
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-21", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+         "volume": 5000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2330", "date": date, "open": 100.0, "high": 106.0, "low": 100.0, "close": 105.0,
+         "volume": 8000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2454", "date": "2026-07-21", "open": 50.0, "high": 51.0, "low": 49.0, "close": 50.0,
+         "volume": 3000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2454", "date": date, "open": 50.0, "high": 49.0, "low": 47.0, "close": 48.0,
+         "volume": 6000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2317", "date": date, "open": 20.0, "high": 21.0, "low": 19.0, "close": 20.5,
+         "volume": 2000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+
+
+def test_load_industry_rotation_aggregates_volume_and_avg_pct_change_per_industry():
+    conn = _fresh_conn()
+    _seed_two_stocks_same_industry(conn, "2026-07-22")
+
+    df, target_date = load_industry_rotation(conn, target_date="2026-07-22")
+
+    assert target_date == "2026-07-22"
+    semiconductor = df[df["industry"] == "半導體業"].iloc[0]
+    assert semiconductor["total_volume"] == 8000 + 6000
+    assert semiconductor["stock_count"] == 2
+    # (105-100)/100*100=5.0, (48-50)/50*100=-4.0，簡單平均=0.5
+    assert semiconductor["avg_pct_change"] == pytest.approx(0.5)
+
+
+def test_load_industry_rotation_stocks_returns_per_stock_rows_sorted_by_pct_change_desc():
+    conn = _fresh_conn()
+    _seed_two_stocks_same_industry(conn, "2026-07-22")
+
+    df = load_industry_rotation_stocks(conn, "半導體業", "2026-07-22")
+
+    assert list(df["stock_id"]) == ["2330", "2454"]  # 2330漲5%排前面，2454跌4%排後面
+    row_2330 = df[df["stock_id"] == "2330"].iloc[0]
+    assert row_2330["open"] == 100.0
+    assert row_2330["high"] == 106.0
+    assert row_2330["low"] == 100.0
+    assert row_2330["close"] == 105.0
+    assert row_2330["change"] == pytest.approx(5.0)
+    assert row_2330["pct_change"] == pytest.approx(5.0)
+    assert row_2330["volume"] == 8000
+
+
+def test_load_industry_rotation_stocks_volume_sum_matches_industry_aggregate():
+    """使用者2026-08-06明確要求驗證的不變量：個股明細的volume加總，理論上必須精確
+    等於load_industry_rotation()算出的該產業total_volume——兩個函式的WHERE條件
+    刻意保持一致(見load_industry_rotation_stocks()的docstring)，這裡直接斷言
+    保證不會之後改壞。"""
+    conn = _fresh_conn()
+    _seed_two_stocks_same_industry(conn, "2026-07-22")
+
+    rotation_df, target_date = load_industry_rotation(conn, target_date="2026-07-22")
+    stocks_df = load_industry_rotation_stocks(conn, "半導體業", target_date)
+
+    industry_total = rotation_df[rotation_df["industry"] == "半導體業"].iloc[0]["total_volume"]
+    assert stocks_df["volume"].sum() == industry_total
+
+
+def test_load_industry_rotation_stocks_excludes_other_industries():
+    conn = _fresh_conn()
+    _seed_two_stocks_same_industry(conn, "2026-07-22")
+
+    df = load_industry_rotation_stocks(conn, "半導體業", "2026-07-22")
+
+    assert "2317" not in set(df["stock_id"])  # 鴻海是電子業，不該出現在半導體業的明細裡
+
+
+def test_load_industry_rotation_stocks_returns_empty_when_no_data():
+    conn = _fresh_conn()
+
+    df = load_industry_rotation_stocks(conn, "半導體業", "2026-07-22")
+
+    assert df.empty
 
 
 def test_get_stock_name_returns_name_when_found():
