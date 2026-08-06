@@ -1154,6 +1154,32 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         sign = "+" if signed and value > 0 else ""
         return f"{sign}{value:,.{decimals}f}{suffix}"
 
+    def _inline_field(container, label: str, render_widget, *, label_width: float = 1, widget_width: float = 2):
+        """在container(st本身或某個st.columns()切出來的欄位)裡排出「label：緊湊widget」
+        同一列的效果，取代Streamlit預設「label在上、widget在下」的堆疊排版。2026-08-06
+        新增：使用者提供參考截圖(temp/1785930965019.jpg紅框下方的Analyzer/Group那排)
+        明確要求這種排法，先前「下拉選單太寬/太高是platform限制，不做CSS」的立場是
+        誤判——st.selectbox()/st.multiselect()/st.number_input()都有公開支援的width=
+        參數(直接指定像素寬度)，不需要動Streamlit內部DOM class就能縮小，只是先前沒
+        查到這個參數就下了結論。
+
+        render_widget是no-arg callable，呼叫端要記得在裡面傳label_visibility=
+        "collapsed"(隱藏widget自帶的label，改用這裡手動畫的文字，不會兩個label疊在
+        一起)+合理的width=(px)。標籤文字用極簡的inline style div手動padding-top
+        對齊widget的高度——這裡的HTML只是單純文字容器+padding，不是挖Streamlit內部
+        元件的class，不受版本更新影響，跟「改內部DOM class」那種脆弱做法風險等級
+        不同。checkbox不需要這個函式，checkbox的label本來就顯示在同一行右側，不是
+        堆疊排版。
+        """
+        label_col, widget_col = container.columns([label_width, widget_width], gap="small")
+        with label_col:
+            st.markdown(
+                f"<div style='padding-top:0.5rem; white-space:nowrap; font-size:0.875rem;'>{label}</div>",
+                unsafe_allow_html=True,
+            )
+        with widget_col:
+            return render_widget()
+
     def _style_name_by_listing_type_row(row: pd.Series) -> list[str]:
         """依上市/上櫃/興櫃上色「名稱」欄位——跟選股分頁candidates_df用的_style_name_
         by_listing_type()同一套邏輯，這裡獨立一份是因為欄位集合(index)不同，无法直接
@@ -1840,7 +1866,14 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             # 位置跟桌面版不一致、難以辨識。
             candidate_dates = list_candidate_dates(conn)
             selected_date = (
-                st.selectbox("候選清單日期", candidate_dates, index=0, key="candidate_date_select")
+                _inline_field(
+                    st, "候選清單日期",
+                    lambda: st.selectbox(
+                        "候選清單日期", candidate_dates, index=0, key="candidate_date_select",
+                        label_visibility="collapsed", width=160,
+                    ),
+                    label_width=0.6, widget_width=5,
+                )
                 if candidate_dates else None
             )
 
@@ -1855,11 +1888,32 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             # 照抄桌面版desktop/main_window.py的market_filter_combo/industry_filter_combo/
             # volume_filter_spin(main_window.py:2911-2928)。
             st.caption("候選股票池範圍（市場/產業別/成交量門檻，同樣要按「套用篩選」才會生效）：")
-            pool_col1, pool_col2, pool_col3 = st.columns([1, 2, 1.3])
-            market_label = pool_col1.selectbox("市場", ["全部", "上市", "上櫃"], index=0, key="filter_market_label")
-            selected_industries = pool_col2.multiselect("產業別", list_industries(conn), key="filter_industries")
-            min_volume_lots_input = pool_col3.number_input(
-                "成交量 >= (張)", min_value=0, value=10, step=1, key="filter_min_volume_lots"
+            # 2026-08-06改版：label跟下拉/輸入框改成同一列的緊湊排法(見_inline_field()
+            # 的說明)，取代原本Streamlit預設label在上、widget在下、又滿版拉寬的排版。
+            pool_col1, pool_col2, pool_col3 = st.columns([1, 1.6, 1])
+            market_label = _inline_field(
+                pool_col1, "市場",
+                lambda: st.selectbox(
+                    "市場", ["全部", "上市", "上櫃"], index=0, key="filter_market_label",
+                    label_visibility="collapsed", width=90,
+                ),
+                label_width=0.6, widget_width=1.6,
+            )
+            selected_industries = _inline_field(
+                pool_col2, "產業別",
+                lambda: st.multiselect(
+                    "產業別", list_industries(conn), key="filter_industries",
+                    label_visibility="collapsed", width=260,
+                ),
+                label_width=0.6, widget_width=3.6,
+            )
+            min_volume_lots_input = _inline_field(
+                pool_col3, "成交量>=(張)",
+                lambda: st.number_input(
+                    "成交量 >= (張)", min_value=0, value=10, step=1, key="filter_min_volume_lots",
+                    label_visibility="collapsed", width=90,
+                ),
+                label_width=1.4, widget_width=1,
             )
 
             st.caption("候選清單篩選條件（可複選，日後可在此擴充更多條件），改完後按「套用篩選」才會重新套用")
@@ -1880,19 +1934,29 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             # SAR翻轉篩選：勾選框+多頭/空頭下拉+翻轉天數輸入綁在一起，不是單純的勾選框，因此沒有
             # 放進上面CANDIDATE_FILTERS那組迴圈，改用獨立的sar_flip_option參數傳給
             # apply_candidate_filters(見src/presentation/chart_data.py)。
-            sar_col1, sar_col2, sar_col3, zhu_col, apply_col = st.columns([1, 1, 1.3, 1.3, 1])
+            # 2026-08-06改版：「方向」「天數內翻轉」改成_inline_field()緊湊排法，
+            # 「SAR 翻轉」checkbox本身label就在同一行，不需要這個處理。
+            sar_col1, sar_col2, sar_col3, zhu_col, apply_col = st.columns([1, 1.3, 1.6, 1.3, 1])
             sar_flip_enabled = sar_col1.checkbox(
                 "SAR 翻轉", value=CANDIDATE_SAR_FLIP_ENABLED_DEFAULT, key="filter_sar_flip_enabled"
             )
-            sar_flip_direction = sar_col2.selectbox(
-                "方向", ["多頭", "空頭"],
-                index=["多頭", "空頭"].index(CANDIDATE_SAR_FLIP_OPTION_DEFAULT["direction"]),
-                key="filter_sar_flip_direction",
+            sar_flip_direction = _inline_field(
+                sar_col2, "方向",
+                lambda: st.selectbox(
+                    "方向", ["多頭", "空頭"],
+                    index=["多頭", "空頭"].index(CANDIDATE_SAR_FLIP_OPTION_DEFAULT["direction"]),
+                    key="filter_sar_flip_direction", label_visibility="collapsed", width=80,
+                ),
+                label_width=0.5, widget_width=1.3,
             )
-            sar_flip_within_days = sar_col3.number_input(
-                "天數內翻轉", min_value=1, max_value=60,
-                value=CANDIDATE_SAR_FLIP_OPTION_DEFAULT["within_days"], step=1,
-                key="filter_sar_flip_within_days",
+            sar_flip_within_days = _inline_field(
+                sar_col3, "天數內翻轉",
+                lambda: st.number_input(
+                    "天數內翻轉", min_value=1, max_value=60,
+                    value=CANDIDATE_SAR_FLIP_OPTION_DEFAULT["within_days"], step=1,
+                    key="filter_sar_flip_within_days", label_visibility="collapsed", width=70,
+                ),
+                label_width=1.4, widget_width=1,
             )
             sar_flip_option = (
                 {"direction": sar_flip_direction, "within_days": int(sar_flip_within_days)}
@@ -2222,8 +2286,17 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             date_col, update_col = st.columns([3, 1])
             price_dates = list_price_dates(conn)
             with date_col:
+                # 2026-08-06改版：label跟下拉改成同一列的緊湊排法(見_inline_field()的
+                # 說明)，不要滿版拉寬。
                 rotation_date = (
-                    st.selectbox("日期", price_dates, index=0, key="industry_rotation_date_select")
+                    _inline_field(
+                        st, "日期",
+                        lambda: st.selectbox(
+                            "日期", price_dates, index=0, key="industry_rotation_date_select",
+                            label_visibility="collapsed", width=160,
+                        ),
+                        label_width=1, widget_width=5,
+                    )
                     if price_dates else None
                 )
             with update_col:

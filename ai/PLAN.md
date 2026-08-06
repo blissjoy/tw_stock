@@ -7427,3 +7427,44 @@ v1.AppTest`打正式本機DB(`data/tw_stock.db`)驗證：46個expander依平均
 ...)；透過`session_state`程式化展開第一個(鋼鐵工業，47檔股票)，
 lazy loading正確觸發、無例外；加總核對顯示118,826／118,831，差5張，
 在47檔股票理論最大46張捨去誤差內，符合預期。
+
+---
+
+## web版選股/產業輪動的label+下拉改成同一列緊湊排法
+（2026-08-06）
+
+背景：使用者對web版排版表達強烈不滿，提供參考截圖(temp/1785930965019.jpg
+紅框「下面」的Analyzer/Group那排，不是紅框裡面的分頁列)，指出label跟
+下拉應該同一列(例如"Analyzer : Local▾")，質疑「為什麼我們的都要變成
+上下」，並指出下拉選單太寬拉大了整個版面。
+
+**先承認先前的誤判**：更早的批次(選股版面對齊那次)我曾說「下拉選單
+太大是Streamlit平台限制，不做CSS」——這次查了目前安裝的streamlit版本，
+`st.selectbox()`/`st.multiselect()`/`st.number_input()`都有公開支援的
+`width`參數(直接指定像素寬度，不是只能`stretch`滿版)，先前沒有查證
+這個參數就下結論，是誤判，這次更正。
+
+**新增`_inline_field(container, label, render_widget, *, label_width=1,
+widget_width=2)`共用函式**(`dashboard/app.py`)：在`container`裡切出
+[label欄, widget欄]兩個窄欄位，label欄用極簡的inline style div(`padding-
+top`對齊widget高度)手動畫文字，widget欄呼叫`render_widget()`(呼叫端要
+記得傳`label_visibility="collapsed"`隱藏widget自帶label、`width=`指定
+合理px寬度)。這裡的HTML只是單純文字容器+padding，不是挖Streamlit內部
+元件的DOM class，跟先前婉拒的「改內部CSS class」做法風險等級不同，
+checkbox不需要這個函式(checkbox的label本來就在同一行右側)。
+
+套用範圍(使用者確認先做選股+產業輪動)：選股分頁的「候選清單日期」、
+「市場」「產業別」「成交量>=(張)」、SAR「方向」「天數內翻轉」；產業
+輪動分頁的「日期」。每個欄位的`label_width`/`widget_width`比例個別
+調過(不是統一套一組數字)——`st.columns()`的比例是「佔容器的相對分數」
+不是像素寬度，label文字越短，需要的`label_width`相對`widget_width`
+的比例要越小，不然label欄會分配到比文字實際需要的寬很多的空間，label
+跟widget之間會有不自然的大空隙(第一版直接套 1:3 這種粗略比例時就踩到
+這個問題，實際截圖比對後才抓出來重調)。
+
+真實驗證：`pytest tests/ -q`1025個測試全數通過。用Playwright對正式
+本機DB(`data/tw_stock.db`)實際截圖比對(這次記憶體恢復到2.7GB左右，
+且預設進入頁改成「選股」不會觸發大盤的重K線圖，沒有再撞到先前的
+`OpenBLAS`記憶體不足crash)：第一版截圖label跟下拉間距太大(尤其
+「候選清單日期」)，調整比例後第二版截圖label緊貼著窄版下拉，視覺
+上明顯更接近使用者提供的參考截圖。
