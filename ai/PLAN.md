@@ -7083,3 +7083,66 @@ caption分成兩列各自獨占一行，表格上方還多了一個`st.subheader
 日期選單跟「資料更新至 2026-07-22 21:32」同一列(左右對齊)、表格直接
 接在下面(沒有重複標題)、平均漲跌幅%仍維持由高到低排序，視覺結構與
 桌面版一致。
+
+---
+
+## 庫存清單/觀察清單版面對齊桌面版；意外抓到選股「進頁面預設條件跟
+## 實際套用不一致」的真實bug
+（2026-08-06）
+
+背景：繼續web/桌面版對齊，這批處理「庫存清單」跟「觀察清單」。
+
+**庫存清單**：查證`desktop/main_window.py`的`_build_inventory_tab()`
+(第1673行起)，桌面版用`QTreeWidget`做母子表格(父列=每檔股票彙總、
+子列=個別批次，點「批次數」欄位或原生箭頭展開)。web版`render_
+inventory_tab()`(`dashboard/app.py:1222`)先前就已經改成「彙總表格
+(可點列)＋選中後下方顯示該股票批次明細表格」的兩層表格設計，docstring
+清楚記錄這是刻意的平台限制因應(Streamlit沒有原生樹狀元件)。逐項核對
+後**沒有發現新問題**：桌面版庫存清單本身也沒有「資料更新至」時間戳
+(跟大盤/觀察清單/個股資訊/產業輪動不同)，web版一致沒有，不是漏做；
+底層資料函式`portfolio_data.load_inventory_summary()/load_inventory_
+lots()`沒有套`st.cache_data`，每次互動都重新查DB，不需要像桌面版那樣
+額外一個「🔄重新整理」按鈕。這個分頁維持現狀，不需要修改。
+
+**觀察清單**：查證`_build_watchlist_tab()`(第1956行起)，桌面版工具列
+最右邊有`self.watchlist_update_label`顯示「資料更新至：...」(跟大盤/
+產業輪動/個股資訊同一套做法)。web版`render_watchlist_tab()`先前完全
+沒有這個時間戳——這是漏做，不是刻意簡化(docstring原本列的三點刻意簡化
+①欄位顯示改用Streamlit原生選單②不做雙列表頭③籌碼欄位不逐格套自訂色，
+都不包含這個)。修正：把原本單獨一顆「➕ 新增股票」按鈕改成`add_col,
+update_col = st.columns([1, 3])`，右欄比照其他分頁補上`資料更新至　
+{時間}`。另外確認桌面版有的「欄位顯示▾」選單(Streamlit原生表格右上角
+已內建等效功能)、「匯出到Google Sheet」按鈕web版目前沒有——後者是真的
+功能缺口，但牽涉到OAuth憑證要怎麼在公開的web環境安全處理(桌面版用
+本機`data/google_oauth_token.json`快取，web多人共用的公開網址不能照搬)，
+屬於需要另外討論架構的較大功能，這批不做，先跟使用者回報這個缺口。
+
+**意外發現的真實bug（使用者在本機驗證庫存清單/觀察清單時發現）**：
+使用者反映「候選清單出來的資料與篩選條件對不上，是不是進入此頁時沒有
+按下套用篩選」。查證`TAB_SCREENER`第1911-1915行：`st.session_state
+["applied_filters"]`第一次進頁面時的初始值是**另外寫死**的一組
+`{"active_filters": [], "sar_flip_option": None, "zhu_rule_only": True,
+"market": None, "industries": [], "min_volume_lots": 10}`，跟上面
+checkbox/下拉框實際顯示的預設值(`CANDIDATE_FILTER_DEFAULTS`、
+`CANDIDATE_SAR_FLIP_ENABLED_DEFAULT`等，這批之前SAR的bug就是這幾個
+常數)完全對不上——使用者第一次進來、還沒點過「套用篩選」前，畫面上
+打勾的條件(均線多頭排列/SAR翻轉/朱家泓技術分析都勾)跟候選清單表格
+實際套用的條件(這裡寫死的「什麼都不篩」狀態)是兩組不同東西，這是真
+的邏輯bug，不是視覺版面問題。修正：改成直接用上面幾行剛算好的
+`active_filters`/`sar_flip_option`/`zhu_rule_only`/`market_label`/
+`selected_industries`/`min_volume_lots_input`這些變數(跟「套用篩選」
+按鈕自己那段賦值邏輯完全同源)初始化`applied_filters`，保證第一次進來
+「畫面勾的」跟「表格套用的」一致；deferred-apply設計本身不變(調整
+checkbox後還是要按「套用篩選」才會重新套用，這是2026-08-01就定案的
+既有設計，這次沒有動)。
+
+真實驗證：`pytest tests/ -q`1020個測試全數通過。本機啟動Streamlit
+(`LOCAL_DB_PATH=data/tw_stock_dev.db`)搭配Playwright驗證：進「選股」
+分頁還沒點「套用篩選」前，跟手動點一次「套用篩選」後，「候選清單
+（日期，共N檔）」文字完全一致(MATCH)，確認初始狀態不再跟畫面勾選
+的條件脫節。另外直接查`data/tw_stock_dev.db`發現這份本機驗證用的DB
+複本`daily_indicators`表是空的(0筆)，導致均線多頭排列等條件永遠篩出
+0筆——這是本機驗證用資料庫本身的資料缺口，不是這次程式邏輯的問題，
+不影響上面MATCH驗證的有效性(驗證的是「初始狀態跟套用後狀態是否一致」
+這件事本身，不是筆數多寡)。「觀察清單」補的「資料更新至」也用
+Playwright截圖確認顯示位置跟大盤/產業輪動/個股資訊分頁一致。

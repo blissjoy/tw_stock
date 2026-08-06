@@ -1429,8 +1429,18 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     st.session_state["pending_delete_group_id"] = None
                     st.rerun()
 
-        if st.button("➕ 新增股票", key="watchlist_add_stock"):
-            _watchlist_stock_dialog(group_id, None)
+        # 「資料更新至」：2026-08-05新增，比照桌面版desktop/main_window.py的
+        # watchlist_update_label(_build_watchlist_tab()，工具列最右邊)——先前web版
+        # 這個分頁完全沒有這個時間戳，屬於漏做的部分，不是刻意簡化(跟同一批次
+        # 刻意簡化的①欄位顯示選單②雙列表頭③籌碼欄位逐格套色三點不同)。
+        add_col, update_col = st.columns([1, 3])
+        with add_col:
+            if st.button("➕ 新增股票", key="watchlist_add_stock"):
+                _watchlist_stock_dialog(group_id, None)
+        with update_col:
+            update_ts = get_latest_update_time(conn)
+            update_label = datetime.fromisoformat(update_ts).strftime("%Y-%m-%d %H:%M") if update_ts else "尚無資料"
+            st.caption(f"資料更新至　{update_label}")
 
         watchlist_df = portfolio_data.load_watchlist(conn, portfolio_conn, group_id)
         if watchlist_df.empty:
@@ -1898,10 +1908,21 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             help="勾選時只保留當天有觸發朱家泓規則的股票；取消勾選則不限制，均線/SAR等條件會對全市場掃描",
         )
 
+        # ⚠️ 2026-08-06修正真實bug：這裡先前是獨立寫死一組"active_filters: []、
+        # sar_flip_option: None、market: None"等等，跟上面checkbox/下拉實際顯示的
+        # 預設值(CANDIDATE_FILTER_DEFAULTS/CANDIDATE_SAR_FLIP_ENABLED_DEFAULT等)完全
+        # 對不上——使用者第一次進這個分頁、還沒按過「套用篩選」前，畫面上打勾的條件
+        # 跟下面候選清單表格實際套用的條件是兩組不同的東西(表格顯示的是這裡寫死的
+        # 「無篩選」狀態)，改成直接拿上面剛算好的active_filters/sar_flip_option/
+        # zhu_rule_only/market_label/selected_industries/min_volume_lots_input初始化，
+        # 保證第一次進來時「畫面勾的」跟「表格套用的」一致；deferred-apply設計本身
+        # 不變(改完checkbox還是要按「套用篩選」才會重新套用)，只有初始值的來源改了。
         if "applied_filters" not in st.session_state:
             st.session_state["applied_filters"] = {
-                "active_filters": [], "sar_flip_option": None, "zhu_rule_only": True,
-                "market": None, "industries": [], "min_volume_lots": 10,
+                "active_filters": active_filters, "sar_flip_option": sar_flip_option,
+                "zhu_rule_only": zhu_rule_only,
+                "market": _MARKET_FILTER_VALUES.get(market_label),
+                "industries": selected_industries, "min_volume_lots": int(min_volume_lots_input),
             }
         with apply_col:
             st.markdown("&nbsp;")  # 對齊上面其他欄位的label高度，讓按鈕跟輸入框大致同一條水平線
