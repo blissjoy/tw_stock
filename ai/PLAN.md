@@ -7340,3 +7340,52 @@ headless測試框架(這個專案至今沒有desktop UI的自動化測試)，改
 數字精確吻合(2330: 105.00/100.00/106.00/100.00/+5.00/+5.00/8張；2454:
 48.00/50.00/49.00/47.00/-2.00/-4.00/6張)；③加總不變量在原始股數層級
 精確相等(14000=14000)；④再點一次正確收合。
+
+---
+
+## 產業輪動QTreeWidget UI微調：展開箭頭一開始就要看得到、展開列底色、淡格線
+（2026-08-06）
+
+背景：上一批產業輪動點開個股明細的功能上線後，使用者對桌面版QTreeWidget
+提出三點體驗回饋：①展開箭頭應該每個產業列都一開始就看得到，不是點過
+才出現；②目前被展開的產業列可以有底色；③展開的明細列能不能有淡淡的
+table線，整體排版不要「白白一塊」。這三點用詞(箭頭/展開)是Qt特有的
+概念，判斷是桌面版專屬回饋，web版沒有對應的元件(web是點列→下方顯示
+表格，Streamlit原生st.dataframe()本來就有格線，不是空白區塊)，這批
+只改桌面版。
+
+**①箭頭要一開始就看得到**：根因是子列採用延後查詢(`_populate_
+industry_stock_children()`只在真的展開時才查該產業的個股明細，避免
+每次重新整理都要對全部產業各查一次)，`parent_item`剛建立時`childCount()
+== 0`，QTreeWidget預設「只有childCount()>0的item才畫箭頭」，導致箭頭
+要等使用者「用其他方式(點股票數欄文字)展開過一次、子列補上去了」才會
+出現——標準的Qt「延遲載入樹狀結構」寫法是显式`parent_item.
+setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.
+ShowIndicator)`，強制一律畫箭頭，即使目前還沒有子節點；點了箭頭一樣會
+正常觸發`itemExpanded`訊號補資料。庫存清單的QTreeWidget不用這個設定，
+因為庫存清單的子列(批次明細)重新整理當下就全部建好，本來就
+`childCount()>0`，跟產業輪動延後查詢的情境不同。
+
+**②展開列底色**：把「點股票數欄/點箭頭觸發展開」的邏輯改成統一走
+`QTreeWidget.itemExpanded`/`itemCollapsed`兩個訊號(不管展開動作從哪裡
+觸發——原生箭頭、股票數欄文字點擊、還是`_refresh_industry_rotation_
+tab()`重新整理後程式碼還原展開狀態——都會走到同一套處理)：展開時
+(`_on_industry_tree_item_expanded()`)第一次展開才查個股明細(`childCount
+()==0`才補)、套上淡藍色底色(`#E3F0FC`)；收合時(`_on_industry_tree_item_
+collapsed()`)清成透明。`_on_industry_tree_item_clicked()`(點股票數欄
+文字)簡化成只負責`item.setExpanded(not item.isExpanded())`切換狀態，
+補資料/套底色都交給訊號處理，不會有兩份重複邏輯要維護。
+
+**③淡格線**：QTreeWidget沒有像QTableWidget那種原生`setShowGrid()`，
+改用stylesheet模擬：`QTreeWidget::item { border-bottom: 1px solid
+#e5e5e5; }`(淡灰色底部分隔線)+`setAlternatingRowColors(True)`(交錯列
+底色)，讓整體排版不再是大片空白，同時不會蓋掉②的展開列底色(展開列
+的底色是逐item設定，優先權比alternating row color高)。
+
+真實驗證：`pytest tests/ -q`1025個測試全數通過(這批沒有動到底層查詢
+函式，不影響既有測試)。桌面版沒有現成的headless測試框架，延用上一批
+`QT_QPA_PLATFORM=offscreen`的煙霧測試手法(不進版控)重新驗證：①兩個
+產業列在完全還沒展開過的情況下，`childIndicatorPolicy()`就已經是
+`ShowIndicator`、`childCount()`仍是0(確認箭頭在補資料前就看得到)；
+②展開後背景色RGB精確等於`(227, 240, 252)`(即`#E3F0FC`)；③收合後
+alpha變回0(透明，正確清除)。

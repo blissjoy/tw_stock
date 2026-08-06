@@ -1600,7 +1600,17 @@ class MainWindow(QMainWindow):
         self.industry_tree = QTreeWidget()
         self.industry_tree.setColumnCount(len(_INDUSTRY_TREE_HEADERS))
         self.industry_tree.setHeaderLabels(_INDUSTRY_TREE_HEADERS)
-        self.industry_tree.setStyleSheet("QTreeWidget::item { padding-right: 10px; }")
+        # 2026-08-06使用者反映：①展開箭頭要一開始就看得到(不是點過才出現)——QTreeWidget
+        # 預設只有「childCount()>0」的item才畫箭頭，這裡的子列是延後查詢(見_populate_
+        # industry_stock_children())，一開始建parent_item時是真的沒有子節點，所以每個
+        # 產業列都要顯式setChildIndicatorPolicy(ShowIndicator)強制畫出箭頭，即使還沒有
+        # 子節點(標準的「延遲載入樹狀結構」Qt寫法)。②整體排版太單調(大片空白)，加淡淡的
+        # 底部分隔線+交錯列底色，不是QTableWidget那種完整格線(QTreeWidget沒有原生
+        # setShowGrid()，用stylesheet模擬)。
+        self.industry_tree.setStyleSheet(
+            "QTreeWidget::item { padding-right: 10px; border-bottom: 1px solid #e5e5e5; }"
+        )
+        self.industry_tree.setAlternatingRowColors(True)
         header = self.industry_tree.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -1608,20 +1618,50 @@ class MainWindow(QMainWindow):
         self.industry_tree.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
         self.industry_tree.setSortingEnabled(True)
         self.industry_tree.itemClicked.connect(self._on_industry_tree_item_clicked)
+        # 展開/收合狀態變化(不管是使用者點原生箭頭、點「股票數」欄、還是重新整理後
+        # 程式碼還原展開狀態)統一走這兩個訊號處理：展開時第一次補上子列資料+套用底色，
+        # 收合時清掉底色。見_on_industry_tree_item_expanded()的說明。
+        self.industry_tree.itemExpanded.connect(self._on_industry_tree_item_expanded)
+        self.industry_tree.itemCollapsed.connect(self._on_industry_tree_item_collapsed)
         rotation_layout.addWidget(self.industry_tree, stretch=1)
 
     def _on_industry_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        """點「股票數」欄位文字也能展開/收合——不是只能點原生箭頭那個小三角，跟庫存
+        清單「批次數」欄位的既有慣例一致。實際補資料/套底色的邏輯統一交給itemExpanded/
+        itemCollapsed訊號處理(見_on_industry_tree_item_expanded())，這裡只負責觸發
+        setExpanded()狀態切換本身，不管是點這裡還是點原生箭頭，最後都會走到同一套
+        訊號處理，不會有兩份邏輯要維護。
+        """
         if column != _INDUSTRY_TREE_STOCK_COUNT_COLUMN:
             return
+        if item.data(0, Qt.ItemDataRole.UserRole) is None:
+            return  # 子列(個股)本身沒有設這個UserRole，點子列的這一欄不會誤觸發
+        item.setExpanded(not item.isExpanded())
+
+    def _on_industry_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
+        """展開時觸發，不管展開動作是使用者點原生箭頭、點「股票數」欄文字、還是
+        _refresh_industry_rotation_tab()重新整理後程式碼還原展開狀態，都會走到這裡。
+        第一次展開(還沒查過個股明細)才即時查、補上子列——避免每次重新整理都要對
+        「全部」產業各查一次個股明細(大部分產業使用者根本不會展開)，只在真的要展開時
+        才查那一個產業；已經查過的產業(childCount()>0)不重複查。展開的產業列套上
+        淡色底色，讓使用者一眼看出目前哪個產業是展開狀態。
+        """
         industry = item.data(0, Qt.ItemDataRole.UserRole)
         if industry is None:
-            return  # 子列(個股)本身沒有設這個UserRole，點子列的這一欄不會誤觸發
+            return
         if item.childCount() == 0:
-            # 第一次展開這個產業，之前還沒查過個股明細——即時查、補上子列。避免
-            # _refresh_industry_rotation_tab()每次重新整理都要對「全部」產業各查一次
-            # 個股明細(大部分產業使用者根本不會展開)，只在真的要展開時才查那一個產業。
             self._populate_industry_stock_children(item, industry)
-        item.setExpanded(not item.isExpanded())
+        self._set_industry_item_expanded_style(item, expanded=True)
+
+    def _on_industry_tree_item_collapsed(self, item: QTreeWidgetItem) -> None:
+        if item.data(0, Qt.ItemDataRole.UserRole) is None:
+            return
+        self._set_industry_item_expanded_style(item, expanded=False)
+
+    def _set_industry_item_expanded_style(self, item: QTreeWidgetItem, expanded: bool) -> None:
+        color = QColor("#E3F0FC") if expanded else QColor(Qt.GlobalColor.transparent)
+        for col in range(self.industry_tree.columnCount()):
+            item.setBackground(col, color)
 
     @staticmethod
     def _format_industry_stock_row(row: pd.Series) -> list[str]:
@@ -1642,7 +1682,7 @@ class MainWindow(QMainWindow):
 
     def _populate_industry_stock_children(self, parent_item: QTreeWidgetItem, industry: str) -> None:
         """幫一個產業別的父列補上個股明細子列，`_refresh_industry_rotation_tab()`
-        (還原重新整理前已展開的產業)、`_on_industry_tree_item_clicked()`(使用者第一次
+        (還原重新整理前已展開的產業)、`_on_industry_tree_item_expanded()`(使用者第一次
         點開某個產業)共用這個方法，避免兩處各寫一份幾乎一樣的填值邏輯。"""
         if self.conn is None:
             return
@@ -1683,6 +1723,13 @@ class MainWindow(QMainWindow):
         if latest_date is not None:
             for _, row in df.reset_index(drop=True).iterrows():
                 parent_item = _NumericTreeWidgetItem()
+                # 子列是延後查詢(見_populate_industry_stock_children())，這裡建parent_
+                # item時實際上還沒有任何子節點，QTreeWidget預設「childCount()>0才畫箭頭」
+                # 的行為會讓箭頭要等使用者點過一次(觸發查詢補上子列)才出現，使用者反映
+                # 這樣很奇怪——改成強制一律顯示箭頭，即使目前還沒有子節點，跟庫存清單的
+                # QTreeWidget不同：庫存清單的子列是重新整理當下就全部建好，本來就
+                # childCount()>0，不需要這個設定。
+                parent_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
                 values = [
                     row["industry"],
                     "",  # 名稱：產業彙總列沒有對應的個股名稱
