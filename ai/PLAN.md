@@ -7528,3 +7528,61 @@ selectionModel()，不受這次修改影響。
 candidate_stock_ids()`正確回傳勾選的股票代號；呼叫`_navigate_to_
 candidate_row()`(模擬雙擊)確認正確跳轉到個股資訊分頁、`_current_
 stock_id`正確設定。
+
+---
+
+## web版候選清單改成點「名稱」欄跳轉；批次動作按鈕靠左排列
+（2026-08-06）
+
+背景：使用者對上一批的「勾選checkbox+查看個股資訊按鈕」方案仍不滿意，
+提出兩個新要求：①名稱欄改成可點連結，點了直接導向個股資訊；②「加入
+庫存」/「加入觀察清單」按鈕應該靠左顯示，不要平分整列寬度(PC大螢幕
+解析度高時看起來很零散)，並指出這是「很多版面都有的問題」。
+
+**①名稱欄可點查證**：直接讀`streamlit`套件本身的原始碼(`elements/
+arrow.py`的`DataframeSelectionState`)，確認`selection_mode`可以混用
+`["multi-row", "single-cell"]`(官方docstring範例也示範過`["single-
+cell", "single-row", "single-column"]`這種組合)，回傳的`event.
+selection.cells`是`[(row_idx, column_name)]`清單，勾選欄本身不算資料
+欄、不會出現在`cells`裡——不需要真的做成`<a href>`連結(那樣要另外接
+`st.query_params`橋接目前的session_state導航機制，架構改動大很多)，
+用`selection_mode`混用就能精確判斷「使用者點的是不是名稱欄」。
+
+**候選清單表格(`dashboard/app.py`)**：`candidates_table`的`selection_
+mode`改成`["multi-row", "single-cell"]`——multi-row(勾選欄)維持給
+「加入庫存/加入觀察清單」批次動作用，跟single-cell(判斷有沒有點到
+「名稱」欄)完全獨立、互不干擾。點到「名稱」欄的儲存格就直接跳轉個股
+資訊(邏輯跟舊版single-row selection時的跳轉邏輯相同，只是觸發條件
+從「選取任一列」改成「點名稱儲存格」)。
+
+⚠️ 踩到一個新的坑：`single-cell`的選取狀態會持續留在`st.session_state
+["candidates_table"]`裡，使用者點完名稱跳轉到個股資訊後，如果之後手動
+切回「選股」分頁，`st.dataframe()`還記得上次點過的那個「名稱」儲存格，
+會被誤判成「又點了一次」，再度觸發跳轉，使用者會發現自己卡在選股分頁
+待不住(每次切過去都被彈回個股資訊)。修法比照`_pending_active_tab`的
+中介key模式：跳轉當下額外設一個`_pending_candidates_table_reset`
+中介key，下一輪script重新執行到`st.tabs()`建立"之前"(這時候`candidates_
+table`這個widget key還沒被下一輪的`st.dataframe()`呼叫instantiate過，
+可以合法寫入)，把`st.session_state["candidates_table"]`整個重設成空的
+selection狀態，這樣切回選股分頁時就不會有殘留的「名稱」儲存格選取
+狀態誤觸發跳轉。
+
+**②按鈕靠左排列**：`action_col1, action_col2, spacer_col = st.columns(
+[1, 1.4, 4])`取代原本`st.columns([1, 1, 1])`平分寬度的寫法——按鈕本身
+(`st.button()`預設`width="content"`，本來就不會被拉寬)沒有問題，問題
+是外層欄位平分整列寬度時，欄位之間會被拉出很大的空隙，改成窄欄位+
+最後一個吸收剩餘空間的spacer欄位，讓按鈕聚在畫面左側。這批只先改了
+候選清單這一處，使用者提到「很多版面都是這問題」，還沒進一步確認要
+不要對其他分頁的類似按鈕列(庫存清單/觀察清單的編輯/刪除按鈕等)做同樣
+處理，之後如果使用者提出再處理。
+
+真實驗證：`pytest tests/ -q`1025個測試全數通過。⚠️ 這次沒有跑完整的
+真瀏覽器互動驗證——本機記憶體這批開始時只剩2.5GB左右，Streamlit啟動
+沒多久就撞到`OpenBLAS`記憶體不足crash(這是這個session第二次撞到同一
+種環境限制，已經跟使用者說明)。改成依賴：①`pytest`測試套件全數通過；
+②直接讀streamlit套件原始碼確認`selection_mode`混用+`cells`回傳格式
+的行為(不是憑印象或只查文件字面敘述)；③邏輯上覆核`_pending_
+candidates_table_reset`中介key的執行順序跟`_pending_active_tab`完全
+一致(這個既有機制已經在多個批次被驗證過可以正常運作)。這批的信心
+程度比其他批次(通常有真瀏覽器截圖或headless smoke test佐證)低，已經
+如實告知使用者，建議之後記憶體充裕時實際點一次「名稱」欄複查。

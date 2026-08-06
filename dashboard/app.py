@@ -1841,6 +1841,14 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         st.session_state["active_tab"] = st.session_state.pop("_pending_active_tab")
     elif "active_tab" not in st.session_state:
         st.session_state["active_tab"] = TAB_SCREENER
+    # 候選清單表格點「名稱」欄跳轉個股資訊後(見下面TAB_SCREENER的說明)，要把這次觸發
+    # 跳轉的cell selection清掉，不然使用者之後手動切回「選股」分頁時，st.dataframe()
+    # 還記得上次選到的那個「名稱」儲存格，會被誤判成「使用者又點了一次」再度跳轉，
+    # 造成使用者卡在「選股」分頁待不住的迴圈——同一個「widget instantiate前才能寫入」
+    # 限制，比照上面_pending_active_tab的中介key模式處理。
+    if "_pending_candidates_table_reset" in st.session_state:
+        st.session_state.pop("_pending_candidates_table_reset")
+        st.session_state["candidates_table"] = {"selection": {"rows": [], "columns": [], "cells": []}}
     tab_market, tab_screener, tab_stock_detail, tab_industry, tab_inventory, tab_watchlist, tab_backfill = st.tabs(
         TAB_OPTIONS, key="active_tab", on_change="rerun",
     )
@@ -2147,14 +2155,15 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     # 個股資訊」很奇怪——勾選是要做「加入庫存/加入觀察清單」批次動作，
                     # 跟「查看這檔股票」是兩件不同的事，卻共用同一個single-row selection
                     # 觸發跳轉。查證過st.dataframe()沒有雙擊事件可用(streamlit issue
-                    # #10190/#10212，官方連「單擊 vs 選取」都還沒分開，更別說雙擊，需要
-                    # 裝streamlit-aggrid這種第三方套件+自寫JS才能做到真正的雙擊，跟現有
-                    # 原生元件風格不一致、維護成本高，這裡不採用)。改成：①selection_mode
-                    # 改成multi-row，變成桌面版那種勾選checkbox的效果，純粹用於批次動作，
-                    # 不會觸發跳轉；②跳轉改成明確的「🔍 查看個股資訊」按鈕，勾選剛好一檔
-                    # 才能點；③批次動作按鈕(加入庫存/加入觀察清單)搬到表格上方，直接讀
-                    # multi-row selection，不用像之前那樣另外開一個multiselect下拉重複
-                    # 選一次。
+                    # #10190/#10212，官方連「單擊 vs 選取」都還沒分開，更別說雙擊)。
+                    # 使用者接著提議「名稱」欄改成可點連結跳轉——查證selection_mode可以
+                    # 同時混用["multi-row", "single-cell"]，回傳的event.selection.cells
+                    # 是(row, column_name)清單，可以精確判斷「使用者點的是不是名稱欄」，
+                    # 不用真的做成`<a href>`連結(那樣要另外接st.query_params橋接，架構
+                    # 改動大很多)：①selection_mode混用multi-row(勾選欄，批次動作用)+
+                    # single-cell(判斷有沒有點到「名稱」欄，點到就跳轉個股資訊)；②批次
+                    # 動作按鈕(加入庫存/加入觀察清單)搬到表格上方，直接讀multi-row
+                    # selection。
                     #
                     # 讀「上一輪」的selection狀態：這一輪script重新執行時，使用者剛做的
                     # 勾選/取消勾選已經先寫進session_state了，比下面真正呼叫st.dataframe()
@@ -2166,7 +2175,10 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                         str(candidates_df.iloc[i]["stock_id"]) for i in prior_selection_rows if i < len(candidates_df)
                     ]
 
-                    action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
+                    # 2026-08-06使用者反映按鈕用st.columns([1,1,1])平分整列寬度，PC大螢幕
+                    # 解析度高時看起來很零散(按鈕本身寬度不變，但欄位之間空隙被拉得很開)。
+                    # 改成窄欄位+一個吸收剩餘空間的spacer，讓按鈕都靠左緊貼在一起。
+                    action_col1, action_col2, spacer_col = st.columns([1, 1.4, 4])
                     with action_col1:
                         if st.button("➕ 加入庫存", key="candidates_add_to_inventory"):
                             if not bulk_selected_ids:
@@ -2180,27 +2192,8 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                                 st.warning("請至少勾選一檔股票。")
                             else:
                                 _watchlist_group_picker_dialog(bulk_selected_ids)
-                    with action_col3:
-                        if st.button("🔍 查看個股資訊", key="candidates_view_detail"):
-                            if len(bulk_selected_ids) != 1:
-                                st.warning("請勾選剛好一檔股票再查看。")
-                            else:
-                                # 記錄來源候選清單日期，供「個股資訊」分頁右上角顯示「來源：
-                                # X月X日的選股策略」；順便清掉手動查詢欄位殘留的舊文字(不然
-                                # 下面「個股資訊」分頁重新渲染時，text_input帶著上次查詢的
-                                # 舊文字又會把這裡剛設定的stock_id蓋掉，見下面TAB_STOCK_
-                                # DETAIL分支的說明)，再切到該分頁。
-                                st.session_state["detail_stock_id"] = bulk_selected_ids[0]
-                                st.session_state["detail_stock_source"] = selected_date or latest_date
-                                st.session_state["detail_query_input"] = ""
-                                # 不能直接寫st.session_state["active_tab"](tabs widget已經
-                                # 在這輪script執行的更上面instantiate過了)，寫中介key、下
-                                # 一輪script重新執行到tabs建立"之前"再轉寫進active_tab，
-                                # 見上面的說明。
-                                st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
-                                st.rerun()
 
-                    st.caption("勾選左側checkbox可批次「加入庫存」/「加入觀察清單」；勾選剛好一檔後可點「🔍 查看個股資訊」")
+                    st.caption("勾選左側checkbox可批次「加入庫存」/「加入觀察清單」；點「名稱」欄可直接查看個股資訊")
 
                     def _style_name_by_listing_type(row: pd.Series) -> list[str]:
                         # 依上市/上櫃/興櫃上色股票名稱，照抄桌面版main_window.py的listing_type_
@@ -2223,10 +2216,10 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     candidates_df["sar_value"] = candidates_df["sar_value"].apply(lambda v: _fmt_or_dash(v, 2))
                     candidates_df["sar_distance_pct"] = candidates_df["sar_distance_pct"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
 
-                    st.dataframe(
+                    event = st.dataframe(
                         candidates_df.style.apply(_style_name_by_listing_type, axis=1),
                         use_container_width=True, hide_index=True,
-                        on_select="rerun", selection_mode="multi-row", key="candidates_table",
+                        on_select="rerun", selection_mode=["multi-row", "single-cell"], key="candidates_table",
                         column_order=[
                             "stock_id", "name", "industry", "signal_name", "close", "entry_price",
                             "stop_loss", "pct_change", "volume", "sar_value", "sar_status", "sar_distance_pct",
@@ -2239,6 +2232,29 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                             "sar_value": "SAR值", "sar_status": "SAR狀態", "sar_distance_pct": "SAR距離%",
                         },
                     )
+                    # 點「名稱」欄的儲存格(single-cell selection，跟上面批次動作用的
+                    # multi-row勾選欄各自獨立、互不干擾)就跳轉個股資訊——event.selection.
+                    # cells是[(row_idx, column_name)]清單，column_name=="name"代表點到
+                    # 名稱欄，不是勾選欄(勾選欄不算資料欄，不會出現在cells裡)。
+                    name_clicked_row = next(
+                        (row for row, col in event.selection.cells if col == "name"), None,
+                    )
+                    if name_clicked_row is not None:
+                        selected_stock_id = str(candidates_df.iloc[name_clicked_row]["stock_id"])
+                        # 記錄來源候選清單日期，供「個股資訊」分頁右上角顯示「來源：X月X日的
+                        # 選股策略」；順便清掉手動查詢欄位殘留的舊文字(不然下面「個股資訊」
+                        # 分頁重新渲染時，text_input帶著上次查詢的舊文字又會把這裡剛設定的
+                        # stock_id蓋掉，見下面TAB_STOCK_DETAIL分支的說明)，再切到該分頁。
+                        st.session_state["detail_stock_id"] = selected_stock_id
+                        st.session_state["detail_stock_source"] = selected_date or latest_date
+                        st.session_state["detail_query_input"] = ""
+                        st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
+                        # 順便排定下一輪把這個cell selection清掉(見main()開頭的說明)，
+                        # 不然使用者之後切回「選股」分頁時，st.dataframe()還記得上次點過
+                        # 的「名稱」儲存格，會被誤判成「又點了一次」再度跳轉，卡在「選股」
+                        # 分頁待不住。
+                        st.session_state["_pending_candidates_table_reset"] = True
+                        st.rerun()
 
     with tab_stock_detail:
         if tab_stock_detail.open:
