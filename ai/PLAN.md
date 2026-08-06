@@ -7191,3 +7191,85 @@ filters()`或動態讀常數本身的既有測試不受影響，沒有寫死True
 **待辦(使用者已表態方向，尚未安排時程)**：使用者確認之後要幫web版做
 「使用者自己改過篩選條件時要記住」的功能，選用先前提過的localStorage
 方案(不是cookie)，之後另外排時間處理，這批不含實作。
+
+---
+
+## 觀察清單拿掉成本/損益欄位；頂層分頁改用真正的st.tabs()
+（2026-08-06）
+
+背景：上一批修完朱家泓乾淨預設值後，使用者一次提出三件事：①觀察清單
+的「參考成本價/參考股數/市值/帳面損益/報酬率」放在那裡沒有意義，可以
+拿掉；②頂層分頁(大盤/選股/個股資訊...)目前用st.radio模擬分頁列，看
+起來很怪，應該像「個股資訊」內層那樣用真正的分頁；③web版篩選條件跟
+清單資料還是對不上，要求實際操作「從大盤切到選股」重現。
+
+**③篩選條件/清單對不上的複查**：用`streamlit.testing.v1.AppTest`(比
+真的瀏覽器操作更精準)跑最新程式碼＋正式本機DB，模擬「選股→大盤→選股→
+大盤→選股」反覆切換，每次都檢查SAR/朱家泓勾選狀態跟候選清單筆數——
+結果**完全一致**，沒有重現出對不上的情況(SAR翻轉=True、朱家泓=False、
+候選清單筆數在來回切換間沒有變過)。判斷使用者當下測的仍是稍早那批
+Zhu預設值修正還沒生效前的部署(Streamlit Cloud重新部署delay，或瀏覽器
+分頁還留著舊session)，已請使用者硬重新整理後再驗證一次，這批沒有再
+改動篩選邏輯本身。
+
+**①觀察清單欄位**：使用者確認web+桌面版都要拿掉(桌面版也有這幾欄，
+不是web版獨有的落差)。桌面版`desktop/main_window.py`：
+- `_StockEditDialog`(新增/編輯觀察股票的共用對話框)的「成本價」「持股數」
+  輸入框改成只在`is_inventory=True`(庫存清單)時才建立，觀察清單模式下
+  `self.cost_price_input`/`self.shares_input`是`None`，`values()`對應
+  回傳`None`。
+- `_populate_portfolio_table()`(現在只有觀察清單在用，docstring原本
+  「庫存清單／觀察清單共用」的說法是2026-08-02庫存清單改用QTreeWidget
+  前留下來的舊說法)的填值邏輯拿掉成本價/持股數/市值/帳面損益/報酬率
+  這5個欄位，只剩股票代號/名稱/現價/漲跌幅(%)/SAR狀態/SAR距離%。
+- `_PORTFOLIO_BASE_COLUMN_COUNT`從11改成6、`_PORTFOLIO_NUMERIC_COLUMNS`
+  從`{2,3,4,5,6,7,8,10}`改成`{2,3,5}`、`_WATCHLIST_COLUMN_TOGGLE_GROUPS`
+  清空(這5欄的「欄位顯示」切換選項不再存在)、`_WATCHLIST_TECH_TOGGLE_
+  COLUMNS`從`[9,10]`改成`[4,5]`、`_WATCHLIST_CHIP_GROUP_LABELS`四組
+  欄位索引整組往前移5(黃豐凱籌碼欄位改從索引6開始，原本是11)。
+- 拿掉觀察清單分頁上方「總參考成本/總觀察市值/累積預估損益/今日資產
+  變動」的`self.watchlist_summary_label`摘要列——跟表格欄位同一個理由，
+  成本價/持股數輸入框都拿掉了，這行摘要之後只會永遠顯示0，留著沒意義。
+
+web版`dashboard/app.py`同步調整：`_watchlist_stock_dialog()`拿掉「參考
+成本價」「參考股數」`st.number_input`，新增/編輯一律傳`None`(`add_
+watchlist_stock()`/`update_watchlist_stock()`的這兩個參數本來就是
+optional，DB schema不用改)；`render_watchlist_tab()`拿掉`_portfolio_
+summary_text()`摘要caption、`watchlist_display`裡對應的格式化欄位、
+`st.dataframe()`的`column_order`/`column_config`裡的5個欄位。底層
+`portfolio_data.load_watchlist()`回傳的DataFrame結構不變(仍含這些欄位，
+只是不再顯示)，避免動到DB查詢層。
+
+**②頂層分頁改用st.tabs()**：我原本沿用程式碼裡舊註解的說法回覆「st.
+tabs()不支援程式碼切換分頁，改用st.radio是唯一做法」，使用者不接受
+（「不可能做不到，我公司的系統是可以切分頁的」），要求重新查證。實際
+查目前安裝的`streamlit==1.60.0`的`st.tabs()` signature，發現新增了
+`key`/`on_change`/`default`參數：`key`+`on_change="rerun"`時，tabs會
+「track state」，可以透過`st.session_state[key]`讀寫目前分頁(跟`st.
+radio`的`key`行為一致)，每個`TabContainer`也多了`.open`布林屬性判斷
+是否為目前選取的分頁——這個能力是這次才發現的，舊註解是根據更早期
+streamlit版本寫的，已經過時，使用者是對的。
+
+實作：把原本`active_tab = st.radio(...)` + `if active_tab == X: ...
+elif ...`這種「radio決定哪個if/elif分支執行」的寫法，改成`tab_market,
+tab_screener, ... = st.tabs(TAB_OPTIONS, key="active_tab", on_change=
+"rerun")` + 每個分頁各自`with tab_x: if tab_x.open: <原本的分支內容，
+整段內縮4格>`——`with`決定畫面上的DOM位置(哪個分頁面板)，`.open`判斷
+式維持原本「非目前分頁的內容不用真的執行」的效能考量(桌面版一直都有
+這個特性，例如大盤的K線圖不會在使用者停留在選股分頁時還跑去重算)。
+`_pending_active_tab`中介key的機制(候選清單點列→跳到個股資訊分頁並
+帶入該股票，見2026-08-01的說明)完全不用改，因為`st.tabs()`的`key`
+行為跟`st.radio`一致，一樣是「widget instantiate前才能寫入session_
+state」的限制，一樣需要這個中介key繞過去。這是一次性的自動化重新縮排
+腳本(不進版控)套用到約400行的7個分支內容，逐行加4格縮排、`if/elif`
+換成`with ...: if ...open:`兩行，沒有更動任何分支內部的邏輯本身。
+
+真實驗證：`pytest tests/ -q`1020個測試全數通過。`streamlit.testing.
+v1.AppTest`模擬「選股→大盤→選股→大盤→選股」反覆切換，每次都確認
+subheader正確隨分頁顯示/消失、無例外；額外驗證`_pending_active_tab`
+機制(模擬候選清單點列跳轉)在改用`st.tabs()`後仍正常運作，`active_tab`
+正確變成「個股資訊」、無例外。這次受限於本機當下可用記憶體只剩不到
+1GB(使用者自己的桌面版`desktop/main.py`跟大量瀏覽器分頁同時開著)，
+沒有跑真瀏覽器Playwright截圖驗證視覺效果(先前跑大盤重K線圖時曾撞到
+`OpenBLAS error: Memory allocation still failed`直接crash)，這點已
+告知使用者，建議之後記憶體充裕時再截圖覆核一次視覺效果。

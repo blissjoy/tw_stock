@@ -105,12 +105,16 @@ _MARKET_FILTER_VALUES = {"上市": "TWSE", "上櫃": "TPEx"}
 # 上限影響，只是「顯示」被截斷，排序依據的資料沒有跟著縮水。
 CANDIDATE_SIGNAL_MAX_LINES = 5
 
-# 觀察清單表格共用的欄位結構(見_populate_portfolio_table())：
-# 股票代號/名稱/現價/漲跌幅(%)/成本價/持股數/市值/帳面損益/報酬率(%)/SAR狀態/SAR距離%
+# 觀察清單表格的欄位結構(見_populate_portfolio_table())：
+# 股票代號/名稱/現價/漲跌幅(%)/SAR狀態/SAR距離%
 # 2026-08-04：使用者要求拿掉「備註」欄位(觀察清單用不到，庫存清單的備註是
 # _INVENTORY_TREE_HEADERS另一份獨立清單，不受影響)。
-_PORTFOLIO_NUMERIC_COLUMNS = {2, 3, 4, 5, 6, 7, 8, 10}
-_PORTFOLIO_BASE_COLUMN_COUNT = 11
+# 2026-08-06：使用者反映觀察清單不是真的持股，成本價/持股數/市值/帳面損益/報酬率
+# 放在這裡沒有意義，拿掉這5欄(庫存清單改用QTreeWidget/_populate_inventory_tree()，
+# 不受影響，這裡從一開始就只有觀察清單在用，「共用」是2026-08-02改版前留下來的
+# 舊說法)。
+_PORTFOLIO_NUMERIC_COLUMNS = {2, 3, 5}
+_PORTFOLIO_BASE_COLUMN_COUNT = 6
 
 # 黃豐凱籌碼分析法(見src/indicators/huang_chip_signals.py，程式碼來源private)接在
 # 觀察清單表格既有12欄之後的額外欄位——2026-08-04新增，只接進觀察清單，跟_PORTFOLIO_
@@ -131,28 +135,24 @@ _HUANG_CHIP_NUMERIC_COLUMNS = {
 # 觀察清單「欄位顯示」下拉選單(見_build_watchlist_tab())的分組定義：{顯示文字: 欄位
 # 索引清單}——「技術面」/「籌碼面」是子選單，各自底下的欄位一起顯示/隱藏；其餘幾項
 # 是扁平的單一欄位開關。「股票代號/名稱/現價/漲跌幅」是識別用欄位，永遠顯示，不放進
-# 選單；「備註」使用者要求先不用做成可切換選項，維持恆常顯示。
-_WATCHLIST_COLUMN_TOGGLE_GROUPS: dict[str, list[int]] = {
-    "參考成本價": [4],
-    "參考股數": [5],
-    "市值": [6],
-    "帳面損益": [7],
-    "報酬率": [8],
-}
-_WATCHLIST_TECH_TOGGLE_COLUMNS = [9, 10]  # SAR狀態/SAR距離%
+# 選單；「備註」使用者要求先不用做成可切換選項，維持恆常顯示。2026-08-06：成本價/
+# 持股數/市值/帳面損益/報酬率欄位整組拿掉(理由見上面_PORTFOLIO_BASE_COLUMN_COUNT
+# 的說明)，這裡不再有對應的切換選項。
+_WATCHLIST_COLUMN_TOGGLE_GROUPS: dict[str, list[int]] = {}
+_WATCHLIST_TECH_TOGGLE_COLUMNS = [4, 5]  # SAR狀態/SAR距離%
 _WATCHLIST_CHIP_TOGGLE_COLUMNS = list(range(_PORTFOLIO_BASE_COLUMN_COUNT, _PORTFOLIO_BASE_COLUMN_COUNT + len(_HUANG_CHIP_HEADERS)))
 
 # 黃豐凱籌碼分析法欄位的「雙列表頭」分類群組(見_build_watchlist_group_header_table())：
 # 比照temp/鉸哥籌碼.jpg截圖的分類方式(法人近期籌碼/大戶散戶持股變化(週)/技術型態/
 # 法人買賣超（張數）)，{顯示文字: (底色, 欄位索引清單)}——這4組是視覺分類，跟「欄位
 # 顯示」下拉選單的顯示/隱藏開關粒度(籌碼面整組一起開關)是分開的兩件事，這裡只負責
-# 標籤怎麼分組顯示，不影響開關邏輯。前面11欄(股票代號~SAR距離%)是既有欄位，不屬於
+# 標籤怎麼分組顯示，不影響開關邏輯。前面6欄(股票代號~SAR距離%)是既有欄位，不屬於
 # 黃豐凱籌碼分析法，這排分類標籤在那個範圍留空。
 _WATCHLIST_CHIP_GROUP_LABELS: list[tuple[str, str, list[int]]] = [
-    ("法人近期籌碼", "#FCEBEB", [11, 12]),
-    ("大戶/散戶持股變化(週)", "#EEEDFE", [13, 14]),
-    ("技術型態", "#E1F5EE", [15, 16]),
-    ("法人買賣超（張數）", "#FAEEDA", [17, 18, 19, 20, 21, 22, 23, 24]),
+    ("法人近期籌碼", "#FCEBEB", [6, 7]),
+    ("大戶/散戶持股變化(週)", "#EEEDFE", [8, 9]),
+    ("技術型態", "#E1F5EE", [10, 11]),
+    ("法人買賣超（張數）", "#FAEEDA", [12, 13, 14, 15, 16, 17, 18, 19]),
 ]
 
 # 庫存清單改用QTreeWidget(彙總父列+可展開的批次明細子列，見_populate_inventory_
@@ -512,8 +512,8 @@ class _CheckableHeaderView(QHeaderView):
 
 
 class _StockEditDialog(QDialog):
-    """庫存清單／觀察清單共用的新增/編輯對話框：股票代號＋(買入日期)＋成本價＋
-    持股數＋(手續費)＋備註。2026-08-02新增(移植ref-project的inventory_list.py/
+    """庫存清單／觀察清單共用的新增/編輯對話框：股票代號＋(買入日期)＋(成本價＋
+    持股數＋手續費)＋備註。2026-08-02新增(移植ref-project的inventory_list.py/
     watchlist.py，兩者的編輯dialog欄位結構幾乎相同，這裡合併成一個共用class)。
 
     股票代號欄位離開焦點時用chart_data.resolve_stock_id()即時查名稱顯示在旁邊，
@@ -527,6 +527,11 @@ class _StockEditDialog(QDialog):
     亂改，要換股票應該是刪除重建，不是編輯」。is_inventory控制要不要顯示「買入
     日期」「手續費」這兩個庫存專屬欄位——觀察清單不是真的持股，不需要記錄買入
     日期/手續費，只有庫存清單的呼叫端會傳is_inventory=True。
+
+    ⚠️ 2026-08-06改版：「成本價」「持股數」也改成is_inventory才顯示——使用者反映
+    觀察清單不是真的持股，參考成本價/參考股數(連帶表格上衍生出來的市值/帳面損益/
+    報酬率)放在那裡沒有意義，觀察清單的新增/編輯對話框現在只剩股票代號＋備註兩欄，
+    values()回傳的cost_price/shares固定是None。
     """
 
     def __init__(
@@ -562,24 +567,31 @@ class _StockEditDialog(QDialog):
             self.buy_date_input.editingFinished.connect(self._normalize_buy_date)
             layout.addRow("買入日期：", self.buy_date_input)
 
-        # QDoubleSpinBox/QSpinBox沒有原生的「留空」狀態，用setSpecialValueText()
-        # 讓數值等於最小值(0)時顯示提示文字取代"0.00"，values()裡把0視為None——
-        # 成本價/持股數/手續費為0沒有實際意義，這個簡化不會誤傷真實情境。
-        self.cost_price_input = QDoubleSpinBox()
-        self.cost_price_input.setRange(0, 9_999_999)
-        self.cost_price_input.setDecimals(2)
-        self.cost_price_input.setSpecialValueText("（未填）")
-        self.cost_price_input.setValue(initial.get("cost_price") or 0)
-        layout.addRow("成本價：", self.cost_price_input)
-
-        self.shares_input = QSpinBox()
-        self.shares_input.setRange(0, 999_999_999)
-        self.shares_input.setSpecialValueText("（未填）")
-        self.shares_input.setValue(int(initial.get("shares") or 0))
-        layout.addRow("持股數：", self.shares_input)
-
+        # 2026-08-06修正：成本價/持股數(連帶市值/帳面損益/報酬率)只有庫存清單需要
+        # (真的有持股才有成本基礎可言)，觀察清單不是真的持股，使用者反映「參考成本價/
+        # 參考股數/市值/帳面損益/報酬率」放在觀察清單沒有意義，改成只在is_inventory
+        # 時才建立這兩個輸入框；觀察清單完全不收集這兩個值(values()固定回傳None，
+        # 見下面的說明)。
+        self.cost_price_input: QDoubleSpinBox | None = None
+        self.shares_input: QSpinBox | None = None
         self.fee_estimate_label = QLabel("")
         if is_inventory:
+            # QDoubleSpinBox/QSpinBox沒有原生的「留空」狀態，用setSpecialValueText()
+            # 讓數值等於最小值(0)時顯示提示文字取代"0.00"，values()裡把0視為None——
+            # 成本價/持股數/手續費為0沒有實際意義，這個簡化不會誤傷真實情境。
+            self.cost_price_input = QDoubleSpinBox()
+            self.cost_price_input.setRange(0, 9_999_999)
+            self.cost_price_input.setDecimals(2)
+            self.cost_price_input.setSpecialValueText("（未填）")
+            self.cost_price_input.setValue(initial.get("cost_price") or 0)
+            layout.addRow("成本價：", self.cost_price_input)
+
+            self.shares_input = QSpinBox()
+            self.shares_input.setRange(0, 999_999_999)
+            self.shares_input.setSpecialValueText("（未填）")
+            self.shares_input.setValue(int(initial.get("shares") or 0))
+            layout.addRow("持股數：", self.shares_input)
+
             # 手續費：2026-08-02改版，使用者反映庫存/證券app本來就內含這筆費用，
             # 新增庫存時不應該還要自己查來填——改成系統依成本價×股數自動估算
             # (見src/presentation/portfolio_data.py的estimate_buy_fee())，這裡
@@ -658,8 +670,8 @@ class _StockEditDialog(QDialog):
         系統自動估算的結果(見_update_fee_estimate()/portfolio_data.estimate_
         buy_fee())，不是使用者輸入，觀察清單(is_inventory=False)不需要這個概念，
         固定回傳None。"""
-        cost_price = self.cost_price_input.value() or None
-        shares = self.shares_input.value() or None
+        cost_price = self.cost_price_input.value() or None if self.cost_price_input is not None else None
+        shares = self.shares_input.value() or None if self.shares_input is not None else None
         return {
             "stock_id": self._result_stock_id,
             "buy_date": self.buy_date_input.text().strip() or None,
@@ -1612,9 +1624,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _populate_portfolio_table(self, table: QTableWidget, df: pd.DataFrame) -> None:
-        """庫存清單／觀察清單共用的表格填值邏輯，兩者資料結構(portfolio_data.load_
-        inventory()/load_watchlist()回傳的DataFrame)完全一致，只有表頭文字(成本價 vs
-        參考成本價)不同，那個在各自_build_*_tab()裡設定，不影響這裡的填值邏輯。
+        """觀察清單表格的填值邏輯(庫存清單改用QTreeWidget/_populate_inventory_tree()，
+        不經過這裡)。df仍然是portfolio_data.load_watchlist()回傳的完整DataFrame(含
+        cost_price/shares/market_value/profit/return_pct等欄位，供_portfolio_summary_
+        text()加總用)，只是2026-08-06起這幾欄不再填進表格顯示(使用者反映觀察清單不是
+        真的持股，這些欄位放在這裡沒有意義)。
         """
         table.setSortingEnabled(False)
         table.setRowCount(len(df))
@@ -1624,11 +1638,6 @@ class MainWindow(QMainWindow):
                 row["name"] if pd.notna(row["name"]) else "-",
                 f"{row['close']:.2f}" if pd.notna(row["close"]) else "-",
                 f"{row['pct_change']:+.2f}" if pd.notna(row["pct_change"]) else "-",
-                f"{row['cost_price']:.2f}" if pd.notna(row["cost_price"]) else "-",
-                f"{int(row['shares']):,}" if pd.notna(row["shares"]) else "-",
-                f"{row['market_value']:,.0f}" if pd.notna(row["market_value"]) else "-",
-                f"{row['profit']:+,.0f}" if pd.notna(row["profit"]) else "-",
-                f"{row['return_pct']:+.2f}" if pd.notna(row["return_pct"]) else "-",
                 row["sar_status"] if pd.notna(row["sar_status"]) else "-",
                 f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-",
             ]
@@ -1983,8 +1992,10 @@ class MainWindow(QMainWindow):
         group_bar.addStretch()
         watchlist_layout.addLayout(group_bar)
 
-        self.watchlist_summary_label = QLabel("")
-        watchlist_layout.addWidget(self.watchlist_summary_label)
+        # 2026-08-06拿掉「總參考成本/總觀察市值/累積預估損益/今日資產變動」摘要列——
+        # 跟表格拿掉的成本價/持股數/市值/帳面損益/報酬率欄位同一個理由，觀察清單不是
+        # 真的持股，成本價/持股數輸入框也一起拿掉了(見_StockEditDialog)，這行摘要
+        # 之後只會永遠顯示0，留著沒有意義。
 
         toolbar = QHBoxLayout()
         add_btn = QPushButton("新增")
@@ -2022,7 +2033,7 @@ class MainWindow(QMainWindow):
         watchlist_layout.addLayout(toolbar)
 
         self.watchlist_table = self._build_portfolio_table(
-            ["股票代號", "名稱", "現價", "漲跌幅(%)", "參考成本價", "參考股數", "市值", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%"]
+            ["股票代號", "名稱", "現價", "漲跌幅(%)", "SAR狀態", "SAR距離%"]
             + _HUANG_CHIP_HEADERS,
             stretch_column="名稱",
         )
@@ -2246,15 +2257,11 @@ class MainWindow(QMainWindow):
         group_id = self.watchlist_group_combo.currentData()
         if group_id is None:
             self.watchlist_table.setRowCount(0)
-            self.watchlist_summary_label.setText("")
             return
         df = portfolio_data.load_watchlist(self.conn, self.portfolio_conn, group_id)
         self._populate_portfolio_table(self.watchlist_table, df)
         self._populate_huang_chip_columns(self.watchlist_table, df)
         self._sync_watchlist_group_header()
-        self.watchlist_summary_label.setText(
-            self._portfolio_summary_text(df, "總參考成本", "總觀察市值", "累積預估損益"),
-        )
         self.watchlist_update_label.setText(
             f"資料更新至：{self._format_update_timestamp(chart_data.get_latest_update_time(self.conn))}"
         )
