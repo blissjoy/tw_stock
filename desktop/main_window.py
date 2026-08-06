@@ -1138,9 +1138,9 @@ class MainWindow(QMainWindow):
         # (SAR翻轉)一樣是獨立的AND條件，不是「候選清單本來就限定在這個範圍」的基礎池
         # ——候選清單基礎池現在是全市場(見chart_data.load_stock_universe_for_date())，
         # 勾選這裡才會額外要求「當天有出現在daily_candidates(觸發過某條朱家泓規則)」；
-        # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。預設勾選(讀
-        # chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT)，維持「候選清單=已觸發朱家泓
-        # 規則的股票」這個原本的預設體驗。
+        # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。無QSettings紀錄
+        # 的全新使用者會fallback到chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT(2026-
+        # 08-06改成False，「乾淨預設值」是SAR翻轉打勾、朱家泓技術分析不打勾)。
         method_bar.addSpacing(20)
         self.zhu_rule_checkbox = QCheckBox("朱家泓技術分析")
         self.zhu_rule_checkbox.setChecked(

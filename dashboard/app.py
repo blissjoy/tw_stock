@@ -1901,8 +1901,9 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         # (SAR翻轉)一樣是獨立的AND條件，不是「候選清單本來就限定在這個範圍」的基礎池
         # ——候選清單基礎池現在是全市場(見chart_data.load_stock_universe_for_date())，
         # 勾選這裡才會額外要求「當天有出現在daily_candidates(觸發過某條朱家泓規則)」；
-        # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。預設勾選，維持
-        # 「候選清單=已觸發朱家泓規則的股票」這個原本的預設體驗。
+        # 不勾選時，均線/SAR等其他條件會對全市場掃描，不受這個限制。2026-08-06修正：
+        # 預設值改成CANDIDATE_ZHU_RULE_ONLY_DEFAULT(現在是False，跟SAR翻轉的「乾淨
+        # 預設值」一起由使用者確認，見chart_data.py同一天的說明)。
         zhu_rule_only = zhu_col.checkbox(
             "朱家泓技術分析", value=CANDIDATE_ZHU_RULE_ONLY_DEFAULT, key="filter_zhu_rule_only",
             help="勾選時只保留當天有觸發朱家泓規則的股票；取消勾選則不限制，均線/SAR等條件會對全市場掃描",

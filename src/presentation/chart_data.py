@@ -202,7 +202,14 @@ SAR_FLIP_LOOKBACK_DAYS = 250
 # 回報「發LINE通知的清單與候選清單列出來的沒有對齊」後才發現這個落差。
 CANDIDATE_SAR_FLIP_ENABLED_DEFAULT = True
 CANDIDATE_SAR_FLIP_OPTION_DEFAULT: dict = {"direction": "多頭", "within_days": 1}
-CANDIDATE_ZHU_RULE_ONLY_DEFAULT = True
+# ⚠️ 2026-08-06修正：使用者澄清「乾淨預設值」原本就該是SAR翻轉打勾、朱家泓技術分析
+# 不打勾(先前誤把桌面版QSettings記住的個人化狀態當成兩邊「真正預設值」一致的證據，
+# 見ai/PLAN.md同一天稍早的SAR bug紀錄)，改成False。這個常數同時是desktop/main_
+# window.py全新(無QSettings紀錄)使用者的UI初始狀態、dashboard/app.py選股頁面的
+# checkbox初始狀態、scripts/daily_pipeline.py的LINE/Email通知篩選範圍、src/
+# presentation/watchlist_export.py的Google Sheets候選清單匯出範圍共用同一份，
+# 三處都不用另外改，改這裡就會一起生效。
+CANDIDATE_ZHU_RULE_ONLY_DEFAULT = False
 
 
 def compute_sar_flip_flags(
