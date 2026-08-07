@@ -123,6 +123,13 @@ def fetch_today_twse(
     return True, is_intraday
 
 
+# 2026-08-07新增：fetch_today_tpex()判定「疑似下市」需要連續幾個不同交易日都查無
+# 資料才真正寫進delisted_stocks永久跳過，見該函式docstring的說明(取代原本「單一
+# 交易日失敗就直接認定下市」誤傷108檔正常股票的做法)。3天是工程預設值：夠低不會
+# 拖太久才抓到真正下市的股票，也夠高可以濾掉單一交易日的Yahoo Finance資料延遲。
+TPEX_DELISTING_CONFIRM_DAYS = 3
+
+
 def fetch_today_tpex(
     conn, date_str: str, stock_info: list[dict], on_progress: Callable[[int, int], None] | None = None,
 ) -> int:
@@ -157,11 +164,27 @@ def fetch_today_tpex(
     ⚠️ **同一天再追查剩餘的29-27=2檔「兩種後綴都查不到」**(4578/6813)+3檔第一版
     修好後仍不定期出現的個案：直接上網查證實全部10檔都是真的下市/併購/終止興櫃買賣
     (捷必勝-KY私有化下市、南璋停止買賣逾半年終止上櫃、金利被健策股份轉換、東元精電
-    併回母公司東元等)，不是誤判——代表「兩種市場後綴皆查無資料」這個條件本身就是
-    可靠的下市判斷依據。改成用`storage.delisted_stocks`表記錄下來(見schema.sql)，
-    下次排程直接跳過這些股票，不再每天重複浪費下載嘗試、也不再重複印出同樣的錯誤
-    訊息。已知下市的股票(`known_delisted_ids`)一開始就從`tpex_rows`篩掉，不會被
-    納入這次的下載清單。
+    併回母公司東元等)，不是誤判——原本因此認定「兩種市場後綴皆查無資料」這個條件
+    本身就是可靠的下市判斷依據，改成用`storage.delisted_stocks`表記錄下來(見
+    schema.sql)，下次排程直接跳過。
+
+    ⚠️ **2026-08-07發現這個判斷太輕率、造成誤傷**：使用者回報10:00那個排程時段
+    (剛開盤不久，見`src/presentation/pipeline_status.py`的`SCHEDULED_TIMES`)一次
+    印出上百檔「下載錯誤」，其中18檔被寫進`delisted_stocks`、之後排程永遠跳過，
+    但使用者實際查證這些股票明明還在正常上市交易——回頭盤點`delisted_stocks`表發現
+    2026-08-04上線這批功能以來，116筆紀錄裡只有8筆是當初真的人工查證過(`delisted_
+    date`有值)，其餘108筆全是「單一交易日兩種後綴皆查無資料」就自動寫入、從未
+    人工複核，且每天10:00那個時段都會再新增一批(Yahoo Finance對成交量小的股票，
+    剛開盤時盤中資料常常還沒更新，會被誤判成「查無資料」)——`known_delisted_ids`
+    一旦寫入就永久排除、不會重試，等於每天都在把「今天剛好資料還沒更新」的正常股票
+    永久拉黑，是持續在擴大的資料正確性問題，不是單純誤判一次而已。
+
+    修法：改成`storage.tpex_delisting_watch`(見schema.sql)先記錄「連續失敗交易日
+    數」，只有連續`TPEX_DELISTING_CONFIRM_DAYS`個不同交易日都失敗才真正寫進
+    `delisted_stocks`(同一天多個排程時段重複失敗不重複累加，因為都是同一份盤中
+    資料還沒更新的緣故，不代表兩個獨立的證據)；只要有任何一次成功查到資料，就清除
+    這檔股票的觀察紀錄、疑慮歸零重新開始算。已知下市的股票(`known_delisted_ids`)
+    一開始就從`tpex_rows`篩掉，不會被納入這次的下載清單。
     """
     known_delisted_ids = storage.list_delisted_stock_ids(conn)
     tpex_rows = [
@@ -196,18 +219,38 @@ def fetch_today_tpex(
         except Exception as exc:  # noqa: BLE001
             print(f"[TPEx轉上市備援/yfinance] 批次下載失敗，略過：{exc}")
 
-    newly_delisted = [sid for sid in remaining_ids if sid not in reclassified_to_twse]
+    # 這次成功查到資料(不管是.TWO批次還是.TW轉上市備援)的股票，清除累積的觀察紀錄，
+    # 疑慮歸零——只有連續失敗才會累加，中間只要成功一次就不算數。
+    for stock_id in prices_by_stock:
+        storage.clear_tpex_download_failure(conn, stock_id)
+    for stock_id in reclassified_to_twse:
+        storage.clear_tpex_download_failure(conn, stock_id)
+
+    still_failing = [sid for sid in remaining_ids if sid not in reclassified_to_twse]
+    newly_delisted = []
+    for stock_id in still_failing:
+        name = info_by_id[stock_id].get("name", stock_id)
+        consecutive_days = storage.record_tpex_download_failure(conn, stock_id, name, iso_date)
+        if consecutive_days >= TPEX_DELISTING_CONFIRM_DAYS:
+            newly_delisted.append(stock_id)
+        else:
+            print(
+                f"{stock_id}{name} 下載錯誤(連續{consecutive_days}/{TPEX_DELISTING_CONFIRM_DAYS}"
+                f"個交易日查無資料，尚未達到判定下市的門檻，之後排程還會繼續嘗試)"
+            )
+
     if newly_delisted:
         now_iso = datetime.now().isoformat()
         storage.upsert_delisted_stocks(conn, [
             {
                 "stock_id": sid, "name": info_by_id[sid].get("name", sid), "delisted_date": None,
-                "reason": "兩種市場後綴(.TWO/.TW)皆查無資料，可能已下市/併購/終止興櫃買賣",
+                "reason": f"連續{TPEX_DELISTING_CONFIRM_DAYS}個交易日兩種市場後綴(.TWO/.TW)皆查無資料，可能已下市/併購/終止興櫃買賣",
                 "noted_at": now_iso,
             }
             for sid in newly_delisted
         ])
         for stock_id in newly_delisted:
+            storage.clear_tpex_download_failure(conn, stock_id)
             print(f"{stock_id}{info_by_id[stock_id].get('name', '')} 下載錯誤（已記錄為疑似下市，之後排程不再嘗試）")
 
     for stock_id, prices in prices_by_stock.items():

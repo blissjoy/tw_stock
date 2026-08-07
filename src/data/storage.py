@@ -306,6 +306,45 @@ def list_delisted_stock_ids(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT stock_id FROM delisted_stocks").fetchall()}
 
 
+def record_tpex_download_failure(conn: sqlite3.Connection, stock_id: str, name: str, iso_date: str) -> int:
+    """記錄一次`fetch_today_tpex()`「兩種市場後綴皆查無資料」的失敗，回傳更新後的
+    連續失敗交易日數(`consecutive_days`)——2026-08-07新增，見schema.sql的
+    `tpex_delisting_watch`說明，取代原本「單一交易日失敗就直接寫進delisted_stocks」
+    的誤判做法。同一個交易日內重複呼叫(同一天有多個排程時段都失敗)不會重複累加，
+    只有換到不同的`iso_date`才會+1；呼叫端(daily_pipeline.py)保證傳入的`iso_date`
+    是遞增的交易日，這裡不重複驗證。"""
+    row = conn.execute(
+        "SELECT last_failed_date, consecutive_days FROM tpex_delisting_watch WHERE stock_id = ?",
+        (stock_id,),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO tpex_delisting_watch (stock_id, name, first_failed_date, last_failed_date, consecutive_days) "
+            "VALUES (?, ?, ?, ?, 1)",
+            (stock_id, name, iso_date, iso_date),
+        )
+        conn.commit()
+        return 1
+
+    last_failed_date, consecutive_days = row
+    if last_failed_date == iso_date:
+        return consecutive_days
+
+    new_count = consecutive_days + 1
+    conn.execute(
+        "UPDATE tpex_delisting_watch SET last_failed_date = ?, consecutive_days = ?, name = ? WHERE stock_id = ?",
+        (iso_date, new_count, name, stock_id),
+    )
+    conn.commit()
+    return new_count
+
+
+def clear_tpex_download_failure(conn: sqlite3.Connection, stock_id: str) -> None:
+    """該股票這次成功查到資料，清除累積的觀察紀錄(疑慮解除，之後重新從頭累計)。"""
+    conn.execute("DELETE FROM tpex_delisting_watch WHERE stock_id = ?", (stock_id,))
+    conn.commit()
+
+
 def get_daily_data_status(conn: sqlite3.Connection, iso_date: str) -> bool | None:
     """回傳指定日期是否為盤中即時價(True)/官方收盤價(False)；查無紀錄回傳None(例如這個
     功能上線前就存在的歷史資料，一律不特別標示，視為已收盤)。"""

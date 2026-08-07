@@ -219,6 +219,22 @@ CREATE TABLE IF NOT EXISTS delisted_stocks (
     noted_at        TEXT NOT NULL  -- 我們自己記錄下這件事的時間(不是真正下市當下)
 );
 
+-- 2026-08-07新增：上面delisted_stocks原本「單一交易日兩種市場後綴皆查無資料」就直接
+-- 認定下市，事後發現這個訊號在盤剛開沒多久(排程10:00那個時段，見src/presentation/
+-- pipeline_status.py的SCHEDULED_TIMES)並不可靠——Yahoo Finance對成交量小的股票，
+-- 盤中資料常常還沒更新，會被誤判成「查無資料」，2026-08-04~08-07短短4天已經誤傷
+-- 108檔其實還在正常交易的股票(使用者實測回報)。改成要求「連續N個不同交易日」都
+-- 查無資料才真正寫進delisted_stocks(threshold見daily_pipeline.py的TPEX_DELISTING_
+-- CONFIRM_DAYS)，這張表記錄「還在觀察期、尚未達到確認門檻」的候選股票，達到門檻後
+-- 就從這裡移除、改寫進delisted_stocks；查到資料成功時也要從這裡移除(重置疑慮)。
+CREATE TABLE IF NOT EXISTS tpex_delisting_watch (
+    stock_id            TEXT PRIMARY KEY,
+    name                TEXT,
+    first_failed_date   TEXT NOT NULL,  -- 這一輪連續失敗最早的交易日
+    last_failed_date    TEXT NOT NULL,  -- 最近一次失敗的交易日(同一天多次執行不重複累加)
+    consecutive_days    INTEGER NOT NULL DEFAULT 1
+);
+
 -- web版對主DB Turso帳號有實質額度風險的「高風險動作」(回補資料、手動抓取今日資料)
 -- 共用的速率限制紀錄表，見src/data/admin_action_rate_limit.py。2026-08-05新增，
 -- 一開始只給回補資料用(表名一度叫backfill_attempts)，後來手動抓取今日資料按鈕

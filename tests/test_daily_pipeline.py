@@ -609,10 +609,12 @@ def test_fetch_today_tpex_falls_back_to_twse_suffix_for_transferred_listings(mon
     assert "下載錯誤" not in capsys.readouterr().out
 
 
-def test_fetch_today_tpex_prints_download_error_only_when_both_suffixes_fail(monkeypatch, capsys):
-    """兩種市場後綴都查不到才是真正查無資料——2026-08-04追查證實這種情況背後幾乎
-    都是真的下市/併購/終止興櫃買賣(不是誤判)，這時應該印出訊息、同時記錄進
-    delisted_stocks表，之後排程才不會每天重複浪費下載嘗試。"""
+def test_fetch_today_tpex_single_day_failure_does_not_delist_yet(monkeypatch, capsys):
+    """2026-08-07修正：兩種市場後綴都查不到，單一交易日不應該直接判定下市——這是
+    使用者回報的真實bug(2026-08-04~08-07短短4天已經誤傷108檔正常股票，因為Yahoo
+    Finance對成交量小的股票在剛開盤時常常還沒有盤中資料，被誤判成「查無資料」)。
+    改成只記錄進tpex_delisting_watch的觀察名單、印出「尚未達到門檻」的訊息，不寫進
+    delisted_stocks，之後排程還會繼續嘗試。"""
     conn = _fresh_conn()
     stock_info = [{"stock_id": "9999", "name": "測試查無資料股", "market": "TPEx", "industry": None}]
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
@@ -621,10 +623,89 @@ def test_fetch_today_tpex_prints_download_error_only_when_both_suffixes_fail(mon
     success_count = daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
 
     assert success_count == 0
-    assert "9999測試查無資料股 下載錯誤" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "9999測試查無資料股 下載錯誤" in out
+    assert "尚未達到判定下市的門檻" in out
+    assert "已記錄為疑似下市" not in out
     assert conn.execute("SELECT COUNT(*) FROM stocks WHERE stock_id = '9999'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM delisted_stocks WHERE stock_id = '9999'").fetchone()[0] == 0
+    watch_row = conn.execute(
+        "SELECT first_failed_date, last_failed_date, consecutive_days FROM tpex_delisting_watch WHERE stock_id = '9999'"
+    ).fetchone()
+    assert watch_row == ("2026-07-22", "2026-07-22", 1)
+
+
+def test_fetch_today_tpex_same_day_repeated_failure_does_not_double_count(monkeypatch):
+    """同一個交易日內(例如10:00/11:00兩個排程時段都執行)重複呼叫，不應該把
+    consecutive_days重複累加——都是同一份「今天」盤中資料還沒更新造成的，不是兩個
+    獨立的證據。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "9999", "name": "測試查無資料股", "market": "TPEx", "industry": None}]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *a, **k: {})
+
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+
+    consecutive_days = conn.execute(
+        "SELECT consecutive_days FROM tpex_delisting_watch WHERE stock_id = '9999'"
+    ).fetchone()[0]
+    assert consecutive_days == 1
+
+
+def test_fetch_today_tpex_delists_after_confirm_days_of_failure(monkeypatch, capsys):
+    """連續TPEX_DELISTING_CONFIRM_DAYS(=3)個不同交易日都查無資料，才真正判定下市、
+    寫進delisted_stocks，並清掉觀察名單裡的紀錄。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "9999", "name": "測試查無資料股", "market": "TPEx", "industry": None}]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *a, **k: {})
+
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+    daily_pipeline.fetch_today_tpex(conn, "20260723", stock_info)
+    assert conn.execute("SELECT COUNT(*) FROM delisted_stocks WHERE stock_id = '9999'").fetchone()[0] == 0
+
+    daily_pipeline.fetch_today_tpex(conn, "20260724", stock_info)
+
+    out = capsys.readouterr().out
+    assert "9999測試查無資料股 下載錯誤（已記錄為疑似下市，之後排程不再嘗試）" in out
     row = conn.execute("SELECT name, delisted_date, reason FROM delisted_stocks WHERE stock_id = '9999'").fetchone()
-    assert row == ("測試查無資料股", None, "兩種市場後綴(.TWO/.TW)皆查無資料，可能已下市/併購/終止興櫃買賣")
+    assert row[0] == "測試查無資料股"
+    assert row[1] is None
+    assert "連續3個交易日" in row[2]
+    assert conn.execute("SELECT COUNT(*) FROM tpex_delisting_watch WHERE stock_id = '9999'").fetchone()[0] == 0
+
+
+def test_fetch_today_tpex_success_in_between_resets_the_streak(monkeypatch):
+    """連續失敗中間只要有一天成功查到資料，疑慮就該歸零重新開始算，不能把中斷過的
+    失敗天數累加起來湊到門檻。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "9999", "name": "測試查無資料股", "market": "TPEx", "industry": None}]
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *a, **k: {})
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info)
+    daily_pipeline.fetch_today_tpex(conn, "20260723", stock_info)
+
+    # 第3天意外查到資料了(例如Yahoo Finance資料延遲終於補上)
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_tpex_prices_batch",
+        lambda *a, **k: {"9999": [_price_row(stock_id="9999")]},
+    )
+    daily_pipeline.fetch_today_tpex(conn, "20260724", stock_info)
+    assert conn.execute("SELECT COUNT(*) FROM tpex_delisting_watch WHERE stock_id = '9999'").fetchone()[0] == 0
+
+    # 第4、5天又連續失敗，應該從1重新算，不會直接因為之前的2天+這次觸發下市判定
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    daily_pipeline.fetch_today_tpex(conn, "20260725", stock_info)
+    daily_pipeline.fetch_today_tpex(conn, "20260726", stock_info)
+
+    assert conn.execute("SELECT COUNT(*) FROM delisted_stocks WHERE stock_id = '9999'").fetchone()[0] == 0
+    consecutive_days = conn.execute(
+        "SELECT consecutive_days FROM tpex_delisting_watch WHERE stock_id = '9999'"
+    ).fetchone()[0]
+    assert consecutive_days == 2
 
 
 def test_fetch_today_tpex_skips_already_known_delisted_stocks(monkeypatch):
