@@ -37,4 +37,8 @@ data/google_oauth_token.json
 # history.jsonl同一個理由：純本機事後診斷用途，會持續增長，不需要進版控
 data/sync_to_turso_log.jsonl
 
+# 「日誌」分頁(desktop/main_window.py的_build_log_tab()，web版之後也會做)讀的資料抓取
+# 紀錄(見src/presentation/data_fetch_log.py)，純本機檔案、只保留最近7天，同樣不進版控
+data/data_fetch_log.jsonl
+
 temp/

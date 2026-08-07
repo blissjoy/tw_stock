@@ -25,7 +25,7 @@ def _stub_stock_info(monkeypatch, rows):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_taiex_network_calls(monkeypatch):
+def _no_real_taiex_network_calls(monkeypatch, tmp_path):
     """run_daily_pipeline()新增了大盤(TAIEX)更新(見fetch_today_taiex())，會無條件呼叫
     yfinance_client.fetch_taiex_prices()——這是一個真實對外的網路呼叫，這個檔案裡沒有
     明確要測試這個行為的既有測試(例如test_run_daily_pipeline_writes_candidates_and_
@@ -43,10 +43,19 @@ def _no_real_taiex_network_calls(monkeypatch):
     docstring)——這個檔案裡不少既有測試會故意讓TPEx批次下載對某些股票查無資料
     (模擬剛下市/查無資料的情境)，觸發到這個新的備援呼叫，同一個理由一併擋住預設
     回傳空dict，個別測試需要驗證這個備援行為時在測試函式主體內覆蓋即可。
+
+    2026-08-06新增：run_daily_pipeline()結束前會呼叫data_fetch_log.record_fetch_
+    run()寫進data/data_fetch_log.jsonl(見src/presentation/data_fetch_log.py)——
+    不擋住的話，這個檔案裡每個實際跑到成功/略過/失敗結尾的測試都會把假資料寫進
+    使用者電腦上真實的那份log檔案，桌面版「日誌」分頁會看到一堆測試fixture產生
+    的假紀錄。改成用tmp_path重新導向，這是這個測試檔案自己發現、順手一起修的既有
+    缺口(RUN_HISTORY_PATH本身也有同樣問題，一直沒被擋住，範圍較大，這裡不動，只
+    處理這次新增的data_fetch_log)。
     """
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda *args, **kwargs: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_volume", lambda *args, **kwargs: {})
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *args, **kwargs: {})
+    monkeypatch.setattr(daily_pipeline.data_fetch_log, "LOG_PATH", tmp_path / "data_fetch_log.jsonl")
 
 
 def test_run_daily_pipeline_skips_when_twse_has_no_data(monkeypatch):

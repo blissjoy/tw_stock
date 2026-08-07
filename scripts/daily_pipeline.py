@@ -42,7 +42,7 @@ from src.data.connection import get_default_portfolio_connection  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
-from src.presentation import chart_data, pipeline_status, watchlist_export  # noqa: E402
+from src.presentation import chart_data, data_fetch_log, pipeline_status, watchlist_export  # noqa: E402
 from src.screener.daily_screener import refresh_indicator_window, run_screen_and_store  # noqa: E402
 
 
@@ -373,6 +373,7 @@ def fetch_today_taiex(conn, date_str: str) -> bool:
 def run_daily_pipeline(
     conn, date_str: str | None = None, min_days: int = 60, dry_run: bool = False, skip_tpex: bool = False,
     chip_refresh: bool = False, on_progress: Callable[[str, int, int], None] | None = None,
+    trigger: str = "automatic",
 ) -> list[dict]:
     """核心orchestration，刻意與「conn是Turso還是本機sqlite」無關，方便測試與dry-run重用。
 
@@ -390,6 +391,11 @@ def run_daily_pipeline(
     後才公布，若沿用「不dry_run才做」的舊邏輯，這幾件事反而永遠不會在正確的時間點執行；
     拆成獨立旗標後，17:00那次排程可以同時帶`--dry-run --chip-refresh`（不重複發送當天
     已經發過的LINE/Email候選清單通知，但仍執行這三件籌碼相關更新）。
+
+    trigger：2026-08-06新增，"automatic"(預設，Windows工作排程器排程觸發)／"manual"
+    (桌面版「▶ 手動抓取今日資料」按鈕，見desktop/main_window.py的PipelineWorker)——
+    只用來標記寫進data_fetch_log.jsonl的這筆紀錄是怎麼被觸發的(見「日誌」分頁)，不影響
+    pipeline本身的抓取/篩選邏輯。
     """
     storage.ensure_schema(conn)
 
@@ -422,6 +428,9 @@ def run_daily_pipeline(
         if not is_trading_day:
             print(f"{iso_date} TWSE官方收盤資料與yfinance盤中備援都查無資料，判定為非交易日，跳過選股與通知。")
             pipeline_status.write_status("done", date=iso_date, candidate_count=0, note="非交易日")
+            data_fetch_log.record_fetch_run(
+                conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="skipped",
+            )
             return []
 
         storage.upsert_daily_data_status(conn, iso_date, is_intraday)
@@ -466,6 +475,7 @@ def run_daily_pipeline(
         # (見INDICATOR_REFRESH_WINDOW_DAYS常數說明)。獨立包一層try/except——失敗不應該
         # 讓整條pipeline中斷，候選清單已經算完寫入了，均線/SAR快取只是輔助查詢用的
         # 衍生資料，即使這裡失敗，篩選頂多退回「找不到快取列視為不成立」，不影響核心資料。
+        refreshed = None
         try:
             refreshed = refresh_indicator_window(conn, iso_date, INDICATOR_REFRESH_WINDOW_DAYS)
             print(f"均線/SAR快取：往回刷新{INDICATOR_REFRESH_WINDOW_DAYS}個交易日，共{refreshed}筆")
@@ -556,9 +566,17 @@ def run_daily_pipeline(
 
         pipeline_status.append_run_snapshot(conn, iso_date, is_intraday, len(candidates))
         pipeline_status.write_status("done", date=iso_date, candidate_count=len(candidates))
+        data_fetch_log.record_fetch_run(
+            conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="success",
+            is_intraday=is_intraday, candidates_count=len(candidates), indicators_refreshed=refreshed,
+        )
         return candidates
-    except Exception:
+    except Exception as exc:
         pipeline_status.write_status("failed", date=iso_date)
+        data_fetch_log.record_fetch_run(
+            conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="failed",
+            errors=[str(exc)],
+        )
         raise
 
 

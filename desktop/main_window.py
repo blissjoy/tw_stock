@@ -73,7 +73,7 @@ from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src import rule_docs
-from src.presentation import chart_data, huang_chip_data, pipeline_status, portfolio_data, stock_detail_data
+from src.presentation import chart_data, data_fetch_log, huang_chip_data, pipeline_status, portfolio_data, stock_detail_data
 from src.presentation.chart_render import render_chart_html
 from src.screener.daily_screener import (
     analyze_stock_signals,
@@ -86,7 +86,7 @@ from src.screener.daily_screener import (
 TAIEX_DISPLAY_NAME = "台股加權指數"
 
 # 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股資訊/產業輪動/庫存清單/
-# 觀察清單/回補資料。
+# 觀察清單/回補資料/日誌。
 TAB_MARKET = 0
 TAB_SCREENER = 1
 TAB_STOCK_DETAIL = 2
@@ -94,6 +94,7 @@ TAB_INDUSTRY_ROTATION = 3
 TAB_INVENTORY = 4
 TAB_WATCHLIST = 5
 TAB_BACKFILL = 6
+TAB_LOG = 7
 
 # 「選股」分頁「市場：」下拉選單顯示文字對應chart_data.load_stock_universe_for_date()
 # 的market參數值；"全部"不在這裡，get()查不到就是None(不限制)。
@@ -185,6 +186,20 @@ _INDUSTRY_TREE_NUMERIC_COLUMNS = {
     for h in ["成交", "開盤", "最高", "最低", "漲跌", "漲跌幅(%)", "總成交張數", "股票數"]
 }
 _INDUSTRY_TREE_STOCK_COUNT_COLUMN = _INDUSTRY_TREE_HEADERS.index("股票數")
+
+# 「日誌」分頁(2026-08-06新增)的QTreeWidget欄位結構：父列(一筆data_fetch_log.jsonl
+# 紀錄=一次自動排程/手動抓取/回補)用「時間」「來源」「日期範圍」「狀態」「候選清單/
+# 均線」，子列(該次抓取底下每個「市場+表格」的組合，例如「TWSE 股價」「TPEx 三大
+# 法人」)用「時間/表格」欄放"　市場 表格名稱"、「來源」欄放筆數、「欄位」欄放逗號
+# 分隔的欄位名稱清單——共用同一組欄位定義，彼此不適用的留空，跟_INDUSTRY_TREE_
+# HEADERS同一個模式。子列數量不固定(只列出這次真的有寫入資料的市場+表格組合，
+# 全部0筆的不列出，避免每筆紀錄都顯示6個大多是0的子列)。
+_LOG_TREE_HEADERS = ["時間 / 項目", "來源 / 筆數", "日期範圍", "狀態", "候選清單／均線重算", "欄位"]
+_LOG_TREE_TRIGGER_LABELS = {"automatic": "自動排程", "manual": "手動抓取", "backfill": "回補資料"}
+_LOG_TREE_STATUS_LABELS = {"success": "成功", "skipped": "略過(非交易日)", "failed": "失敗"}
+_LOG_TREE_TABLE_LABELS = {
+    "stock_prices": "股價", "institutional_investors": "三大法人", "margin_trading": "融資融券",
+}
 
 
 def _format_month_day(date_str: str) -> str:
@@ -718,7 +733,7 @@ class PipelineWorker(QThread):
         try:
             conn = get_default_connection()
             candidates = run_daily_pipeline(
-                conn, dry_run=False,
+                conn, dry_run=False, trigger="manual",
                 on_progress=lambda stage, done, total: self.progress.emit(stage, done, total),
             )
             self.finished_ok.emit(len(candidates))
@@ -811,6 +826,11 @@ class BackfillWorker(QThread):
     params需含：start/end(YYYY-MM-DD字串)、force_overwrite(bool)、
     stock_id_filter(set[str] | None，None代表全市場)、taiex_price/stock_price/
     stock_institutional/stock_margin/recompute_candidates(bool)。
+
+    2026-08-06新增：完成(或失敗)時呼叫data_fetch_log.record_fetch_run()記錄這次
+    回補實際寫入DB的筆數(trigger="backfill")，供「日誌」分頁顯示——跟daily_
+    pipeline.py的自動/手動抓取共用同一份log格式，只是trigger欄位不同。cancelled
+    (使用者中途取消)不記錄，因為那個路徑是提早return，沒有完整跑到這裡。
     """
 
     progress = Signal(str)
@@ -827,8 +847,10 @@ class BackfillWorker(QThread):
 
         from scripts import backfill_history
         from scripts.backfill_taiex import backfill_taiex_range
+        from src.presentation import data_fetch_log
 
         conn = None
+        start = end = None
         try:
             conn = get_default_connection()
             p = self._params
@@ -913,8 +935,18 @@ class BackfillWorker(QThread):
                     summary["candidates"] = n
                     self.progress.emit(f"歷史候選清單重算完成：{n}筆")
 
+            if conn is not None and start is not None:
+                data_fetch_log.record_fetch_run(
+                    conn, trigger="backfill", start_date=start, end_date=end, status="success",
+                    candidates_count=summary.get("candidates"), indicators_refreshed=summary.get("indicators"),
+                )
             self.finished_ok.emit(summary)
         except Exception as exc:  # noqa: BLE001
+            if conn is not None and start is not None:
+                data_fetch_log.record_fetch_run(
+                    conn, trigger="backfill", start_date=start, end_date=end, status="failed",
+                    errors=[str(exc)],
+                )
             self.failed.emit(str(exc))
         finally:
             if conn is not None:
@@ -1023,14 +1055,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # 七個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+
-        # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單、⑦回補資料——原本候選清單跟個股
-        # 圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選清單雙擊任一列會自動切到③
-        # 並代入該股票資料(見_navigate_to_candidate_row())。①跟③都用同一套規則比對邏輯
-        # (_build_analysis_sections_html())，只是分析對象(大盤/個股)不同，渲染格式共用。
-        # ⑤⑥移植自ref-project的庫存清單/觀察清單，用獨立的self.portfolio_conn(見
-        # __init__())，不查主DB的候選清單/圖表相關資料。⑦是2026-08-04新增，取代原本
-        # 只能下命令列跑scripts/backfill_*.py的回補流程。
+        # 八個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+
+        # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單、⑦回補資料、⑧日誌——原本候選
+        # 清單跟個股圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選清單雙擊任一列
+        # 會自動切到③並代入該股票資料(見_navigate_to_candidate_row())。①跟③都用同一
+        # 套規則比對邏輯(_build_analysis_sections_html())，只是分析對象(大盤/個股)不同，
+        # 渲染格式共用。⑤⑥移植自ref-project的庫存清單/觀察清單，用獨立的self.
+        # portfolio_conn(見__init__())，不查主DB的候選清單/圖表相關資料。⑦是2026-08-04
+        # 新增，取代原本只能下命令列跑scripts/backfill_*.py的回補流程。⑧是2026-08-06
+        # 新增，見_build_log_tab()/src/presentation/data_fetch_log.py。
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
@@ -1041,6 +1074,7 @@ class MainWindow(QMainWindow):
         self._build_inventory_tab()
         self._build_watchlist_tab()
         self._build_backfill_tab()
+        self._build_log_tab()
         # ⚠️ 分頁還沒被切換過去顯示之前，分頁裡的QTextEdit/QWebEngineView實際上沒有
         # 真正的layout(viewport寬度等於0或預設值)，這時候算文字框需要的高度一定不準
         # (實測算出來只有個位數px，見_build_market_tab()的說明)。改成切到對應分頁時
@@ -2746,6 +2780,105 @@ class MainWindow(QMainWindow):
         self.backfill_refresh_stock_info_btn.setText("重新整理股票清單")
         QMessageBox.warning(self, "失敗", f"股票基本資料更新失敗：{message}")
 
+    # ------------------------------------------------------------------
+    # 日誌(2026-08-06新增，見src/presentation/data_fetch_log.py)
+    # ------------------------------------------------------------------
+
+    def _build_log_tab(self) -> None:
+        """「日誌」分頁：顯示最近(data_fetch_log.RETENTION_DAYS天內)每一次自動排程/
+        手動抓取/回補資料的細節——各市場各表寫了幾筆、欄位有哪些、有沒有失敗，使用者
+        2026-08-06要求新增，方便事後確認「今天到底有沒有真的抓到資料」，不用去翻
+        Windows工作排程器的執行記錄或猜測。純本機檔案(data/data_fetch_log.jsonl)，
+        不查Turso，桌面版讀的一律是本機這台電腦自己執行過的紀錄。
+
+        比照「產業輪動」的QTreeWidget母子列模式：父列是一次紀錄的摘要，子列是該次
+        紀錄底下每個「市場+表格」的組合(只列出真的有寫入資料的，全部0筆的不列出，
+        避免每筆紀錄都顯示6個大多是0的子列)。
+        """
+        log_scroll = QScrollArea()
+        log_scroll.setWidgetResizable(True)
+        self.tabs.addTab(log_scroll, "日誌")
+
+        log_content = QWidget()
+        log_scroll.setWidget(log_content)
+        log_layout = QVBoxLayout(log_content)
+
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(QLabel(f"最近{data_fetch_log.RETENTION_DAYS}天的資料抓取紀錄："))
+        top_bar.addStretch()
+        self.log_refresh_btn = QPushButton("🔄 重新整理")
+        self.log_refresh_btn.clicked.connect(self._refresh_log_tab)
+        top_bar.addWidget(self.log_refresh_btn)
+        log_layout.addLayout(top_bar)
+
+        self.log_tree = QTreeWidget()
+        self.log_tree.setColumnCount(len(_LOG_TREE_HEADERS))
+        self.log_tree.setHeaderLabels(_LOG_TREE_HEADERS)
+        self.log_tree.setStyleSheet(
+            "QTreeWidget::item { padding-right: 10px; border-bottom: 1px solid #e5e5e5; }"
+        )
+        self.log_tree.setAlternatingRowColors(True)
+        header = self.log_tree.header()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.log_tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.log_tree.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
+        log_layout.addWidget(self.log_tree, stretch=1)
+
+    def _refresh_log_tab(self) -> None:
+        tree = self.log_tree
+        tree.clear()
+        entries = data_fetch_log.read_recent_entries()
+        if not entries:
+            placeholder = QTreeWidgetItem(["目前沒有任何紀錄。"] + [""] * (len(_LOG_TREE_HEADERS) - 1))
+            tree.addTopLevelItem(placeholder)
+            return
+
+        for entry in entries:
+            run_at_text = entry.get("run_at", "")
+            try:
+                run_at_local = datetime.fromisoformat(run_at_text).astimezone()
+                run_at_text = run_at_local.strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                pass
+            status = entry.get("status", "")
+            status_text = _LOG_TREE_STATUS_LABELS.get(status, status)
+            errors = entry.get("errors") or []
+
+            recompute_parts = []
+            if entry.get("candidates_recomputed") is not None:
+                recompute_parts.append(f"候選{entry['candidates_recomputed']}檔")
+            if entry.get("indicators_refreshed_rows") is not None:
+                recompute_parts.append(f"均線{entry['indicators_refreshed_rows']}筆")
+
+            parent_item = QTreeWidgetItem([
+                run_at_text,
+                _LOG_TREE_TRIGGER_LABELS.get(entry.get("trigger", ""), entry.get("trigger", "")),
+                entry.get("date_range", ""),
+                status_text,
+                "　".join(recompute_parts),
+                "",
+            ])
+            if errors:
+                parent_item.setForeground(3, QColor("#C0392B"))
+                parent_item.setToolTip(3, "\n".join(errors))
+            tree.addTopLevelItem(parent_item)
+
+            for market, market_data in (entry.get("markets") or {}).items():
+                for table_key, table_label in _LOG_TREE_TABLE_LABELS.items():
+                    table_data = market_data.get(table_key) or {}
+                    rows = table_data.get("rows", 0)
+                    if not rows:
+                        continue
+                    columns = table_data.get("columns") or []
+                    child_item = QTreeWidgetItem([
+                        f"　{market}　{table_label}", str(rows), "", "", "", "、".join(columns),
+                    ])
+                    child_item.setToolTip(5, "、".join(columns))
+                    parent_item.addChild(child_item)
+            if parent_item.childCount() > 0:
+                parent_item.setExpanded(False)
+
     def _on_watchlist_add_group(self) -> None:
         if self.portfolio_conn is None:
             return
@@ -3028,6 +3161,8 @@ class MainWindow(QMainWindow):
             self._refresh_inventory_tab()
         elif index == TAB_WATCHLIST:
             self._refresh_watchlist_tab()
+        elif index == TAB_LOG:
+            self._refresh_log_tab()
 
     # ------------------------------------------------------------------
     # 候選清單／圖表

@@ -7586,3 +7586,97 @@ candidates_table_reset`中介key的執行順序跟`_pending_active_tab`完全
 一致(這個既有機制已經在多個批次被驗證過可以正常運作)。這批的信心
 程度比其他批次(通常有真瀏覽器截圖或headless smoke test佐證)低，已經
 如實告知使用者，建議之後記憶體充裕時實際點一次「名稱」欄複查。
+
+---
+
+## 新增「日誌」分頁(桌面版，web版下一批做)：顯示每次資料抓取的細節
+（2026-08-06）
+
+背景：使用者要求新增「日誌」分頁，顯示每次自動/手動/回補下載股票的細節——
+下載了什麼欄位(股票明細、法人/資券)、更新了多少筆、若有同步到Turso更新了
+什麼。範圍web+桌面版都要，但使用者明確要求：①用寫檔案的方式(不寫Turso，
+省寫入額度)；②先做桌面版，沒問題後再做web。這批只做桌面版。
+
+**先research現有log機制，發現都不夠用**：`pipeline_run_history.jsonl`
+只記錄候選清單筆數+近期SAR翻轉(SAR事後診斷專用，不是給使用者看「抓了
+什麼」)；`sync_to_turso_log.jsonl`有各表筆數但只涵蓋Turso同步這一步，
+跟抓資料的pipeline run是各自獨立排程；`backfill_log.txt`是純文字stdout
+重導向，沒有結構化資料、也被gitignore掉不會留存。三者都不符合需求，
+需要新的log機制。
+
+**欄位呈現方式**：使用者確認「每筆日誌都完整記錄欄位名稱，但只保留一
+星期內的記錄」(不是用固定圖例+動態筆數的精簡版本)。
+
+**新增`src/presentation/data_fetch_log.py`**：`record_fetch_run(conn,
+*, trigger, start_date, end_date, status, is_intraday=None, candidates_
+count=None, indicators_refreshed=None, errors=None)`——**刻意不修改
+`fetch_today_twse()`/`fetch_today_tpex()`的回傳值**(那樣會牽動tests/
+test_daily_pipeline.py裡一大票`is_trading_day, is_intraday = ...`的
+tuple unpacking)，改成事後直接查DB「這個日期範圍、這個市場，現在
+stock_prices/institutional_investors/margin_trading各有幾筆」，這樣
+也更準確(算的是upsert後DB裡實際的筆數)。欄位名稱(`STOCK_PRICES_
+COLUMNS`/`INSTITUTIONAL_INVESTORS_COLUMNS`/`MARGIN_TRADING_COLUMNS`)
+抄自`src/data/schema.sql`，當固定圖例跟著每筆log記錄一起存(不查
+schema，log本身自足)。`RETENTION_DAYS=7`，每次`record_fetch_run()`
+呼叫完自動清掉超過7天的舊紀錄(不用另外排程)，不會像`pipeline_run_
+history.jsonl`一樣無限膨脹(那份檔案這次research時已經4.2MB、從來沒
+清理過)。寫入失敗直接吞掉例外，跟`pipeline_status.py`既有的容錯原則
+一致(這份紀錄是輔助顯示用途，不是抓取本身是否成功的判準)。
+
+**串接三種觸發來源**：①`scripts/daily_pipeline.py`的`run_daily_
+pipeline()`新增`trigger: str = "automatic"`參數，在「非交易日跳過」
+(status="skipped")、「正常結束」(status="success")、「拋例外」
+(status="failed"，`except Exception as exc`裡`errors=[str(exc)]`)
+三個出口各自呼叫`record_fetch_run()`；②`desktop/main_window.py`的
+`PipelineWorker`(「▶ 手動抓取今日資料」按鈕背景執行緒)呼叫`run_daily_
+pipeline()`時改傳`trigger="manual"`；③`BackfillWorker`(「回補資料」
+分頁背景執行緒)完成或失敗時各自呼叫`record_fetch_run(trigger=
+"backfill", start_date=p["start"], end_date=p["end"], ...)`，取消
+(cancelled)不記錄(那個路徑是提早return，沒有完整跑到底)。
+
+**新增桌面版「日誌」分頁**(`TAB_LOG=7`，`_build_log_tab()`/`_refresh_
+log_tab()`)：比照「產業輪動」的`QTreeWidget`母子列模式——父列是一筆
+`data_fetch_log.jsonl`紀錄的摘要(時間/來源/日期範圍/狀態/候選清單與
+均線重算筆數，失敗時狀態文字變紅色、hover顯示錯誤訊息)，子列是該次
+紀錄底下每個「市場+表格」組合(只列出真的有寫入資料的，全部0筆的不列
+出，避免每筆紀錄都顯示6個大多是0的子列)，欄位名稱用頓號連接顯示在
+「欄位」欄+完整內容放tooltip。切到這個分頁時(`_on_tab_changed()`)
+自動重新整理，也有手動「🔄 重新整理」按鈕。
+
+**踩到的坑**：`tests/test_daily_pipeline.py`原本就有既有測試會真的
+跑到`run_daily_pipeline()`的成功/略過/失敗結尾，串接`record_fetch_
+run()`後，這些測試會把fixture假資料寫進使用者電腦上「真實」的`data/
+data_fetch_log.jsonl`——這個檔案本來就存在(這個session跑pytest的
+過程中，剛好也有真實排程的`daily_pipeline.py`在背景執行，讀取這個
+檔案時發現裡面混著真實紀錄跟test fixture產生的假紀錄，例如「2330」
+「2026-07-22」這種明顯是測試資料的內容)。修法：在這個測試檔案既有的
+`_no_real_taiex_network_calls`(autouse=True)安全網fixture裡，一併
+加上`monkeypatch.setattr(daily_pipeline.data_fetch_log, "LOG_PATH",
+tmp_path / "data_fetch_log.jsonl")`，之後這個檔案的測試都不會再寫進
+真實檔案(`RUN_HISTORY_PATH`本身也有同樣的既有缺口，一直沒被擋住，
+範圍較大且是這次新功能之外的既有問題，這裡不動，只處理新增的data_
+fetch_log)。已經手動刪除先前被測試污染的假資料檔案。
+
+真實驗證：`pytest tests/ -q`1033個測試全數通過(新增9個`tests/test_
+data_fetch_log.py`測試，覆蓋筆數統計/日期範圍格式/錯誤記錄/append不
+覆寫/排序/7天保留期清理/檔案不存在時的空清單/DB連線已關閉時吞例外)；
+確認`tests/test_daily_pipeline.py`54個測試仍全數通過，且執行完畢後
+不再產生真實的`data/data_fetch_log.jsonl`(已確認)。⚠️ 桌面版UI本身
+這次沒能跑headless smoke test驗證——本機記憶體這批降到只剩1.3GB，
+連載入pandas的C擴充套件都直接因為Windows分頁檔不足而crash("分頁檔
+太小，無法完成操作")，比之前幾次的Streamlit/OpenBLAS crash更嚴重。
+改成靠：①`py_compile`確認語法正確；②`pytest`全數通過(包含底層
+`data_fetch_log`的完整邏輯測試)；③手動逐行覆核`_refresh_log_tab()`
+的樹狀結構組裝邏輯(欄位索引對應`_LOG_TREE_HEADERS`順序、子列只列出
+真的有筆數的市場+表格組合)。已經如實告知使用者這批信心程度較低，
+建議之後記憶體充裕時實際切到「日誌」分頁看一次真實畫面。
+
+**補充驗證（2026-08-06，同日稍晚）**：記憶體恢復到約6.4GB可用後，用一次性煙霧測試
+腳本(不進版控，`QApplication`+`MainWindow()`實際視窗，比照PLAN.md先前記載的做法——
+offscreen平台缺中文字型會顯示方塊，改用真實Windows平台背景執行)重新驗證桌面版「日誌」
+分頁，`window.grab()`截圖確認：分頁列正確顯示「日誌」；父列正確顯示時間(本地時區
+`2026-08-06 21:04`)/來源(「自動排程」)/日期範圍/狀態(「成功」)/候選969檔+均線23200筆；
+展開父列後5個子列(TWSE股價/三大法人/融資融券、TPEx股價/三大法人)全部正確，且TPEx
+融資融券因為0筆被正確排除、沒有顯示成第6個子列；欄位名稱正確用頓號連接顯示在「欄位」
+欄，過長時UI正確截斷成「...」(完整內容在tooltip，畫面驗證看不到但程式碼邏輯先前已
+覆核過)。這批之前記錄的「信心程度較低」已經用真實畫面驗證解除。
