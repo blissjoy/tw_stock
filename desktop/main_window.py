@@ -2880,6 +2880,24 @@ class MainWindow(QMainWindow):
                     ])
                     child_item.setToolTip(5, "、".join(columns))
                     parent_item.addChild(child_item)
+
+                # 2026-08-07新增：逐股下載失敗清單(原本只print到主控台，使用者反映
+                # 排程沒人盯著主控台看，日誌分頁應該也要看得到)。跟上面股價/三大法人/
+                # 融資融券的子列同一層、用紅字區分，避免使用者誤以為這也是「成功寫入
+                # 的筆數」。清單可能有上百檔(見ai/PLAN.md同日期章節的TWSE案例)，完整
+                # 內容放tooltip、欄位裡只顯示前幾檔+「...等N檔」，不然這個儲存格會被
+                # 撐得極長。
+                failed = market_data.get("failed_downloads") or []
+                if failed:
+                    names = [f"{f['stock_id']}{f['name']}" for f in failed]
+                    preview = "、".join(names[:5]) + (f"...等{len(names)}檔" if len(names) > 5 else "")
+                    failed_item = QTreeWidgetItem([
+                        f"　{market}　下載失敗", str(len(failed)), "", "", "", preview,
+                    ])
+                    failed_item.setForeground(0, QColor("#C0392B"))
+                    failed_item.setForeground(1, QColor("#C0392B"))
+                    failed_item.setToolTip(5, "、".join(names))
+                    parent_item.addChild(failed_item)
             if parent_item.childCount() > 0:
                 parent_item.setExpanded(False)
 

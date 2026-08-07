@@ -64,6 +64,40 @@ def test_record_fetch_run_counts_rows_per_market_and_table(tmp_path, monkeypatch
     assert tpex["stock_prices"]["rows"] == 0
 
 
+def test_record_fetch_run_stores_failed_downloads_per_market(tmp_path, monkeypatch):
+    """2026-08-07新增：單一股票下載失敗不會反映在DB筆數上，只能由呼叫端在失敗當下
+    自己收集起來傳進來——這裡驗證record_fetch_run()原封不動把傳入的failed_downloads
+    存進對應市場那個key。"""
+    monkeypatch.setattr(data_fetch_log, "LOG_PATH", tmp_path / "log.jsonl")
+    conn = _fresh_conn()
+
+    data_fetch_log.record_fetch_run(
+        conn, trigger="automatic", start_date="2026-08-06", end_date="2026-08-06", status="success",
+        failed_downloads={
+            "TWSE": [{"stock_id": "1538", "name": "正峰"}, {"stock_id": "2325", "name": "矽品"}],
+            "TPEx": [{"stock_id": "9999", "name": "測試股"}],
+        },
+    )
+
+    entry = data_fetch_log.read_recent_entries()[0]
+    assert entry["markets"]["TWSE"]["failed_downloads"] == [
+        {"stock_id": "1538", "name": "正峰"}, {"stock_id": "2325", "name": "矽品"},
+    ]
+    assert entry["markets"]["TPEx"]["failed_downloads"] == [{"stock_id": "9999", "name": "測試股"}]
+
+
+def test_record_fetch_run_failed_downloads_defaults_to_empty_list_per_market(tmp_path, monkeypatch):
+    """沒有傳failed_downloads時每個市場應該存空list、不是None，UI端不用額外判斷None。"""
+    monkeypatch.setattr(data_fetch_log, "LOG_PATH", tmp_path / "log.jsonl")
+    conn = _fresh_conn()
+
+    data_fetch_log.record_fetch_run(conn, trigger="automatic", start_date="2026-08-06", end_date="2026-08-06", status="success")
+
+    entry = data_fetch_log.read_recent_entries()[0]
+    assert entry["markets"]["TWSE"]["failed_downloads"] == []
+    assert entry["markets"]["TPEx"]["failed_downloads"] == []
+
+
 def test_record_fetch_run_date_range_formats_single_day_without_tilde(tmp_path, monkeypatch):
     monkeypatch.setattr(data_fetch_log, "LOG_PATH", tmp_path / "log.jsonl")
     conn = _fresh_conn()

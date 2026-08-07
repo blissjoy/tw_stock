@@ -77,12 +77,21 @@ def record_fetch_run(
     conn, *, trigger: str, start_date: str, end_date: str, status: str,
     is_intraday: bool | None = None, candidates_count: int | None = None,
     indicators_refreshed: int | None = None, errors: list[str] | None = None,
+    failed_downloads: dict[str, list[dict]] | None = None,
 ) -> None:
     """記錄一次資料抓取(trigger="automatic"排程／"manual"手動抓取／"backfill"回補)。
 
     status："success"(正常跑完)／"skipped"(例如非交易日，沒有實際抓資料)／
     "failed"(中途拋例外)。status="skipped"時仍然會嘗試查DB算筆數(通常會是0，
     如實反映「這次沒有新資料」，不是不查)。
+
+    failed_downloads：2026-08-07新增，{"TWSE": [{"stock_id":, "name":}, ...],
+    "TPEx": [...]}——單一股票下載失敗(不是整條pipeline中途拋例外)不會反映在DB
+    筆數上(失敗就是沒寫入，事後查表看不出「原本想抓哪些但失敗了」)，跟其他欄位
+    不同，這個欄位沒辦法用「事後查DB」的方式取得，只能由呼叫端(scripts/
+    daily_pipeline.py的fetch_today_twse()/fetch_today_tpex())在失敗當下自己
+    收集起來、原封不動傳進來記錄。未提供時每個市場存空list，不是None——UI端
+    不用額外判斷None的情況。
 
     寫入失敗(例如data/目錄不存在、DB查詢失敗)不應該讓呼叫端(pipeline/回補流程)
     中斷，這裡直接吞掉例外，跟pipeline_status.py的既有容錯原則一致——這份紀錄
@@ -105,6 +114,7 @@ def record_fetch_run(
                     "rows": _count_rows(conn, "margin_trading", start_date, end_date, market),
                     "columns": MARGIN_TRADING_COLUMNS,
                 },
+                "failed_downloads": (failed_downloads or {}).get(market, []),
             }
         entry = {
             "run_at": datetime.now(timezone.utc).isoformat(),

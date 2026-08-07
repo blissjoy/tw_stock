@@ -49,6 +49,7 @@ from src.screener.daily_screener import refresh_indicator_window, run_screen_and
 def fetch_today_twse(
     conn, date_str: str, stock_info_by_id: dict[str, dict],
     on_progress: Callable[[int, int], None] | None = None,
+    failed_stock_ids: list[dict] | None = None,
 ) -> tuple[bool, bool]:
     """抓TWSE當天股價並寫入conn。回傳(is_trading_day, is_intraday)：
     - is_trading_day：是否抓到任何股價資料(不論是否已收盤)，False代表非交易日或兩個
@@ -69,6 +70,11 @@ def fetch_today_twse(
     (yfinance沒有股票清單這種基本資料，必須另外提供要下載哪些代號)。
     on_progress：官方端點成功時是單一請求，直接回報(1,1)；yfinance備援路徑則逐批次
     回報(見src/data/yfinance_client.py的fetch_prices_batch())。
+    failed_stock_ids：2026-08-07新增，非None時把這次yfinance備援仍下載失敗的股票
+    (`{"stock_id":, "name":}`)附加進這個list，供呼叫端(run_daily_pipeline())傳給
+    `data_fetch_log.record_fetch_run()`記錄進「日誌」分頁——原本這些失敗只會print到
+    主控台，使用者反映排程沒人盯著主控台看，日誌分頁應該也要看得到「哪些股票下載
+    失敗」，不是只看到成功寫入的筆數。
     """
     prices = twse_client.fetch_stock_prices(date_str)
     is_intraday = False
@@ -97,7 +103,10 @@ def fetch_today_twse(
         # 沒有資料的，印出好懂的訊息(理由同fetch_today_tpex()的相同處理)
         for stock_id in twse_ids:
             if stock_id not in prices_by_stock:
-                print(f"{stock_id}{stock_info_by_id.get(stock_id, {}).get('name', '')} 下載錯誤")
+                name = stock_info_by_id.get(stock_id, {}).get("name", "")
+                print(f"{stock_id}{name} 下載錯誤")
+                if failed_stock_ids is not None:
+                    failed_stock_ids.append({"stock_id": stock_id, "name": name})
         prices = [row for rows in prices_by_stock.values() for row in rows]
         is_intraday = True
 
@@ -132,8 +141,13 @@ TPEX_DELISTING_CONFIRM_DAYS = 3
 
 def fetch_today_tpex(
     conn, date_str: str, stock_info: list[dict], on_progress: Callable[[int, int], None] | None = None,
+    failed_stock_ids: list[dict] | None = None,
 ) -> int:
     """批次抓TPEx普通股股價當天增量資料，回傳成功更新的股票數。
+
+    failed_stock_ids：2026-08-07新增，非None時把這次兩種後綴都下載失敗的股票
+    (`{"stock_id":, "name":}`，不論這次有沒有達到下市判定門檻)附加進這個list，
+    用途跟`fetch_today_twse()`同名參數一致，供「日誌」分頁顯示。
 
     ⚠️ **改用yfinance批次下載(2026-07-23)**：原本透過FinMind逐股抓取(~640檔各自一次
     請求)實測約需1小時；改用`src.data.yfinance_client`一次批次下載多檔(仿照
@@ -230,6 +244,8 @@ def fetch_today_tpex(
     newly_delisted = []
     for stock_id in still_failing:
         name = info_by_id[stock_id].get("name", stock_id)
+        if failed_stock_ids is not None:
+            failed_stock_ids.append({"stock_id": stock_id, "name": name})
         consecutive_days = storage.record_tpex_download_failure(conn, stock_id, name, iso_date)
         if consecutive_days >= TPEX_DELISTING_CONFIRM_DAYS:
             newly_delisted.append(stock_id)
@@ -458,6 +474,12 @@ def run_daily_pipeline(
         if on_progress is not None:
             on_progress(stage, done, total)
 
+    # 這次執行下載失敗的股票清單，供最後record_fetch_run()寫進「日誌」分頁——宣告在
+    # try區塊外面，即使途中拋例外(進到except分支)也能拿到「拋例外之前已經收集到」的
+    # 部分資料，不會因為變數還沒賦值而在except分支裡NameError。
+    twse_failed_stock_ids: list[dict] = []
+    tpex_failed_stock_ids: list[dict] = []
+
     try:
         # 只呼叫一次FinMind的股票基本資料(涵蓋TWSE+TPEx)，同時供TWSE/TPEx兩條路徑取得真實
         # 公司名稱/產業別；即使skip_tpex=True也需要這份名單來修正TWSE的name欄位，成本很低(單次請求)。
@@ -467,12 +489,14 @@ def run_daily_pipeline(
         is_trading_day, is_intraday = fetch_today_twse(
             conn, date_str, stock_info_by_id,
             on_progress=lambda done, total: _on_progress("TWSE", done, total),
+            failed_stock_ids=twse_failed_stock_ids,
         )
         if not is_trading_day:
             print(f"{iso_date} TWSE官方收盤資料與yfinance盤中備援都查無資料，判定為非交易日，跳過選股與通知。")
             pipeline_status.write_status("done", date=iso_date, candidate_count=0, note="非交易日")
             data_fetch_log.record_fetch_run(
                 conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="skipped",
+                failed_downloads={"TWSE": twse_failed_stock_ids, "TPEx": tpex_failed_stock_ids},
             )
             return []
 
@@ -494,6 +518,7 @@ def run_daily_pipeline(
             tpex_count = fetch_today_tpex(
                 conn, date_str, stock_info,
                 on_progress=lambda done, total: _on_progress("TPEx", done, total),
+                failed_stock_ids=tpex_failed_stock_ids,
             )
             print(f"TPEx：{tpex_count} 檔成功更新")
 
@@ -612,6 +637,7 @@ def run_daily_pipeline(
         data_fetch_log.record_fetch_run(
             conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="success",
             is_intraday=is_intraday, candidates_count=len(candidates), indicators_refreshed=refreshed,
+            failed_downloads={"TWSE": twse_failed_stock_ids, "TPEx": tpex_failed_stock_ids},
         )
         return candidates
     except Exception as exc:
@@ -619,6 +645,7 @@ def run_daily_pipeline(
         data_fetch_log.record_fetch_run(
             conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="failed",
             errors=[str(exc)],
+            failed_downloads={"TWSE": twse_failed_stock_ids, "TPEx": tpex_failed_stock_ids},
         )
         raise
 

@@ -7879,3 +7879,41 @@ pipeline_status.py`的`SCHEDULED_TIMES`，一天有10:00/11:00/12:00/13:00/13:30
 用SQL查詢確認前後筆數(116→8)。⚠️ Turso清理腳本本身只做了語法檢查(`py_compile`)，
 沒有機會實際連線執行過(sandbox連不到Turso)，使用者執行時如果腳本本身有問題(例如
 `turso_client.get_connection()`介面用法有誤)需要當場除錯，這點已如實告知。
+
+---
+
+## 「日誌」分頁補上逐股下載失敗清單（2026-08-07）
+
+使用者追問「為什麼下載錯誤沒顯示在日誌？」——查證後發現這是設計時的遺漏：`data_
+fetch_log.record_fetch_run()`只查DB算「這次寫入了幾筆」，但單一股票下載失敗根本
+不會寫進DB，事後查表看不出「原本想抓哪些但失敗了」，這跟其他欄位(筆數)可以「事後
+查DB」取得的做法完全不同，只能在失敗當下由呼叫端自己收集起來、原封不動傳下去。
+`fetch_today_twse()`/`fetch_today_tpex()`原本只把失敗清單`print()`到主控台，
+從來沒有回傳給`run_daily_pipeline()`，所以「日誌」分頁自然看不到——這不是bug，
+是當初做「日誌」分頁那批(2026-08-06)沒有把這塊也設計進去。
+
+**改動**：兩個函式都新增`failed_stock_ids: list[dict] | None = None`參數，非None
+時把失敗的`{"stock_id":, "name":}`附加進去(TPEx這邊涵蓋`still_failing`全部，不論
+這次有沒有跨過3天下市判定門檻，讓使用者能完整看到「這次到底失敗了哪些」)。`run_
+daily_pipeline()`在`try`區塊外先宣告`twse_failed_stock_ids`/`tpex_failed_stock_ids`
+兩個空list(即使中途拋例外走進`except`分支也能拿到部分已收集的資料，不會NameError)，
+傳給兩個fetch函式，再原封不動傳給`data_fetch_log.record_fetch_run()`新增的
+`failed_downloads: dict[str, list[dict]] | None`參數(3個呼叫點：skipped/success/
+failed都要傳，不是只有success)。`record_fetch_run()`把它存進對應市場的`markets[market]
+["failed_downloads"]`，未提供時預設空list(不是None，UI端不用額外判斷)。
+
+**桌面版「日誌」分頁**(`_refresh_log_tab()`)：比照既有的股價/三大法人/融資融券子列
+樣式，多加一種「{市場} 下載失敗」子列，用紅字(`#C0392B`)區分、避免使用者誤以為這也是
+成功寫入的筆數；因為清單可能有上百檔(見上面TPEx/TWSE兩批事故紀錄)，儲存格只顯示前
+5檔+「...等N檔」，完整清單放在tooltip。Web版「日誌」分頁本身還沒做(見2026-08-06
+那批的既有待辦)，這批只涵蓋桌面版。
+
+**新增測試**：`tests/test_data_fetch_log.py`2個(`failed_downloads`原封不動存進對應
+市場、未提供時預設空list)；`tests/test_daily_pipeline.py`3個(`fetch_today_twse()`/
+`fetch_today_tpex()`各自收集失敗清單、`run_daily_pipeline()`端對端驗證真的寫進log
+檔案)。
+
+真實驗證：`pytest tests/ -q`1045個測試全數通過。桌面版用假的log檔案(不動到使用者
+真實的`data/data_fetch_log.jsonl`)+`QT_QPA_PLATFORM`非offscreen真實視窗+`window.
+grab()`截圖確認：「TWSE 下載失敗」子列正確顯示紅字、筆數7、預覽「1538正峰、2325矽品、
+2311日月光、2475華映、2384勝華...等7檔」；「TPEx 下載失敗」子列同樣正確顯示。

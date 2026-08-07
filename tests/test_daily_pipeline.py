@@ -199,6 +199,30 @@ def test_fetch_today_twse_yfinance_fallback_excludes_non_twse_and_non_4_digit_co
     assert captured["stock_ids"] == ["2330"]
 
 
+def test_fetch_today_twse_collects_failed_stock_ids_when_provided(monkeypatch):
+    """2026-08-07新增：使用者反映排程印出的「下載錯誤」清單沒有出現在「日誌」分頁——
+    追出原因是fetch_today_twse()從沒把失敗清單回傳給呼叫端，只有print到主控台。
+    這裡驗證傳入failed_stock_ids list時，yfinance備援下載失敗的股票會被附加進去，
+    成功的股票不會。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    stock_info_by_id = {
+        "2330": {"name": "台積電", "industry": "半導體", "market": "TWSE"},
+        "1538": {"name": "正峰", "industry": None, "market": "TWSE"},
+    }
+    monkeypatch.setattr(
+        daily_pipeline.yfinance_client, "fetch_twse_prices_batch",
+        lambda stock_ids, start_date, end_date, on_progress=None: {"2330": [_price_row(stock_id="2330")]},
+    )
+    failed_stock_ids: list[dict] = []
+
+    daily_pipeline.fetch_today_twse(conn, "20260724", stock_info_by_id, failed_stock_ids=failed_stock_ids)
+
+    assert failed_stock_ids == [{"stock_id": "1538", "name": "正峰"}]
+
+
 def test_fetch_today_twse_returns_false_when_both_sources_have_no_data(monkeypatch):
     """官方端點跟yfinance備援都查無資料才真的判定為非交易日(而不是還沒收盤)。"""
     conn = _fresh_conn()
@@ -587,6 +611,36 @@ def test_run_daily_pipeline_continues_when_one_tpex_stock_has_no_data(monkeypatc
     assert conn.execute("SELECT COUNT(*) FROM stocks WHERE stock_id = '9999'").fetchone()[0] == 0
 
 
+def test_run_daily_pipeline_records_failed_downloads_in_data_fetch_log(monkeypatch):
+    """2026-08-07新增：使用者反映排程印出的「下載錯誤」清單看不到在「日誌」分頁裡——
+    端對端驗證run_daily_pipeline()真的有把fetch_today_twse()/fetch_today_tpex()收集
+    到的失敗清單，一路傳到data_fetch_log.record_fetch_run()、最後寫進log檔案。"""
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    _stub_stock_info(monkeypatch, [
+        {"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"},
+        {"stock_id": "1538", "name": "正峰", "market": "TWSE", "industry": None},
+        {"stock_id": "9999", "name": "測試查無資料股", "market": "TPEx", "industry": None},
+    ])
+    def _fake_twse_batch(stock_ids, start_date, end_date, on_progress=None):
+        # 這個mock同時服務兩個呼叫端：fetch_today_twse()的盤中備援(要求2330/1538)、
+        # fetch_today_tpex()的「轉上市」備援(要求9999)——只有實際在stock_ids裡的
+        # 才回傳資料，模擬9999兩種後綴都查不到、2330查得到、1538查不到。
+        return {"2330": [_price_row(stock_id="2330")]} if "2330" in stock_ids else {}
+
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", _fake_twse_batch)
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=False)
+
+    entry = daily_pipeline.data_fetch_log.read_recent_entries()[0]
+    assert entry["markets"]["TWSE"]["failed_downloads"] == [{"stock_id": "1538", "name": "正峰"}]
+    assert entry["markets"]["TPEx"]["failed_downloads"] == [{"stock_id": "9999", "name": "測試查無資料股"}]
+
+
 def test_fetch_today_tpex_falls_back_to_twse_suffix_for_transferred_listings(monkeypatch, capsys):
     """2026-08-04發現的真正root cause：使用者回報14:30(TPEx早已收盤)仍看到一長串
     「下載錯誤」，之前誤判成「上櫃還沒收盤」——直接用同一批代號查yfinance才發現這些
@@ -633,6 +687,21 @@ def test_fetch_today_tpex_single_day_failure_does_not_delist_yet(monkeypatch, ca
         "SELECT first_failed_date, last_failed_date, consecutive_days FROM tpex_delisting_watch WHERE stock_id = '9999'"
     ).fetchone()
     assert watch_row == ("2026-07-22", "2026-07-22", 1)
+
+
+def test_fetch_today_tpex_collects_failed_stock_ids_when_provided(monkeypatch):
+    """比照fetch_today_twse()同名參數：傳入failed_stock_ids list時，兩種後綴都下載
+    失敗的股票要被附加進去，不論這次有沒有達到下市判定門檻(還在觀察期的也要記錄，
+    「日誌」分頁應該完整呈現這次失敗了哪些股票，不是只呈現真的判定下市的)。"""
+    conn = _fresh_conn()
+    stock_info = [{"stock_id": "9999", "name": "測試查無資料股", "market": "TPEx", "industry": None}]
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_tpex_prices_batch", lambda *a, **k: {})
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *a, **k: {})
+    failed_stock_ids: list[dict] = []
+
+    daily_pipeline.fetch_today_tpex(conn, "20260722", stock_info, failed_stock_ids=failed_stock_ids)
+
+    assert failed_stock_ids == [{"stock_id": "9999", "name": "測試查無資料股"}]
 
 
 def test_fetch_today_tpex_same_day_repeated_failure_does_not_double_count(monkeypatch):
