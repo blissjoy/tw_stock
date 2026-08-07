@@ -1464,20 +1464,47 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     st.session_state["pending_delete_group_id"] = None
                     st.rerun()
 
+        watchlist_df = portfolio_data.load_watchlist(conn, portfolio_conn, group_id)
+
+        # 讀「上一輪」的selection狀態(比照候選清單「加入庫存/加入觀察清單」批次按鈕的
+        # 做法)：這一輪script重新執行時，使用者剛做的表格勾選已經先寫進session_state了，
+        # 比下面真正呼叫st.dataframe()還早，這樣「編輯選取」/「刪除選取」按鈕才能畫在
+        # 表格「上面」、緊貼著「新增股票」，卻還是讀得到目前的選取狀態。
+        prior_selection_rows = st.session_state.get("watchlist_table", {}).get("selection", {}).get("rows", [])
+        prior_selection_rows = [i for i in prior_selection_rows if i < len(watchlist_df)]
+
         # 「資料更新至」：2026-08-05新增，比照桌面版desktop/main_window.py的
         # watchlist_update_label(_build_watchlist_tab()，工具列最右邊)——先前web版
         # 這個分頁完全沒有這個時間戳，屬於漏做的部分，不是刻意簡化(跟同一批次
         # 刻意簡化的①欄位顯示選單②雙列表頭③籌碼欄位逐格套色三點不同)。
-        add_col, update_col = st.columns([1, 3])
+        # 2026-08-07使用者要求「編輯選取」/「刪除選取」搬到「新增股票」後面緊貼一起
+        # (原本一個在表格上方、一個在表格下方，分開兩處)：比照候選清單「按鈕靠左排列」
+        # 的做法，窄欄位+吸收剩餘寬度的spacer_col，三個按鈕才會緊貼、不會被拉開。
+        add_col, edit_col, delete_col, spacer_col, update_col = st.columns([1, 1, 1, 1, 3])
         with add_col:
             if st.button("➕ 新增股票", key="watchlist_add_stock"):
                 _watchlist_stock_dialog(group_id, None)
+        with edit_col:
+            if st.button("✏️ 編輯選取"):
+                if len(prior_selection_rows) != 1:
+                    st.warning("請選取剛好一檔股票再編輯。")
+                else:
+                    stock_row = watchlist_df.iloc[prior_selection_rows[0]]
+                    initial = {"stock_id": stock_row["stock_id"], "note": stock_row["note"]}
+                    _watchlist_stock_dialog(group_id, initial)
+        with delete_col:
+            if st.button("🗑️ 刪除選取"):
+                if not prior_selection_rows:
+                    st.warning("請至少選取一檔股票再刪除。")
+                else:
+                    st.session_state["pending_delete_watchlist_stock_ids"] = [
+                        str(watchlist_df.iloc[i]["stock_id"]) for i in prior_selection_rows
+                    ]
         with update_col:
             update_ts = get_latest_update_time(conn)
             update_label = datetime.fromisoformat(update_ts).strftime("%Y-%m-%d %H:%M") if update_ts else "尚無資料"
             st.caption(f"資料更新至　{update_label}")
 
-        watchlist_df = portfolio_data.load_watchlist(conn, portfolio_conn, group_id)
         if watchlist_df.empty:
             st.info("這個群組還沒有任何股票，點上方「➕ 新增股票」開始追蹤。")
             st.caption("ps: 大戶/散戶持股變化僅支持觀察清單")
@@ -1512,7 +1539,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
 
         # ⚠️ 數字欄位先轉成「已格式化好的字串」("-"代表缺值)，不依賴column_config.
         # NumberColumn自動格式化(理由見_fmt_or_dash()的說明)。watchlist_df保留原始
-        # 數值給後面「編輯選取」/「刪除選取」查詢用(編輯dialog需要真的數字才能帶入
+        # 數值給上面「編輯選取」/「刪除選取」查詢用(編輯dialog需要真的數字才能帶入
         # number_input預設值)，只有watchlist_display套用字串轉換、傳給st.dataframe。
         watchlist_display = watchlist_df.copy()
         watchlist_display["close"] = watchlist_df["close"].apply(lambda v: _fmt_or_dash(v, 2))
@@ -1537,7 +1564,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     styles.append("")
             return styles
 
-        watchlist_event = st.dataframe(
+        st.dataframe(
             watchlist_display.style.apply(_style_watchlist_row, axis=1),
             use_container_width=True, hide_index=True,
             on_select="rerun", selection_mode="multi-row", key="watchlist_table",
@@ -1548,23 +1575,6 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 **{key: label for key, label in _HUANG_CHIP_LABELS.items()},
             },
         )
-        selected_rows = watchlist_event.selection.rows
-
-        edit_col, delete_col = st.columns([1, 1])
-        with edit_col:
-            if st.button("✏️ 編輯選取"):
-                if len(selected_rows) != 1:
-                    st.warning("請選取剛好一檔股票再編輯。")
-                else:
-                    stock_row = watchlist_df.iloc[selected_rows[0]]
-                    initial = {"stock_id": stock_row["stock_id"], "note": stock_row["note"]}
-                    _watchlist_stock_dialog(group_id, initial)
-        with delete_col:
-            if st.button("🗑️ 刪除選取"):
-                if not selected_rows:
-                    st.warning("請至少選取一檔股票再刪除。")
-                else:
-                    st.session_state["pending_delete_watchlist_stock_ids"] = [str(watchlist_df.iloc[i]["stock_id"]) for i in selected_rows]
 
         pending_stock_ids = st.session_state.get("pending_delete_watchlist_stock_ids")
         if pending_stock_ids:

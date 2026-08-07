@@ -7680,3 +7680,33 @@ offscreen平台缺中文字型會顯示方塊，改用真實Windows平台背景�
 融資融券因為0筆被正確排除、沒有顯示成第6個子列；欄位名稱正確用頓號連接顯示在「欄位」
 欄，過長時UI正確截斷成「...」(完整內容在tooltip，畫面驗證看不到但程式碼邏輯先前已
 覆核過)。這批之前記錄的「信心程度較低」已經用真實畫面驗證解除。
+
+---
+
+## web版觀察清單：「編輯選取」「刪除選取」搬到「新增股票」後面緊貼一起（2026-08-07）
+
+背景：使用者反映web版觀察清單分頁的「編輯選取」「刪除選取」按鈕原本放在表格*下方*、
+跟表格*上方*的「新增股票」分開兩處，要求三個按鈕搬到同一列、緊貼在一起。
+
+**卡點**：「編輯選取」「刪除選取」的邏輯需要讀`st.dataframe()`的`selection.rows`，但
+`st.dataframe()`呼叫本身要等後面組完`watchlist_df`(含黃豐凱籌碼欄位)才會執行，直接把
+按鈕搬到表格前面會拿不到當下的勾選狀態。**沿用候選清單「加入庫存/加入觀察清單」批次
+按鈕已經驗證過的既有解法**(`dashboard/app.py`的候選清單分頁)：改成讀`st.session_state
+["watchlist_table"]["selection"]["rows"]`(前一輪script執行時使用者勾選/取消勾選已經
+寫進session_state，比這一輪真正呼叫`st.dataframe()`還早)，不用等表格重新畫出來就能
+拿到「使用者目前實際勾了哪幾列」。
+
+**改動**：`watchlist_df = portfolio_data.load_watchlist(...)`搬到最前面(只需要
+stock_id/note等基本欄位，不需要等黃豐凱籌碼欄位算完)；`add_col, edit_col, delete_col,
+spacer_col, update_col = st.columns([1, 1, 1, 1, 3])`取代原本兩處各自的`st.columns
+([1, 3])`/`st.columns([1, 1])`——窄欄位+吸收剩餘寬度的spacer_col，讓三個按鈕靠左緊貼
+(跟候選清單「按鈕靠左排列」那批同一個手法)。表格下方原本那組`edit_col, delete_col`
+整段刪除，`st.dataframe()`回傳值不再需要賦值給變數(改讀session_state，不讀
+`.selection.rows`)。
+
+真實驗證：`pytest tests/ -q`1033個測試全數通過(這批純UI版面調整，沒有新增測試)。
+本機啟動真實Streamlit(`streamlit run dashboard/app.py`)+Playwright實際瀏覽器截圖
+確認：①三個按鈕(新增股票/編輯選取/刪除選取)緊貼同一列，右側跟著「資料更新至」時間戳，
+不再分成表格上下兩處；②真的勾選一列(3037欣興)後點「編輯選取」，彈出的「編輯觀察股票」
+對話框正確帶出股票代號3037(不是空白或錯誤股票)，確認`prior_selection_rows`讀
+session_state的邏輯即使按鈕搬到表格前面也正常運作，不是只有畫面對但功能壞掉。
