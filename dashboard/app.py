@@ -1282,10 +1282,16 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         summary_display["return_pct"] = summary_df["return_pct"].apply(lambda v: _fmt_or_dash(v, 2, signed=True, suffix="%"))
         summary_display["sar_distance_pct"] = summary_df["sar_distance_pct"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
         summary_display["lot_count"] = summary_df["lot_count"].apply(lambda v: _fmt_or_dash(v, 0))
+        # 2026-08-07新增：selection_mode混用single-row(點列選取，展開下方批次明細，
+        # 既有行為不變)+single-cell(判斷有沒有點到「名稱」欄，點到就跳轉個股資訊)，
+        # 邏輯跟選股分頁候選清單表格一致(見TAB_SCREENER分支的說明)。點「名稱」欄
+        # 同時也會選到那一列(single-row)，但下面就直接rerun跳轉分頁了，不會真的
+        # 顯示一次批次明細再跳走。
+        st.caption("點列可展開下方批次明細；點「名稱」欄可直接查看個股資訊")
         summary_event = st.dataframe(
             summary_display.style.apply(_style_name_by_listing_type_row, axis=1),
             use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="single-row", key="inventory_summary_table",
+            on_select="rerun", selection_mode=["single-row", "single-cell"], key="inventory_summary_table",
             column_order=["stock_id", "name", "close", "pct_change", "cost_price", "shares", "market_value", "profit", "return_pct", "sar_status", "sar_distance_pct", "lot_count"],
             column_config={
                 "stock_id": "股票代號", "name": "名稱", "close": "現價", "pct_change": "漲跌幅(%)",
@@ -1294,6 +1300,16 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 "sar_distance_pct": "SAR距離%", "lot_count": "批次數",
             },
         )
+        name_clicked_row = next(
+            (row for row, col in summary_event.selection.cells if col == "name"), None,
+        )
+        if name_clicked_row is not None:
+            st.session_state["detail_stock_id"] = str(summary_df.iloc[name_clicked_row]["stock_id"])
+            st.session_state["detail_stock_source"] = None
+            st.session_state["detail_query_input"] = ""
+            st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
+            st.session_state["_pending_inventory_summary_table_reset"] = True
+            st.rerun()
 
         if not summary_event.selection.rows:
             return
@@ -1578,10 +1594,14 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     styles.append("")
             return styles
 
-        st.dataframe(
+        # 2026-08-07新增：跟選股分頁的候選清單表格同一套做法(見TAB_SCREENER分支的
+        # 說明)——selection_mode混用multi-row(勾選欄，「刪除選取」用)+single-cell
+        # (判斷有沒有點到「名稱」欄，點到就跳轉個股資訊)，兩者各自獨立、互不干擾。
+        st.caption("勾選左側checkbox可「刪除選取」；點「名稱」欄可直接查看個股資訊")
+        watchlist_event = st.dataframe(
             watchlist_display.style.apply(_style_watchlist_row, axis=1),
             use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="multi-row", key="watchlist_table",
+            on_select="rerun", selection_mode=["multi-row", "single-cell"], key="watchlist_table",
             column_order=["stock_id", "name", "close", "pct_change", "sar_status", "sar_distance_pct"] + _HUANG_CHIP_HEADERS,
             column_config={
                 "stock_id": "股票代號", "name": "名稱", "close": "現價", "pct_change": "漲跌幅(%)",
@@ -1589,6 +1609,19 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 **{key: label for key, label in _HUANG_CHIP_LABELS.items()},
             },
         )
+        # 點「名稱」欄的儲存格就跳轉個股資訊，邏輯跟候選清單一致(見上面TAB_SCREENER
+        # 分支的詳細說明)：從觀察清單點過來不是候選清單策略，detail_stock_source
+        # 留None，跟手動查詢一樣不顯示「來源：X月X日的選股策略」標籤。
+        name_clicked_row = next(
+            (row for row, col in watchlist_event.selection.cells if col == "name"), None,
+        )
+        if name_clicked_row is not None:
+            st.session_state["detail_stock_id"] = str(watchlist_df.iloc[name_clicked_row]["stock_id"])
+            st.session_state["detail_stock_source"] = None
+            st.session_state["detail_query_input"] = ""
+            st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
+            st.session_state["_pending_watchlist_table_reset"] = True
+            st.rerun()
 
         pending_stock_ids = st.session_state.get("pending_delete_watchlist_stock_ids")
         if pending_stock_ids:
@@ -1873,6 +1906,15 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
     if "_pending_candidates_table_reset" in st.session_state:
         st.session_state.pop("_pending_candidates_table_reset")
         st.session_state["candidates_table"] = {"selection": {"rows": [], "columns": [], "cells": []}}
+    # 2026-08-07新增：觀察清單/庫存清單表格點「名稱」欄跳轉個股資訊後，同一個道理
+    # 也要清掉這次觸發跳轉的cell selection，不然切回這兩個分頁時會被誤判成「又點了
+    # 一次」再度跳轉——理由、模式都跟上面_pending_candidates_table_reset一致。
+    if "_pending_watchlist_table_reset" in st.session_state:
+        st.session_state.pop("_pending_watchlist_table_reset")
+        st.session_state["watchlist_table"] = {"selection": {"rows": [], "columns": [], "cells": []}}
+    if "_pending_inventory_summary_table_reset" in st.session_state:
+        st.session_state.pop("_pending_inventory_summary_table_reset")
+        st.session_state["inventory_summary_table"] = {"selection": {"rows": [], "columns": [], "cells": []}}
     tab_market, tab_screener, tab_stock_detail, tab_industry, tab_inventory, tab_watchlist, tab_backfill = st.tabs(
         TAB_OPTIONS, key="active_tab", on_change="rerun",
     )

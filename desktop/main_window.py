@@ -1906,6 +1906,11 @@ class MainWindow(QMainWindow):
         # 點「批次數」欄位的數字展開/收合該股票明細——原生展開箭頭(點第0欄前面的
         # 小三角)還是照常可以用，這是額外多一個可以點的地方，不是取代原生行為。
         self.inventory_tree.itemClicked.connect(self._on_inventory_tree_item_clicked)
+        # 2026-08-07新增：雙擊任一列(父列或子列皆可)跳轉「個股資訊」分頁，比照候選
+        # 清單_navigate_to_candidate_row()的雙擊模式——單擊只選取(給編輯/刪除選取
+        # 用)，雙擊才跳轉，兩者不衝突，也跟上面「點批次數欄展開/收合」的單擊行為不衝突
+        # (單擊/雙擊是Qt各自獨立的訊號)。
+        self.inventory_tree.itemDoubleClicked.connect(self._on_inventory_tree_item_double_clicked)
         # F2編輯/Delete刪除快捷鍵：2026-08-04新增，比照ref-project(ui/widgets/
         # inventory_list.py)的既有慣例，直接重用「編輯選取」/「刪除選取」按鈕
         # 同一組handler，不是另外寫一套邏輯。綁在inventory_tree這個widget本身
@@ -1938,6 +1943,17 @@ class MainWindow(QMainWindow):
     def _on_inventory_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         if column == _INVENTORY_TREE_LOT_COUNT_COLUMN and item.childCount() > 0:
             item.setExpanded(not item.isExpanded())
+
+    def _on_inventory_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        """雙擊庫存清單樹狀列(父列=股票彙總、子列=個別批次皆可)，把該股票帶入
+        「個股資訊」分頁並切換過去——UserRole存的股票代號父列/子列都有設(見
+        _populate_inventory_tree())，不用判斷點到的是父列還是子列。"""
+        stock_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if not stock_id:
+            return
+        self._current_stock_id = stock_id
+        self._current_stock_source = None  # 從庫存清單點過來，跟手動查詢一樣不顯示來源標籤
+        self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)
 
     @staticmethod
     def _format_inventory_row(row: pd.Series, is_lot: bool) -> list[str]:
@@ -2211,6 +2227,9 @@ class MainWindow(QMainWindow):
             + _HUANG_CHIP_HEADERS,
             stretch_column="名稱",
         )
+        # 2026-08-07新增：雙擊任一列跳轉「個股資訊」分頁，比照候選清單_navigate_to_
+        # candidate_row()的雙擊模式——單擊只選取(給編輯/刪除選取用)，不會跳轉。
+        self.watchlist_table.cellDoubleClicked.connect(lambda row, _col: self._navigate_to_watchlist_row(row))
         self.watchlist_group_header_table = self._build_watchlist_group_header_table()
         watchlist_layout.addWidget(self.watchlist_group_header_table)
         watchlist_layout.addWidget(self.watchlist_table, stretch=1)
@@ -2950,6 +2969,16 @@ class MainWindow(QMainWindow):
         portfolio_storage.delete_watchlist_group(self.portfolio_conn, group_id)
         self._reload_watchlist_groups()
         self._refresh_watchlist_tab()
+
+    def _navigate_to_watchlist_row(self, row: int) -> None:
+        """雙擊觀察清單表格第row列，把該股票帶入「個股資訊」分頁並切換過去，用法
+        比照_navigate_to_candidate_row()。"""
+        stock_id_item = self.watchlist_table.item(row, 0)  # 欄位0：股票代號
+        if stock_id_item is None:
+            return
+        self._current_stock_id = stock_id_item.text()
+        self._current_stock_source = None  # 從觀察清單點過來，跟手動查詢一樣不顯示來源標籤
+        self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)
 
     def _on_watchlist_add_stock(self) -> None:
         if self.portfolio_conn is None:

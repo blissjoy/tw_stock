@@ -7995,3 +7995,56 @@ window.py:2983`)還在用，只是web版這個入口不再呼叫它。
 真實驗證：`pytest tests/ -q`1045個測試全數通過。本機啟動真實Streamlit+Playwright
 截圖確認：「群組」label跟下拉選單同一列、三個群組按鈕跟「新增股票／刪除選取」都
 緊貼靠左(不再平分)、「編輯選取」按鈕已經消失，資料顯示正常。
+
+---
+
+## 觀察清單／庫存清單點股票跳轉「個股資訊」，桌面版/web版各自做法實作（2026-08-07）
+
+使用者要求觀察清單/庫存清單點股票也要能跳轉「個股資訊」，比照選股分頁既有的操作，
+桌面版/web版分別依照各自平台已經驗證過的模式實作，不是硬套同一套機制。
+
+**桌面版**：選股分頁(候選清單`candidates_table`)既有的`_navigate_to_candidate_row()`
+用的是**雙擊**(`cellDoubleClicked`)觸發跳轉，不是單擊——2026-08-06那批的既有結論是
+「單擊(包含點勾選欄)只做選取，跟編輯/刪除選取共用同一個select機制，要跟『查看個股
+資訊』這個動作分開，才用雙擊」。這次比照同一個模式：
+- 觀察清單`watchlist_table`(`QTableWidget`)新增`cellDoubleClicked`連線→新方法
+  `_navigate_to_watchlist_row(row)`，讀該列欄位0(股票代號)、設定`_current_stock_id`、
+  切到`TAB_STOCK_DETAIL`。
+- 庫存清單`inventory_tree`(`QTreeWidget`，父列=股票彙總/子列=個別批次的master-detail
+  結構)新增`itemDoubleClicked`連線→新方法`_on_inventory_tree_item_double_clicked()`，
+  讀`UserRole`存的股票代號(父列/子列都有設，不用判斷點到哪一種)。跟既有「點『批次數』
+  欄單擊展開/收合」的`itemClicked`各自獨立的Qt訊號，互不衝突。
+- 兩處都跟手動查詢一樣把`_current_stock_source`設為`None`，不硬套「來源：X月X日的
+  選股策略」這個候選清單專用的日期格式化文字(`_format_month_day()`吃的是日期字串，
+  塞觀察清單/庫存清單這種非日期來源會壞掉，這次刻意不擴充這塊，維持簡單)。
+
+**web版**：候選清單`candidates_table`用的是`selection_mode`混用`multi-row`(勾選欄，
+批次動作用)+`single-cell`(判斷有沒有點到「名稱」欄)，這次同樣比照：
+- 觀察清單`watchlist_table`：`selection_mode="multi-row"`改成`["multi-row",
+  "single-cell"]`，多檢查`event.selection.cells`裡有沒有`col=="name"`，有的話設定
+  `st.session_state["detail_stock_id"]`等一系列跟候選清單一致的session_state
+  key、`st.rerun()`跳轉。
+- 庫存清單`inventory_summary_table`：原本`selection_mode="single-row"`(點列選取、
+  展開下方批次明細，這是既有的master-detail互動，不能拿掉)，改成`["single-row",
+  "single-cell"]`混用——點「名稱」欄同時會觸發single-row選取(下方批次明細那段
+  邏輯還是會跑到)跟single-cell判斷，但下面立刻`st.rerun()`跳轉分頁，使用者不會
+  真的看到批次明細畫面一閃而過。
+- 兩處都新增對應的`_pending_watchlist_table_reset`/`_pending_inventory_summary_
+  table_reset`中介key(比照既有的`_pending_candidates_table_reset`)，在`st.tabs()`
+  建立之前把這次觸發跳轉的cell selection清掉，不然使用者切回這兩個分頁時會被
+  誤判成「又點了一次」再度跳轉、卡住出不去。
+- 兩處都補上「點『名稱』欄可直接查看個股資訊」的`st.caption()`提示，比照候選清單
+  既有的提示文字風格。
+
+真實驗證：`pytest tests/ -q`1045個測試全數通過(這批純UI互動，跟先前的分頁按鈕
+調整一樣沒辦法用pytest的單元測試覆蓋)。web版本機啟動真實Streamlit+Playwright：
+①觀察清單點「名稱」欄(3037欣興)成功跳轉個股資訊分頁、正確顯示該股K線圖；②庫存
+清單點「名稱」欄(2317鴻海)同樣成功跳轉；③額外驗證跳轉後手動切回觀察清單分頁，
+畫面正確停留在觀察清單、沒有被誤判又跳走一次(`_pending_*_reset`機制正常運作)。
+桌面版直接呼叫`_navigate_to_watchlist_row()`/`_on_inventory_tree_item_double_
+clicked()`驗證(不是真的模擬雙擊時序，跟QTest模擬雙擊的時間精確度限制有關，改成
+直接驗證方法本身的邏輯結果)：兩處呼叫後`tabs.currentIndex()`都正確變成
+`TAB_STOCK_DETAIL`、`_current_stock_id`都正確帶入被雙擊的股票代號；`window.grab()`
+截圖確認畫面正確切到「個股資訊」分頁，⚠️ K線圖區塊本身在截圖當下是空白的，這是
+已知的`QWebEngineView`非同步渲染/離線截圖限制(見PLAN.md先前紀錄過的同一個現象)，
+不是這次改動的bug，邏輯層(分頁索引+股票代號)已經用print確認完全正確。
