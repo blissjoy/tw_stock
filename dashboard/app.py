@@ -1435,9 +1435,28 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             portfolio_storage.add_watchlist_group(portfolio_conn, "預設觀察清單")
             groups = portfolio_storage.list_watchlist_groups(portfolio_conn)
 
-        group_names = [g["group_name"] for g in groups]
-        selected_group_name = st.selectbox("群組", group_names, key="watchlist_group_select")
-        group_id = next(g["id"] for g in groups if g["group_name"] == selected_group_name)
+        # ⚠️ 2026-08-07修正：原本selectbox用options=group_names(字串)+key=自動追蹤
+        # 選取狀態，實測發現重新命名後「切到別的分頁再切回來」選取會跑掉——這個分頁
+        # 是用`if tab_watchlist.open: render_watchlist_tab()`包起來的(見下方st.tabs()
+        # 呼叫處)，切到別的分頁時這段程式碼整個不會執行，selectbox這個widget那一輪
+        # 沒有被instantiate，Streamlit的key自動管理的session_state會被重置，切回來
+        # 時前一次的選取狀態就丟失了(不是只有改名字串對不上這麼單純，用group_id當
+        # options一樣會遇到，已經實測確認過)。真正的解法是自己另外用一個「不綁定任何
+        # widget」的session_state key手動記住目前選到哪個群組(watchlist_selected_
+        # group_id，不用selectbox的key=自動管理)，每次進來都用它算出index=要預選第
+        # 幾個選項、每次使用者互動完也手動把最新選取寫回去——這個key是plain data，
+        # 不會因為widget那一輪沒被instantiate就被清掉，才能撐過「切到別的分頁」這種
+        # 空窗期。找不到(群組被刪除等情況)才退回index=0。
+        group_name_by_id = {g["id"]: g["group_name"] for g in groups}
+        group_ids = list(group_name_by_id.keys())
+        remembered_group_id = st.session_state.get("watchlist_selected_group_id")
+        default_index = group_ids.index(remembered_group_id) if remembered_group_id in group_ids else 0
+        group_id = st.selectbox(
+            "群組", group_ids, index=default_index,
+            format_func=lambda gid: group_name_by_id.get(gid, str(gid)),
+        )
+        st.session_state["watchlist_selected_group_id"] = group_id
+        selected_group_name = group_name_by_id[group_id]
 
         group_col1, group_col2, group_col3 = st.columns([1, 1, 1])
         with group_col1:

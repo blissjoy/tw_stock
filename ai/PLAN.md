@@ -7917,3 +7917,51 @@ failed都要傳，不是只有success)。`record_fetch_run()`把它存進對應�
 真實的`data/data_fetch_log.jsonl`)+`QT_QPA_PLATFORM`非offscreen真實視窗+`window.
 grab()`截圖確認：「TWSE 下載失敗」子列正確顯示紅字、筆數7、預覽「1538正峰、2325矽品、
 2311日月光、2475華映、2384勝華...等7檔」；「TPEx 下載失敗」子列同樣正確顯示。
+
+---
+
+## 修好web版觀察清單「重新命名群組後下拉選單跑掉」（2026-08-07）
+
+使用者回報：web版重新命名觀察清單群組後，群組下拉選單會跑掉，桌面版沒有這個問題。
+
+**第一版修法(不完整)**：一開始以為根因是`st.selectbox("群組", group_names, key=
+"watchlist_group_select")`直接用群組**名稱字串**當選項/追蹤選取狀態——重新命名後
+Streamlit的session_state記住的還是「改名前」那個字串，在新的options清單裡已經找
+不到，退回顯示第一個選項。比照桌面版`QComboBox`用`addItem(name, id)`把id存成
+itemData、`findData(id)`找回選取狀態的做法，改成`options`用不會變動的`group_id`、
+`format_func`顯示對應名稱。**用Playwright實測後發現這樣改還是會跑掉**，只是變成
+「改名當下那一瞬間」不會跑掉，但**只要切到別的分頁再切回來，選取就會跑掉**——代表
+真正的root cause不是「字串vs. id」，還要繼續往下查。
+
+**真正的root cause**：這個專案的分頁是用`if tab_watchlist.open: render_watchlist_
+tab()`包起來的(見`st.tabs()`呼叫處)，切到別的分頁時`tab_watchlist.open`是False，
+`render_watchlist_tab()`整段不會執行，裡面的`st.selectbox(..., key="watchlist_
+group_select")`那一輪根本沒有被instantiate——**Streamlit的widget用`key`自動管理
+的session_state，在widget那一輪沒被instantiate時會被清掉**，切回來時前一次的選取
+狀態就丟失、退回顯示第一個選項。用`print(st.session_state)`在畫面上直接印出來實測
+確認：切到「庫存清單」再切回「觀察清單」，`group_id`真的從剛選好的3變回1。桌面版
+`QComboBox`是Qt原生retained-mode元件，物件本身在記憶體裡持續存在，不會因為
+`QTabWidget`切到別的分頁就被「解除instantiate」，這是兩種UI框架(Streamlit的
+immediate-mode「每次rerun整份重新執行」vs. Qt的retained-mode「widget物件持續存在」)
+本質上的差異，不是桌面版程式碼刻意做了什麼特殊處理。
+
+**第二版修法(真正修好)**：不再依賴`selectbox`的`key=`自動管理選取狀態，改成自己
+另外維護一個**不綁定任何widget**的plain session_state key(`watchlist_selected_
+group_id`)——這種key是一般的dict項目，不會因為widget那一輪沒被instantiate就被
+清掉，撐得過「切到別的分頁」的空窗期。每次進來時用它算出`index=`要預選第幾個選項
+(找不到，例如群組被刪除，才退回`index=0`)，`selectbox`不再傳`key=`，每次使用者
+互動完畢也手動把最新選取的`group_id`寫回這個key。
+
+**驗證過程本身就是一個教訓**：第一版修法只用單次「改名→立刻截圖」驗證就以為修好了，
+沒有測試「改名後接著切分頁」這個使用者實際會做的操作，才會漏掉真正的root cause。
+過程中兩次Playwright測試腳本的操作失誤，不小心把使用者真實的`data/portfolio.db`
+裡「預設觀察清單」(9檔股票)跟「test」兩個群組的名稱互換/衍生出多餘的群組——已經
+用SQL直接查`watchlist_stocks`裡哪個group_id掛著那9檔股票，確認回正確的id→名稱
+對應關係並修復，之後改用專門新建的臨時群組做測試、測完用UI的「刪除群組」清乾淨，
+不再直接動使用者真實資料做測試。
+
+真實驗證：`pytest tests/ -q`1045個測試全數通過(這批純UI邏輯修正，沒有新增測試——
+Streamlit的`st.tabs()`+`if tab.open:`+widget生命週期這類行為沒辦法用pytest的
+單元測試覆蓋，只能靠真瀏覽器互動驗證)。本機啟動真實Streamlit+Playwright完整重現
+使用者情境：選取群組→重新命名→切到別的分頁→切回觀察清單分頁，確認下拉選單正確
+維持在重新命名後的群組上，多切幾輪分頁來回也沒有再跑掉。
