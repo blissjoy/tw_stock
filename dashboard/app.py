@@ -1499,6 +1499,14 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 if st.button("取消", key="watchlist_group_delete_cancel"):
                     st.session_state["pending_delete_group_id"] = None
                     st.rerun()
+            # ⚠️ 2026-08-07修正：使用者反映「群組是空的時候按刪除群組，卻跳出『請至少
+            # 選取一檔股票再刪除』」——實測過刪除邏輯本身沒問題(空群組確認後真的能刪掉)，
+            # 但原本這裡沒有return，「確認刪除群組」/「取消」按鈕會緊接著下面「新增股票」/
+            # 「刪除選取」那排一起顯示，兩排視覺上太靠近、「確認刪除群組」還跟「新增股票」
+            # 同一欄對齊，很容易誤點成「刪除選取」(空群組沒有任何列可選，點下去自然跳出
+            # 「請至少選取一檔股票再刪除」)。改成確認中就return，強制先處理完刪除群組的
+            # 確認/取消，不會同時看到容易混淆的兩排按鈕。
+            return
 
         watchlist_df = portfolio_data.load_watchlist(conn, portfolio_conn, group_id)
 
