@@ -131,10 +131,14 @@ def build_group_table(main_conn, portfolio_conn, group_id: int) -> dict:
     text_colors: dict[tuple[int, int], str] = {}
 
     name_col = _BASE_HEADERS.index("名稱")
+    # 2026-08-07改批次查詢(load_huang_chip_rows_batch())取代逐股呼叫——跟桌面版/web版
+    # 觀察清單分頁同一批修的N+1問題，這裡main_conn也可能是Turso連線(見get_default_
+    # connection())，逐股查詢一樣會被雲端網路來回放大延遲。
+    chip_rows_by_stock = huang_chip_data.load_huang_chip_rows_batch(main_conn, list(df["stock_id"]))
     for i, row in enumerate(df.reset_index(drop=True).to_dict("records")):
         row_series = pd.Series(row)
         row_idx = i + 2  # 前2列是表頭
-        chip_row = huang_chip_data.load_huang_chip_row(main_conn, row["stock_id"])
+        chip_row = chip_rows_by_stock[row["stock_id"]]
         chip_values, chip_text_colors = _chip_row_values_and_text_colors(chip_row, row_idx)
         values.append(_base_row_values(row_series) + chip_values)
         text_colors.update(chip_text_colors)

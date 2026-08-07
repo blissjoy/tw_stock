@@ -7710,3 +7710,99 @@ spacer_col, update_col = st.columns([1, 1, 1, 1, 3])`取代原本兩處各自的
 不再分成表格上下兩處；②真的勾選一列(3037欣興)後點「編輯選取」，彈出的「編輯觀察股票」
 對話框正確帶出股票代號3037(不是空白或錯誤股票)，確認`prior_selection_rows`讀
 session_state的邏輯即使按鈕搬到表格前面也正常運作，不是只有畫面對但功能壞掉。
+
+---
+
+## 診斷：web版正式站切換選項很慢的根因（2026-08-07）
+
+背景：使用者反映`https://joystock.streamlit.app`每切換一個選項都很慢，舉例「切換觀察
+清單群組」。
+
+**用Playwright實測正式站量測真實耗時**(用Streamlit的`stStatusWidget`「執行中」指示
+元件出現到消失量測，比固定sleep準確)：切到幾乎沒有股票的「test」群組約2.7~3.2秒；
+切到有10檔股票的「預設觀察清單」群組穩定約8.9秒(兩輪重複測試數字一致)。股票數量越多、
+耗時越長，且不是常數開銷，強烈指向「每檔股票都要額外查詢」的N+1模式。
+
+**追到根因**：`dashboard/app.py`的觀察清單分頁會對`watchlist_df`裡每一檔股票呼叫
+`huang_chip_data.load_huang_chip_row()`(逐股迴圈，見「大戶/散戶持股變化」「投信/外資
+連續買賣超」等黃豐凱籌碼欄位)。這個函式底下組合4個子函式，每個都各自對DB下1~3條
+SQL：`load_institutional_streak_and_flow`(3條，含1條`_resolve_as_of_date`)、
+`load_ma_price_position`(3條，含1條`_resolve_as_of_date`)、`load_weekly_volume_
+pattern`(2條，含1條`_resolve_as_of_date`)、`load_holder_change`(1條)——**單一股票就是9條
+sequential SQL查詢**，且`_resolve_as_of_date`同一檔股票被重複查了3次(每個子函式各自
+查一次「這檔股票最新交易日」，明明3次結果一定相同)。10檔股票的群組=90條依序執行的SQL。
+
+**為什麼本機sqlite感覺不出來、部署到雲端才明顯變慢**：桌面版/本機開發永遠是本機
+sqlite檔案(`LOCAL_DB_PATH`)，單條查詢通常次毫秒等級，90條依序查詢感覺不到延遲；
+但`https://joystock.streamlit.app`部署到雲端是連Turso(`src/data/connection.py`的
+`get_default_connection()`——雲端沒設`LOCAL_DB_PATH`就會走Turso分支)，**每條SQL都是
+一次真正的網路來回**，就算單趟只要50~70ms，90條依序執行(不是平行/批次)就會累加到
+好幾秒，這正好對應實測到的「10檔股票多花約6秒(8.9-3.0秒)」。
+
+⚠️ 本來想直接在本機連Turso量測單條查詢的網路延遲當佐證，但這個sandbox環境對Turso的
+outbound連線會直接卡住不回應(見[[feedback_local_sandbox_cannot_reach_turso]])，60秒都
+連不上、也沒有拋例外，只能改成完全依賴Playwright對正式站的實測數字佐證，沒有本機
+單條查詢延遲的精確數字可以交叉核對。
+
+**還沒做的事**：這次只完成診斷，還沒動手修。可能的修法方向：①把`huang_chip_data.py`
+四個子函式改成接受`stock_ids: list[str]`批次查詢(`WHERE stock_id IN (...)`)取代
+逐股迴圈，`_resolve_as_of_date`同一批次只查一次而不是每股每函式各查一次；②用
+`st.cache_data`搭配合理TTL快取整個觀察清單群組的黃豐凱籌碼欄位(這批資料本來就是
+T+1排程更新，同一天內不會變，快取風險低)。尚未跟使用者確認要採用哪個方向、或兩者
+都做。
+
+---
+
+## 修好N+1效能問題：huang_chip_data.py改批次查詢（2026-08-07）
+
+使用者確認要動手修，且明確要求「桌面版也要一起」——雖然桌面版本機sqlite感覺不出延遲，
+但這是同一套查詢層(`src/presentation/huang_chip_data.py`)被三個地方共用(web版觀察
+清單分頁、桌面版`_populate_huang_chip_columns()`、`watchlist_export.py`匯出Google
+Sheet)，只改web版會讓同一段邏輯出現「批次」跟「逐股」兩套並存，之後維護成本更高，
+所以三處呼叫端一起改，不是只改web版。
+
+**只做①批次查詢(根本解)，②`st.cache_data`快取先不做**：批次化已經把「9N條逐股SQL」
+降到「固定6條批次SQL(不管幾檔股票)」，是否還需要疊加快取要看批次修完後實際還有多慢
+再決定，快取還牽涉TTL/失效時機的額外設計風險(這個app的賣點就是資料每天更新，使用者
+會在意看到的是不是最新資料)，沒有清楚需要之前不先加，避免做超出需求的事。之後如果
+批次化後正式站還是覺得慢，再回頭討論要不要加。
+
+**改動設計**：新增`load_huang_chip_rows_batch(conn, stock_ids, as_of_date=None)`
+(以及底下4個子函式各自的`*_batch`版本)，取代「逐股呼叫`load_huang_chip_row()`」的
+迴圈。原本4個單股函式(`load_institutional_streak_and_flow`/`load_ma_price_
+position`/`load_weekly_volume_pattern`/`load_holder_change`)簽章完全不變、改成
+內部呼叫「只傳一檔股票的批次版」，避免同一段查詢邏輯維護兩份，也讓`tests/test_
+huang_chip_data.py`既有14個測試不用改一行就全部繼續通過。
+
+批次SQL的簡化假設(已在`huang_chip_data.py`模組docstring詳細記錄)：一律用「這批
+股票裡最晚的as_of_date」當SQL的`date <= ?` upper bound、不加lower bound——因為
+每檔股票自己的資料本來就全部滿足「date <= 自己的as_of_date」，而「自己的as_of_date」
+必定 <= 批次最晚日期，所以用批次最晚日期當bound不會漏掉任何一檔股票原本查得到的
+資料，之後在Python裡再依「這檔股票自己的as_of_date」過濾/截斷，結果跟逐股查詢
+完全等價(不是近似)。不加lower bound是因為一次多抓一點列數、用一條SQL傳輸，仍然遠比
+對雲端DB發送N次獨立網路來回快，不需要為了省列數再冒「lower bound抓太緊、漏掉很久
+沒交易的股票」的邊界風險。`_resolve_as_of_dates()`(批次版「查每檔股票最新交易日」)
+也只在`load_huang_chip_rows_batch()`裡查一次、往下傳給3個需要日期的子批次函式
+(內部`_as_of_dates`參數)，不會像原本一樣同一批股票的日期被4個子函式各自重查一次。
+
+**三處呼叫端改法一致**：都從「逐股迴圈呼叫`load_huang_chip_row()`」改成「迴圈開始前
+先呼叫一次`load_huang_chip_rows_batch(conn, list(stock_ids))`，迴圈裡改成查
+`dict[stock_id]`」——`dashboard/app.py`觀察清單分頁、`desktop/main_window.py`的
+`_populate_huang_chip_columns()`、`src/presentation/watchlist_export.py`的
+`build_group_table()`三處都是這個模式。
+
+**新增測試**：`tests/test_huang_chip_data.py`新增4個批次測試，最重要的是「批次結果
+逐股比對」(`test_load_huang_chip_rows_batch_matches_individual_calls_for_multiple_
+stocks`：批次版本對每一檔股票算出來的結果，要跟逐股呼叫舊版單股函式完全相等，這是
+批次改寫最重要的正確性保證)，另外3個涵蓋空清單、批次裡混一檔完全沒資料的股票、
+以及兩檔股票as_of_date不同(一新一舊，模擬「很久沒交易」的股票混在正常股票的觀察
+清單裡)不會互相汙染彼此的查詢結果。
+
+真實驗證：`pytest tests/ -q`1037個測試全數通過(14個既有huang_chip_data測試不用改
+一行、加4個新批次測試)。本機啟動真實Streamlit+Playwright截圖確認web版觀察清單分頁
+資料正確顯示(9檔股票的投信/外資連續買賣超、大戶/散戶週變化、均線狀態、週K型態、
+法人買賣超張數全部跟改版前吻合)；桌面版用`QT_QPA_PLATFORM`非offscreen真實視窗+
+`window.grab()`截圖確認觀察清單分頁同樣正確顯示、沒有crash，數字跟web版一致。
+⚠️ 這批只驗證了「批次化後資料正確性不變」，還沒有機會實際部署到`joystock.streamlit.
+app`正式站重新量測切換群組的真實耗時改善多少(本機sandbox連不到Turso，只能等commit
++push後在正式站上重新用Playwright實測，見[[feedback_local_sandbox_cannot_reach_turso]])。

@@ -2488,8 +2488,11 @@ class MainWindow(QMainWindow):
     def _populate_huang_chip_columns(self, table: QTableWidget, df: pd.DataFrame) -> None:
         """觀察清單表格既有12欄之後，接上黃豐凱籌碼分析法的D~R欄位(不含手動的J欄，
         見src/presentation/huang_chip_data.py)。跟_populate_portfolio_table()(庫存
-        清單也在共用)分開處理，只影響觀察清單，不會動到庫存清單。逐股查詢本地DB
-        (觀察清單股票數量少，成本可忽略，不需要背景執行緒)。
+        清單也在共用)分開處理，只影響觀察清單，不會動到庫存清單。桌面版永遠是本機
+        sqlite、單條查詢次毫秒等級，逐股查詢的延遲感覺不出來；但2026-08-07改成呼叫
+        批次版`load_huang_chip_rows_batch()`——跟web版(dashboard/app.py)用同一套
+        查詢層，避免兩邊各自維護「逐股」跟「批次」兩種呼叫方式，之後這個函式的查詢
+        邏輯只需要維護一份。
         """
         if self.conn is None:
             return
@@ -2499,8 +2502,9 @@ class MainWindow(QMainWindow):
             "foreign_10d", "invest_10d", "foreign_5d", "invest_5d",
         ]
         table.setSortingEnabled(False)
+        chip_rows_by_stock = huang_chip_data.load_huang_chip_rows_batch(self.conn, list(df["stock_id"]))
         for row_idx, stock_id in enumerate(df["stock_id"]):
-            chip_row = huang_chip_data.load_huang_chip_row(self.conn, stock_id)
+            chip_row = chip_rows_by_stock[stock_id]
 
             self._set_chip_text_item(table, row_idx, base + 0, chip_row["invest_streak"])
             self._set_chip_text_item(table, row_idx, base + 1, chip_row["foreign_streak"])

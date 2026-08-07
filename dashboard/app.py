@@ -1510,14 +1510,17 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             st.caption("ps: 大戶/散戶持股變化僅支持觀察清單")
             return
 
-        # 逐股查詢黃豐凱籌碼分析法欄位(照抄桌面版_populate_huang_chip_columns()，
-        # 觀察清單股票數量少，成本可忽略，不需要背景執行緒)。label-dict欄位/流量
-        # 欄位都在建DataFrame前就轉成「已格式化好的字串」("-"或+/-千分位數字字串)，
-        # 不留原始None/NaN——跟「個股明細」那批踩過的坑一樣，st.dataframe搭配
-        # Styler對None/NaN儲存格會顯示"None"字面字串，不會套用自訂格式化邏輯。
+        # 批次查詢黃豐凱籌碼分析法欄位(2026-08-07改批次：原本逐股呼叫load_huang_chip_row()
+        # 是N檔股票=9N條依序SQL，本機sqlite感覺不出來，但web版部署到雲端連的是Turso，
+        # 每條SQL都是一次網路來回，切換觀察清單群組因此變得很慢，診斷過程見ai/PLAN.md)。
+        # label-dict欄位/流量欄位都在建DataFrame前就轉成「已格式化好的字串」("-"或
+        # +/-千分位數字字串)，不留原始None/NaN——跟「個股明細」那批踩過的坑一樣，
+        # st.dataframe搭配Styler對None/NaN儲存格會顯示"None"字面字串，不會套用自訂
+        # 格式化邏輯。
+        chip_rows_by_stock = huang_chip_data.load_huang_chip_rows_batch(conn, list(watchlist_df["stock_id"]))
         chip_rows = []
         for stock_id in watchlist_df["stock_id"]:
-            chip = huang_chip_data.load_huang_chip_row(conn, stock_id)
+            chip = chip_rows_by_stock[stock_id]
             flow = chip.get("flow") or {}
             ma = chip.get("ma_price_position")
             weekly = chip.get("weekly_volume_pattern")
