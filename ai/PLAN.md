@@ -7806,3 +7806,12 @@ stocks`：批次版本對每一檔股票算出來的結果，要跟逐股呼叫�
 ⚠️ 這批只驗證了「批次化後資料正確性不變」，還沒有機會實際部署到`joystock.streamlit.
 app`正式站重新量測切換群組的真實耗時改善多少(本機sandbox連不到Turso，只能等commit
 +push後在正式站上重新用Playwright實測，見[[feedback_local_sandbox_cannot_reach_turso]])。
+
+**補充：commit+push後正式站實測結果**——使用者確認commit後直接push(之後這個repo
+「commit完直接push、不用再問一次」，見[[feedback_auto_push_after_commit]])，等
+Streamlit Cloud重新部署完成後，用同一套Playwright腳本重新量測`joystock.streamlit.
+app`：修復前「test」(幾乎沒股票)2.7~3.2秒、「預設觀察清單」(10檔股票)穩定8.9秒，
+兩者相差約6秒；修復後兩個群組雙輪測試都落在1.7~2.2秒，**差距完全消失**(不再隨股票
+數量增加而變慢)，證實這次批次化修法確實解決了正式站的效能問題，不只是本機測試正確
+而已。這批到此完整收尾(診斷→修復→本機正確性驗證→正式站效能驗證，四個階段都有
+真實數據佐證)。
