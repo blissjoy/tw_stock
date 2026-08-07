@@ -1357,39 +1357,30 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     st.session_state["pending_delete_lot_ids"] = None
                     st.rerun()
 
-    @st.dialog("觀察清單股票")
-    def _watchlist_stock_dialog(group_id: int, initial: dict | None) -> None:
-        """新增/編輯觀察清單股票——跟_inventory_lot_dialog()同一個結構，但沒有買入
-        日期/預估手續費欄位(觀察清單不是真的持股，add_watchlist_stock()/update_
-        watchlist_stock()本來就沒有這兩個參數)。2026-08-06拿掉參考成本價/參考股數
-        輸入框(比照desktop/main_window.py的_StockEditDialog同一天的改版)：使用者
-        反映觀察清單不是真的持股，這兩個欄位、連同表格上衍生出來的市值/帳面損益/
-        報酬率欄位放在這裡沒有意義；add_watchlist_stock()/update_watchlist_stock()
-        的cost_price/shares參數本來就是optional，這裡固定傳None，不需要改DB層。
+    @st.dialog("新增觀察股票")
+    def _watchlist_stock_dialog(group_id: int) -> None:
+        """新增觀察清單股票——跟_inventory_lot_dialog()同一個結構，但沒有買入日期/
+        預估手續費欄位(觀察清單不是真的持股，add_watchlist_stock()本來就沒有這兩個
+        參數)。2026-08-06拿掉參考成本價/參考股數輸入框(比照desktop/main_window.py的
+        _StockEditDialog同一天的改版)：使用者反映觀察清單不是真的持股，這兩個欄位、
+        連同表格上衍生出來的市值/帳面損益/報酬率欄位放在這裡沒有意義；add_watchlist_
+        stock()的cost_price/shares參數本來就是optional，這裡固定傳None，不需要改
+        DB層。2026-08-07拿掉「編輯選取」(使用者反映沒有作用、要求移除)後，這個dialog
+        只剩新增用途，不再需要is_edit分支。
         """
-        is_edit = initial is not None
-        st.subheader("編輯觀察股票" if is_edit else "新增觀察股票")
+        query = st.text_input("股票代號或名稱", placeholder="例如 2330 或 台積電")
+        resolved_id = chart_data.resolve_stock_id(conn, query) or query.strip() if query else None
+        if query:
+            resolved_name = chart_data.get_stock_name(conn, resolved_id) if resolved_id else None
+            st.caption(f"解析為：{resolved_id} {resolved_name}" if resolved_name else "（查無此股票代號，仍可儲存）")
 
-        if is_edit:
-            st.text_input("股票代號", value=initial["stock_id"], disabled=True)
-            resolved_id = initial["stock_id"]
-        else:
-            query = st.text_input("股票代號或名稱", placeholder="例如 2330 或 台積電")
-            resolved_id = chart_data.resolve_stock_id(conn, query) or query.strip() if query else None
-            if query:
-                resolved_name = chart_data.get_stock_name(conn, resolved_id) if resolved_id else None
-                st.caption(f"解析為：{resolved_id} {resolved_name}" if resolved_name else "（查無此股票代號，仍可儲存）")
-
-        note = st.text_input("備註", value=initial.get("note") or "" if is_edit else "")
+        note = st.text_input("備註", value="")
 
         if st.button("確認", key="watchlist_stock_dialog_confirm"):
             if not resolved_id:
                 st.warning("請輸入股票代號。")
                 return
-            if is_edit:
-                portfolio_storage.update_watchlist_stock(portfolio_conn, group_id, resolved_id, None, None, note)
-            else:
-                portfolio_storage.add_watchlist_stock(portfolio_conn, group_id, resolved_id, None, None, note)
+            portfolio_storage.add_watchlist_stock(portfolio_conn, group_id, resolved_id, None, None, note)
             st.rerun()
 
     @st.dialog("觀察清單群組")
@@ -1451,14 +1442,24 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         group_ids = list(group_name_by_id.keys())
         remembered_group_id = st.session_state.get("watchlist_selected_group_id")
         default_index = group_ids.index(remembered_group_id) if remembered_group_id in group_ids else 0
-        group_id = st.selectbox(
-            "群組", group_ids, index=default_index,
-            format_func=lambda gid: group_name_by_id.get(gid, str(gid)),
+        # 2026-08-07改版：label跟下拉改成同一列的緊湊排法(見_inline_field()的說明，
+        # 跟選股/產業輪動分頁同一套做法)，取代原本label在上、下拉在下的堆疊排版。
+        group_id = _inline_field(
+            st, "群組",
+            lambda: st.selectbox(
+                "群組", group_ids, index=default_index,
+                format_func=lambda gid: group_name_by_id.get(gid, str(gid)),
+                label_visibility="collapsed", width=250,
+            ),
+            label_width=0.5, widget_width=3,
         )
         st.session_state["watchlist_selected_group_id"] = group_id
         selected_group_name = group_name_by_id[group_id]
 
-        group_col1, group_col2, group_col3 = st.columns([1, 1, 1])
+        # 2026-08-07改版：按鈕改成窄欄位+吸收剩餘寬度的spacer_col，取代原本st.columns
+        # ([1,1,1])平分寬度的寫法——比照候選清單/觀察清單股票列那批「按鈕靠左排列」
+        # 的既有做法，讓按鈕緊貼在左側，不要被平分寬度拉開。
+        group_col1, group_col2, group_col3, group_spacer = st.columns([1.2, 1.6, 1.2, 4])
         with group_col1:
             if st.button("➕ 新增群組"):
                 _watchlist_group_name_dialog("add", None, "")
@@ -1496,21 +1497,12 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         # watchlist_update_label(_build_watchlist_tab()，工具列最右邊)——先前web版
         # 這個分頁完全沒有這個時間戳，屬於漏做的部分，不是刻意簡化(跟同一批次
         # 刻意簡化的①欄位顯示選單②雙列表頭③籌碼欄位逐格套色三點不同)。
-        # 2026-08-07使用者要求「編輯選取」/「刪除選取」搬到「新增股票」後面緊貼一起
-        # (原本一個在表格上方、一個在表格下方，分開兩處)：比照候選清單「按鈕靠左排列」
-        # 的做法，窄欄位+吸收剩餘寬度的spacer_col，三個按鈕才會緊貼、不會被拉開。
-        add_col, edit_col, delete_col, spacer_col, update_col = st.columns([1, 1, 1, 1, 3])
+        # 2026-08-07拿掉「編輯選取」(使用者反映沒有作用、要求移除，桌面版沒有這個
+        # 問題保留不動)。按鈕維持窄欄位+吸收剩餘寬度的spacer_col靠左排列。
+        add_col, delete_col, spacer_col, update_col = st.columns([1, 1, 1, 3])
         with add_col:
             if st.button("➕ 新增股票", key="watchlist_add_stock"):
-                _watchlist_stock_dialog(group_id, None)
-        with edit_col:
-            if st.button("✏️ 編輯選取"):
-                if len(prior_selection_rows) != 1:
-                    st.warning("請選取剛好一檔股票再編輯。")
-                else:
-                    stock_row = watchlist_df.iloc[prior_selection_rows[0]]
-                    initial = {"stock_id": stock_row["stock_id"], "note": stock_row["note"]}
-                    _watchlist_stock_dialog(group_id, initial)
+                _watchlist_stock_dialog(group_id)
         with delete_col:
             if st.button("🗑️ 刪除選取"):
                 if not prior_selection_rows:
