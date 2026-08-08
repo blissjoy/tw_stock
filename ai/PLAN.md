@@ -8084,3 +8084,44 @@ group()`重新建一個同名的空`test`群組補回去(id變成6，但因為�
 完整重現：新建一個空群組→選取→點「刪除群組」→截圖確認畫面只剩「確認刪除群組」／
 「取消」，沒有「新增股票」／「刪除選取」同時出現→點「確認刪除群組」→確認DB查詢
 該群組真的被刪除、畫面正確退回顯示剩下的群組。
+
+---
+
+## 大盤／個股資訊成交量棒圖疊加5日均量線（2026-08-08）
+
+使用者要求成交量棒圖疊加5日移動平均量線圖——對應`ai/ebook-summary/P07-C2-各種
+成交量的定義.md`書中的「基本量」概念(基本量＝5日均量，攻擊量/爆大量/止跌量等
+分類全部以這條線當比較基準)，先前只在文字規則裡引用，圖表上看不到。
+
+**只需要改一處**：`src/presentation/chart_data.py`是桌面版/web版共用的畫圖層
+(桌面版`desktop/main_window.py`、web版`dashboard/app.py`的「大盤」「個股資訊」
+都呼叫同一套`load_price_history()`+`build_candlestick_figure()`)，不需要在
+兩個前端各自實作一次。
+
+**改動**：
+- 新增`VOLUME_MA_PERIOD=5`常數(對應書中「基本量」定義，之後如果門檻要調整只改
+  這一個地方)。
+- `load_price_history()`新增`VOLUME_MA{n}`欄位，用`src/indicators/moving_
+  average.py`既有的`sma()`(書中「基本量＝volume的SMA5」原文，剛好直接對應這個
+  已經實作過的函式，不用重新發明)，用join前(尚未`.tail(days)`裁切)的完整緩衝
+  歷史計算——理由跟既有MA5/MA20/SAR的warm-up buffer一致，不會在顯示視窗開頭
+  出現一段沒有值的斷線。
+- `build_candlestick_figure()`在成交量棒圖(row=2)疊加一條`go.Scatter`線圖，
+  橘色(`#f39c12`)，圖例顯示「5日均量」；欄位不存在時直接跳過不畫，比照MACD/KD/
+  SAR既有的容錯慣例，不會crash。
+
+**新增測試**：`tests/test_chart_data.py`新增4個——`load_price_history()`的
+VOLUME_MA5欄位在顯示視窗內無NaN(lookback buffer正確)+數值正確(用等差數列驗算)；
+`build_candlestick_figure()`欄位存在時正確加入「5日均量」線圖(mode/y值)、欄位
+不存在時不畫也不crash。
+
+真實驗證：`pytest tests/ -q`1048個測試全數通過。web版本機啟動真實Streamlit
+截圖確認「大盤」「個股資訊」(2330台積電)兩處成交量棒圖都正確疊加橘色「5日均量」
+線、圖例正確顯示。⚠️ 桌面版這次沒能跑真實GUI截圖驗證——本機記憶體這批只剩約
+2.3GB，改成直接呼叫桌面版共用的同一套`chart_data.load_price_history()`/
+`build_candlestick_figure()`函式(用真實DB的2330股票120天資料)，確認回傳的
+DataFrame有`VOLUME_MA5`欄位且120天全部有值、Figure物件的trace清單裡確實包含
+名稱「5日均量」的線圖——因為桌面版跟web版對這個功能完全走同一套程式碼路徑(桌面版
+只是把同一個Plotly Figure轉成HTML丟進QWebEngineView顯示，沒有另外寫一份桌面版
+專屬的成交量繪圖邏輯)，這個層級的驗證信心程度足夠，但建議之後記憶體充裕時還是
+實際切到桌面版「大盤」「個股資訊」分頁看一次真實畫面。

@@ -1507,6 +1507,59 @@ def test_build_candlestick_figure_omits_sar_trace_when_columns_missing_or_disabl
     assert not any(t.name == "SAR" for t in fig_missing_cols.data)
 
 
+def test_build_candlestick_figure_adds_volume_ma_line():
+    dates = pd.date_range("2026-07-01", periods=3)
+    df = pd.DataFrame(
+        {
+            "open": [100, 102, 101], "high": [103, 104, 105], "low": [99, 101, 100], "close": [102, 101, 104],
+            "volume": [1000, 1200, 900], "VOLUME_MA5": [1000.0, 1050.0, 1100.0],
+        },
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df)
+
+    ma_trace = next(t for t in fig.data if t.name == "5日均量")
+    assert ma_trace.mode == "lines"
+    assert list(ma_trace.y) == [1000.0, 1050.0, 1100.0]
+
+
+def test_build_candlestick_figure_omits_volume_ma_trace_when_column_missing():
+    """df裡沒有VOLUME_MA5欄位時(例如舊呼叫端)不應該crash，只是不畫這條線。"""
+    dates = pd.date_range("2026-07-01", periods=2)
+    df = pd.DataFrame(
+        {"open": [100, 102], "high": [103, 104], "low": [99, 101], "close": [102, 101], "volume": [1000, 1200]},
+        index=dates,
+    )
+
+    fig = build_candlestick_figure(df)
+
+    assert not any(t.name == "5日均量" for t in fig.data)
+
+
+def test_load_price_history_includes_volume_ma_column_with_lookback_buffer():
+    """VOLUME_MA5(書中「基本量」)要在整個顯示範圍(days=10)內都有值，理由跟MA5/MA20的
+    lookback buffer測試一致——不能因為只抓了10天資料就整條是NaN。"""
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    n_days = 20
+    rows = [
+        {"stock_id": "2330", "date": f"2025-{1 + d // 28:02d}-{1 + d % 28:02d}", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0, "volume": 1000 + d * 10, "trading_money": None, "trading_turnover": None, "spread": None}
+        for d in range(n_days)
+    ]
+    upsert_stock_prices(conn, rows)
+
+    df = load_price_history(conn, "2330", days=10)
+
+    assert len(df) == 10
+    assert "VOLUME_MA5" in df.columns
+    assert df["VOLUME_MA5"].notna().all(), "VOLUME_MA5在顯示視窗內不應該有NaN(緩衝資料應該足夠)"
+    # 量是1000+d*10線性遞增，5日均量應該等於當天量往前推2天的值(中心對齊的簡單驗算)
+    last_row = df.iloc[-1]
+    assert last_row["VOLUME_MA5"] == pytest.approx(last_row["volume"] - 20)
+
+
 def test_load_price_history_includes_sar_columns():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])

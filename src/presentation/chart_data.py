@@ -18,7 +18,7 @@ import pandas as pd
 from src.data import trading_calendar
 from src.indicators.kd import compute_kd
 from src.indicators.macd import compute_macd
-from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned
+from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned, sma
 from src.indicators.parabolic_sar import compute_sar, sar_flipped_within
 from src.patterns import chart_overlays
 
@@ -28,6 +28,13 @@ MA_COLORS = {
     5: "#2e86de", 10: "#e67e22", 20: "#8e44ad",
     60: "#16a085", 120: "#7f8c8d", 240: "#b8860b",
 }
+
+# 成交量子圖疊加的移動平均量天期——對應`ai/ebook-summary/P07-C2-各種成交量的定義.md`
+# 的「基本量＝5日均量（volume的SMA5）」，書中攻擊量/爆大量/止跌量等分類全部以這條線
+# 當比較基準，2026-08-08使用者要求把這條線實際疊畫到成交量棒圖上(先前只在文字規則
+# 裡引用，圖表上看不到)。
+VOLUME_MA_PERIOD = 5
+VOLUME_MA_COLOR = "#f39c12"
 
 # 短/中/長(日/週/月)趨勢分類器(見src/patterns/trend_state.py)專用的歷史長度——跟畫K線圖
 # 用的顯示窗口(load_price_history預設120天)分開，因為週線/月線要重新取樣(resample)出夠多
@@ -798,8 +805,9 @@ def get_stock_update_time(conn, stock_id: str) -> str | None:
 
 
 def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
-    """回傳指定股票最近days天的OHLCV+均線(MA5/10/20/60/120/240，欄位名MA{n})，依date遞增
-    排序、index為date；查無資料回傳空DataFrame。
+    """回傳指定股票最近days天的OHLCV+均線(MA5/10/20/60/120/240，欄位名MA{n})+成交量均線
+    (VOLUME_MA{VOLUME_MA_PERIOD}，即書中的「基本量」)，依date遞增排序、index為date；
+    查無資料回傳空DataFrame。
 
     多抓 max(FULL_PERIODS) 天的歷史資料當計算緩衝，讓均線在整個顯示範圍內都有值
     （而不是從顯示視窗的第一天才開始算、前面一大段是NaN），抓完才裁切回實際要顯示的days天。
@@ -825,6 +833,9 @@ def load_price_history(conn, stock_id: str, days: int = 120) -> pd.DataFrame:
     sar_bull, sar_values = compute_sar(df["high"], df["low"], df["close"])
     df["SAR"] = sar_values
     df["SAR_BULL"] = sar_bull
+    # 欄位VOLUME_MA{n}：一樣用join前(尚未裁切)的完整緩衝歷史計算，理由跟上面SAR/MA
+    # warm-up一致，不會在顯示視窗開頭出現一段沒有值的斷線。
+    df[f"VOLUME_MA{VOLUME_MA_PERIOD}"] = sma(df["volume"], VOLUME_MA_PERIOD)
     return df.tail(days)
 
 
@@ -1043,6 +1054,16 @@ def build_candlestick_figure(
 
     volume_colors = ["#c0392b" if c >= o else "#27ae60" for o, c in zip(df["open"], df["close"])]
     fig.add_trace(go.Bar(x=df.index, y=df["volume"], marker_color=volume_colors, name="成交量", showlegend=False), row=2, col=1)
+
+    # 2026-08-08新增：疊加VOLUME_MA{n}(書中「基本量」，見VOLUME_MA_PERIOD常數說明)線圖，
+    # 讓使用者不用另外對照數字就能一眼看出當天量是否放大/縮小。欄位不存在時(例如舊呼叫端
+    # 傳入的df沒有這個欄位)直接跳過不畫，比照MACD/KD/SAR既有的容錯慣例，不會crash。
+    volume_ma_col = f"VOLUME_MA{VOLUME_MA_PERIOD}"
+    if volume_ma_col in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df[volume_ma_col], mode="lines", name=f"{VOLUME_MA_PERIOD}日均量",
+            line=dict(color=VOLUME_MA_COLOR, width=1.3),
+        ), row=2, col=1)
 
     # MACD/KD子圖各自右上角標示目前使用的參數(固定值，直接寫死跟load_price_history()
     # 呼叫compute_macd()/compute_kd()時完全沒有覆寫參數的事實一致)，左上角顯示「最新一天」
