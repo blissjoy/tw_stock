@@ -1,10 +1,12 @@
 import pandas as pd
+import pytest
 
 from src.patterns.latest_day_summary import (
     classify_latest_candle_name,
     detect_latest_day_candle_patterns,
     detect_latest_day_volume_signals,
     summarize_latest_day,
+    summarize_volume_vs_ma5,
 )
 
 
@@ -165,9 +167,85 @@ def test_detect_latest_day_volume_signals_empty_when_too_short():
     assert detect_latest_day_volume_signals(df) == []
 
 
+def test_summarize_volume_vs_ma5_returns_none_when_too_short():
+    """basic_volume(n=5)需要至少5天才有值，資料不足時不該給出誤導性結論。"""
+    df = _df([_flat_row() for _ in range(4)])
+    assert summarize_volume_vs_ma5(df) is None
+
+
+def test_summarize_volume_vs_ma5_attack_volume():
+    # ⚠️ basic_volume()的rolling(5)包含當天自己，5日均量不是「前5天flat值1000」，而是
+    # (1000*4+1300)/5=1060，ratio=1300/1060≈1.226，不是天真地當成1300/1000=1.3。
+    rows = [_flat_row(100.0, volume=1000.0) for _ in range(5)] + [
+        {"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 1300},
+    ]
+    df = _df(rows)
+    result = summarize_volume_vs_ma5(df)
+    assert result["is_above"] is True
+    assert result["ratio"] == pytest.approx(1300 / 1060)
+    assert "攻擊量" in result["note"]
+
+
+def test_summarize_volume_vs_ma5_explosive_at_high_means_distribution_warning():
+    """爆大量(2倍以上)出現在高檔，依朱老師原理要提防主力出貨，不是單純偏多訊號。
+    ⚠️ 用4000(不是2500)才能扣掉rolling自己算進去的稀釋效果、確實跨過2倍門檻
+    (見test_summarize_volume_vs_ma5_attack_volume的rolling說明)。"""
+    rows = _swing_rows(100, 80, 104, 20, 20) + [_flat_row(104.0, volume=1000.0) for _ in range(5)] + [
+        {"open": 104.0, "high": 108.0, "low": 103.0, "close": 105.0, "volume": 4000},
+    ]
+    df = _df(rows)
+    result = summarize_volume_vs_ma5(df)
+    assert result["is_above"] is True
+    assert result["ratio"] == pytest.approx(4000 / 1600)
+    assert "爆大量" in result["note"] and "出貨" in result["note"]
+
+
+def test_summarize_volume_vs_ma5_explosive_not_at_high_means_bullish_attack():
+    """爆大量出現在起漲位置(不是高檔)，依朱老師原理仍屬偏多的攻擊性大量。"""
+    rows = [_flat_row(100.0, volume=1000.0) for _ in range(5)] + [
+        {"open": 100.0, "high": 108.0, "low": 99.0, "close": 105.0, "volume": 4000},
+    ]
+    df = _df(rows)
+    result = summarize_volume_vs_ma5(df)
+    assert result["is_above"] is True
+    assert result["ratio"] == pytest.approx(4000 / 1600)
+    assert "爆大量" in result["note"] and "攻擊性大量" in result["note"]
+
+
+def test_summarize_volume_vs_ma5_stop_fall_volume():
+    rows = [_flat_row(100.0, volume=1000.0) for _ in range(5)] + [
+        {"open": 100.0, "high": 100.5, "low": 98.0, "close": 99.0, "volume": 400},
+    ]
+    df = _df(rows)
+    result = summarize_volume_vs_ma5(df)
+    assert result["is_above"] is False
+    assert result["ratio"] == pytest.approx(400 / 880)
+    assert "止跌量" in result["note"]
+
+
+def test_summarize_volume_vs_ma5_general_low_volume():
+    rows = [_flat_row(100.0, volume=1000.0) for _ in range(5)] + [
+        {"open": 100.0, "high": 100.5, "low": 99.0, "close": 99.5, "volume": 700},  # 縮量但沒到0.5倍
+    ]
+    df = _df(rows)
+    result = summarize_volume_vs_ma5(df)
+    assert result["is_above"] is False
+    assert "觀望" in result["note"]
+
+
+def test_summarize_latest_day_includes_volume_vs_ma5_key():
+    rows = [_flat_row(100.0, volume=1000.0) for _ in range(5)] + [
+        {"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 1300},
+    ]
+    df = _df(rows)
+    summary = summarize_latest_day(df)
+    assert summary["volume_vs_ma5"] is not None
+    assert summary["volume_vs_ma5"]["is_above"] is True
+
+
 def test_summarize_latest_day_returns_empty_structure_for_empty_df():
     result = summarize_latest_day(pd.DataFrame())
-    assert result == {"candle_name": None, "patterns": [], "volume_signals": [], "trend": None}
+    assert result == {"candle_name": None, "patterns": [], "volume_signals": [], "volume_vs_ma5": None, "trend": None}
 
 
 def test_summarize_latest_day_combines_all_parts():

@@ -3542,6 +3542,18 @@ class MainWindow(QMainWindow):
         # 才不會誤把上一檔股票的資料當成目前這檔。
         stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
         stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        # 2026-08-08新增：今天量能相對5日均量(書中「基本量」)的水位判讀，跟「量價訊號」
+        # 不同——那行只在攻擊量/爆量等特定命名訊號觸發時才顯示，這裡是每天都有結論的
+        # 基礎陳述(見src/patterns/latest_day_summary.py的summarize_volume_vs_ma5()說明)。
+        volume_vs_ma5 = summary.get("volume_vs_ma5")
+        if volume_vs_ma5:
+            direction = "高於" if volume_vs_ma5["is_above"] else "低於"
+            volume_vs_ma5_lines = [
+                f"今日量能：{direction}5日均量（{volume_vs_ma5['ratio']:.2f}倍）",
+                f"　{volume_vs_ma5['note']}",
+            ]
+        else:
+            volume_vs_ma5_lines = ["今日量能：資料不足5天，無法比較5日均量"]
         lines = [
             f"{stock_label}｜最新交易日分析（{latest_date_label}）",
             "目前趨勢：",
@@ -3549,6 +3561,7 @@ class MainWindow(QMainWindow):
             f"K棒名稱：{summary['candle_name']}",
             "型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"),
             "量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"),
+            *volume_vs_ma5_lines,
             "⚠️ 型態訊號的高低檔判斷已接上趨勢位置模組，但還沒有初升/主升/末升等更細的子階段分類。",
         ]
         if not holidays_ok:

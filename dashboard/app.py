@@ -386,6 +386,17 @@ def main() -> None:
             st.write(f"K棒名稱：{summary['candle_name']}")
             st.write("型態訊號：" + ("、".join(summary["patterns"]) if summary["patterns"] else "無明顯型態"))
             st.write("量價訊號：" + ("、".join(summary["volume_signals"]) if summary["volume_signals"] else "無明顯訊號"))
+            # 2026-08-08新增：今天量能相對5日均量(書中「基本量」)的水位判讀，跟上面
+            # 「量價訊號」不同——那裡只在攻擊量/爆量等特定命名訊號觸發時才顯示，這裡是
+            # 每天都有結論的基礎陳述(見src/patterns/latest_day_summary.py的
+            # summarize_volume_vs_ma5()說明)。
+            volume_vs_ma5 = summary.get("volume_vs_ma5")
+            if volume_vs_ma5:
+                direction = "高於" if volume_vs_ma5["is_above"] else "低於"
+                st.write(f"今日量能：{direction}5日均量（{volume_vs_ma5['ratio']:.2f}倍）")
+                st.caption(volume_vs_ma5["note"])
+            else:
+                st.write("今日量能：資料不足5天，無法比較5日均量")
             st.caption("⚠️ 型態訊號的「高檔/低檔」判斷已接上趨勢位置模組(is_at_high/is_at_low)，但目前只用單一容忍帶門檻，還沒有初升/主升/末升等更細的子階段分類。")
 
         # 2026-08-05改版：不在這裡自己決定排版(st.tabs()或堆疊)，回傳兩個callable交給

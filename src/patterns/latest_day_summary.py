@@ -223,9 +223,75 @@ def detect_latest_day_volume_signals(df: pd.DataFrame) -> list[str]:
     return hits
 
 
+def summarize_volume_vs_ma5(df: pd.DataFrame) -> dict | None:
+    """比較最新一天成交量與5日均量(書中稱「基本量」，見`ai/ebook-summary/P07-C2-
+    各種成交量的定義.md`)，回傳今天的量能相對水位判讀，供大盤/個股資訊分頁的分析
+    面板「每天都顯示」——跟`detect_latest_day_volume_signals()`只在攻擊量/爆量等
+    特定命名訊號觸發時才出現的清單不同，這裡是更基本、每天都有結論的「今天量能
+    相對5日均量是高還是低」陳述，2026-08-08使用者要求新增。
+
+    書中原理(`P07-C1-對成交量的新認識.md`)：成交量本身不具方向性(買量＝賣量的
+    零和數字)，量增/量縮必須搭配「股價漲跌」與「所在位置」一起判讀，不能單獨當
+    多空訊號——下面的note文字依此原則組織，不是只看比例數字就下結論。
+
+    資料不足5天(`basic_volume(n=5)`需要至少5天才有值)或算不出比例時回傳None，
+    呼叫端顯示「資料不足」，不強行給出誤導性的結論。
+    """
+    if len(df) < 5:
+        return None
+    volume = df["volume"]
+    ma5_volume = basic_volume(volume, n=5)
+    latest_ma5 = ma5_volume.iloc[-1]
+    if pd.isna(latest_ma5) or latest_ma5 == 0:
+        return None
+    ratio = float(volume.iloc[-1] / latest_ma5)
+    is_above = ratio >= 1.0
+    price_up = bool(df["close"].iloc[-1] >= df["open"].iloc[-1])
+    is_at_high = bool(compute_trend_position(df["high"], df["low"], df["close"])["is_at_high"].iloc[-1])
+
+    if is_above:
+        if ratio >= 2.0:
+            if is_at_high:
+                note = (
+                    "爆大量（達5日均量2倍以上）：出現在高檔或壓力區，依朱老師原理容易是"
+                    "主力出貨訊號，須密切留意後續股價是否隨即走跌，不宜單純視為偏多訊號。"
+                )
+            else:
+                note = (
+                    "爆大量（達5日均量2倍以上）：出現在起漲位置，依朱老師原理仍屬偏多的"
+                    "攻擊性大量，但仍要搭配後續股價是否延續上漲來驗證，不能只憑量本身認定。"
+                )
+        elif ratio >= 1.2 and price_up:
+            note = (
+                "攻擊量（達5日均量1.2~1.3倍以上，且股價上漲）：依朱老師原理，這是一般"
+                "所稱的「放大量」，常出現在多頭起漲位置，屬偏多訊號。"
+            )
+        else:
+            note = (
+                "量能高於5日均量，但未達攻擊量/爆大量門檻，或股價未同步上漲——依朱老師"
+                "原理，量增本身不具方向性，須搭配股價漲跌與所在位置才能判斷多空意義。"
+            )
+    else:
+        if ratio <= 0.5:
+            note = (
+                "量能急縮至5日均量一半以下：若處於下跌走勢中，且後續股價不再創新低，"
+                "依朱老師原理即為止跌量(量縮到位＋價不破底)，是賣壓竭盡的止跌線索；"
+                "「後續不再破低」要事後才能確認，今天只能先看到量縮到位這一半條件。"
+            )
+        else:
+            note = (
+                "量能低於5日均量：依朱老師原理代表市場觀望氣氛較濃，多空都沒有積極"
+                "表態，本身不是壞事(盤整或緩漲階段常見)；但如果是股價創新高、量卻縮，"
+                "則屬於價量背離，動能可能減弱，須留意。"
+            )
+
+    return {"ratio": ratio, "is_above": is_above, "note": note}
+
+
 def summarize_latest_day(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> dict:
     """整理成儀表板要顯示的摘要dict：candle_name(單根K棒名稱)、patterns(型態清單)、
-    volume_signals(量價訊號清單)、trend(今天短/中/長三種天期各自的多頭/空頭/盤整趨勢
+    volume_signals(量價訊號清單)、volume_vs_ma5(今天量能相對5日均量的水位判讀，見
+    summarize_volume_vs_ma5())、trend(今天短/中/長三種天期各自的多頭/空頭/盤整趨勢
     狀態，見trend_state.classify_trend_states_multi_horizon()——不是單一數字，短/中/長
     可能不一致，例如日線走空但週線仍是多頭)。df為空時回傳全空結果，不拋例外。
 
@@ -234,11 +300,12 @@ def summarize_latest_day(df: pd.DataFrame, trend_df: pd.DataFrame | None = None)
     自己的high/low/close。
     """
     if df.empty:
-        return {"candle_name": None, "patterns": [], "volume_signals": [], "trend": None}
+        return {"candle_name": None, "patterns": [], "volume_signals": [], "volume_vs_ma5": None, "trend": None}
     trend_source = trend_df if trend_df is not None and not trend_df.empty else df
     return {
         "candle_name": classify_latest_candle_name(df),
         "patterns": detect_latest_day_candle_patterns(df),
         "volume_signals": detect_latest_day_volume_signals(df),
+        "volume_vs_ma5": summarize_volume_vs_ma5(df),
         "trend": classify_trend_states_multi_horizon(trend_source["high"], trend_source["low"], trend_source["close"]),
     }
