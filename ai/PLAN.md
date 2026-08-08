@@ -8328,3 +8328,56 @@ merges_duplicate_rule_id_notes`因為原本用只有close欄位的最小DataFram
 現在analyze_stock_signals()一律會嘗試算trend需要high/low欄位，補上這兩個
 欄位並monkeypatch新增的`_BULL_TREND_SCREEN_FUNCTIONS`/`_BEAR_TREND_SCREEN_
 FUNCTIONS`為空tuple)；上述本機真實DB「改動前後候選清單逐筆比對」正確性驗證。
+
+---
+
+## R-SCREEN-15效能優化：改用小改（lookback截斷）不做大改（快取層）（2026-08-08）
+
+延續同一天的效能優化，使用者原本同意做「大改」(比照daily_indicators的快取
+架構，幫R-SCREEN-15的軌道線也建一張快取表)，但要求「先仔細看清楚到底哪些要
+改，要怎麼改，不要改壞了」——仔細追查後發現大改的風險跟工程量都比原本設想的
+大很多，改成一個風險低很多、效益較小但已實測驗證安全的替代方案。
+
+**為什麼放棄大改**：`compute_turning_points()`／`compute_trendlines()`不是
+只有R-SCREEN-15在用，是5個地方共用的核心原語：①圖表疊圖(dashboard/desktop
+的K線圖切線疊圖)②`rule_scan.py`的`scan_golden_tier()`(供「個股分析」／
+「大盤分析」面板，同一檔股票甚至呼叫了2次：今天跟昨天各一次)③`trend_state.py`
+(多時間框架趨勢判斷)④`consolidation.py`⑤daily_screener.py的R-SCREEN-15。
+這條演算法本質上是「逐步重演每次新轉折點出現時要不要重畫」的狀態機
+(`_build_up_tangent_history()`從i=2到len(bottoms)逐步replay)，要正確地
+增量快取(只算新增部分、沿用舊狀態)需要把`TrendLine`/`LinePoint`物件序列化
+進資料庫，還要處理「歷史起點會不會變動」的邊緣情況(桌面版「回補資料」功能
+可能在最前面插入更早的資料，讓所有位置索引位移，`LinePoint.x`是相對於
+`df.reset_index(drop=True)`的整數位置，不是日期)——這些都是真正容易「改壞」
+的地雷，而且要嘛只窄縮在R-SCREEN-15一個呼叫點(效益有限)，要嘛動到共用原語
+本身(圖表顯示/個股分析面板/趨勢判斷都要一起重新驗證，範圍大得多)。
+
+**改用的替代方案**：套用SAR快取(`indicator_precompute.py`)已經驗證過的
+同一招——只餵`LIVE_UPDATE_LOOKBACK_DAYS`(400)天窗口，不是整段歷史，讓
+狀態機的初始種子有足夠暖身天數收斂。這裡的轉折點演算法(5日均線交叉觸發
+狀態切換)遠比SAR更頻繁觸發狀態切換，收斂應該比SAR的250~400天需求更快，
+但沒有假設，直接用本機真實DB(全市場~2368檔，最長累積約867天歷史)實測：
+400天窗口跟全部歷史算出來的11檔R-SCREEN-15真實候選逐筆比對(stock_id/
+signal_name/entry_price/stop_loss)完全一致，才確認安全。改動集中在
+`screen_slow_rally_channel_breakout()`一個函式，加一行`df = df.tail(
+LIVE_UPDATE_LOOKBACK_DAYS)`，刻意不碰`compute_trendlines()`／
+`compute_turning_points()`共用函式本身，圖表顯示/個股分析面板/趨勢判斷
+完全不受影響。
+
+**正確性驗證**：用`git stash`切回改動前的程式碼、對同一份本機真實DB跑一次
+`screen_all_stocks()`全市場掃描記錄完整候選清單(984筆)，`git stash pop`
+還原後再跑一次記錄(984筆)，兩次逐筆(stock_id, signal_name)排序後比對
+**完全一致(byte-for-byte相同)**。
+
+**效能結果**：`screen_slow_rally_channel_breakout()`單獨計時16.8秒→10.9秒
+(降35%)；`screen_all_stocks()`全市場總時間63.3秒→56.2秒(再降約11%)。加上
+同一天稍早的趨勢判斷去重複優化，累計從最初的~74秒降到~56秒，約降24%。
+
+**還沒動的部分**：`compute_trendlines()`共用函式本身沒有優化，`rule_scan.py`
+的`scan_golden_tier()`(個股分析面板，同一股票呼叫2次)、圖表疊圖路徑效能
+維持原狀——這些不在這次「R-SCREEN-15那塊」的範圍內，且風險/工程量都大很多，
+如果之後這些路徑的效能也成為問題，可以參考這次的截斷驗證方法(先在本機真實
+DB上實測確認結果不變，再考慮動共用函式)。
+
+真實驗證：`pytest tests/ -q`1066個測試全數通過；本機真實DB全市場掃描
+候選清單逐筆比對(改動前後byte-for-byte相同)+ 耗時量測(63.3秒→56.2秒)。

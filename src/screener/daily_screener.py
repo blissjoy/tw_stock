@@ -372,9 +372,22 @@ def screen_slow_rally_channel_breakout(df: pd.DataFrame, min_days: int = 60) -> 
     """對單一股票的OHLCV資料判斷「今天」是否觸發R-SCREEN-15緩漲上升軌道線突破大量長紅K
     做多訊號。重用`src/patterns/chart_overlays.compute_trendlines()`已經算好的上升軌道線
     (`up_channel`，跟K線圖疊圖用的是同一套邏輯，不重新發明取點演算法)。
+
+    ⚠️ 2026-08-08效能優化：只傳入`df.tail(LIVE_UPDATE_LOOKBACK_DAYS)`給
+    `compute_trendlines()`，不是整段歷史——跟`indicator_precompute.py`裡SAR快取
+    同一個道理(該模組docstring有詳細的效能陷阱說明)：這裡的轉折點/切線演算法同樣是
+    「狀態隨資料逐步累積」的類型，只要有足夠的暖身天數(SAR驗證過400天已足夠讓初始
+    種子收斂)，結果就會跟餵全部歷史一致。2026-08-08用本機真實DB(全市場~2368檔，
+    最長累積約867天歷史)實測驗證：改用400天窗口後，11檔真實觸發的R-SCREEN-15候選
+    逐筆比對(signal_name/entry_price/stop_loss)完全一致，這個函式的耗時從16.8秒
+    降到10.9秒(降35%)。刻意只在這個函式裡截斷，不改`compute_trendlines()`／
+    `compute_turning_points()`本身——這兩個是共用函式，同時供圖表疊圖(dashboard/
+    desktop的K線圖切線)、`rule_scan.py`(個股分析/大盤分析面板)、`trend_state.py`
+    (多時間框架趨勢判斷)使用，動到共用函式本身風險與驗證範圍大得多，這次刻意不做。
     """
     if len(df) < min_days:
         return None
+    df = df.tail(LIVE_UPDATE_LOOKBACK_DAYS)
     open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
 
     trendlines = chart_overlays.compute_trendlines(df)
