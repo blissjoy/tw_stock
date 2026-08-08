@@ -23,17 +23,45 @@ volume_price.py`的大量判斷)，不需要另外新寫底層演算法。依使
 之後要加其他規則的每日篩選時，比照這裡的模式各自寫一個獨立的 screen_* 函式（輸入df，
 輸出候選dict或None），再由 screen_all_stocks 或 daily_pipeline.py 呼叫端合併多個screen
 函式的結果即可，不需要重寫這一層。
+
+⚠️ 2026-08-08新增陳家豐籌碼面building block（融資維持率超跌反彈/投信連續買超，程式碼
+分別在`src.indicators.margin_trading`/`institutional_flow`）進`daily_candidates`
+候選清單，是本檔案第一批「非純OHLCV」的訊號來源；量縮止跌(`volume_washout.py`)也已
+實作對應的`screen_volume_washout()`，但實測全市場觸發率高達47%(見`screen_all_
+stocks()`docstring)，經使用者確認暫不接進候選清單，只留函式本身：
+- 這3條在此之前只接進`src.presentation.stock_detail_data.scan_chip_tier()`／
+  `analyze_chip_signals()`，供「個股分析」／「大盤分析」面板顯示「這檔股票今天符合哪些
+  規則」，但那條路徑是使用者正在看某一檔股票時才即時運算、不寫入`daily_candidates`，
+  跟這裡「批次跑全市場、寫回候選清單」是兩件事——之前只做了前者，這次補上後者。
+- 刻意重用`margin_trading.py`／`institutional_flow.py`的底層純函式(`compute_margin_
+  maintenance_ratio()`／`margin_oversold_rebound_signal()`／`classify_flow_streak()`)
+  而不是重用`scan_chip_tier(conn, stock_id)`本身——`scan_chip_tier()`是「每次呼叫查一次
+  DB」的單股函式，全市場(~2000檔)批次呼叫會變成N+1查詢，正是本專案N+1查詢曾經在Turso上
+  拖慢觀察清單頁面到8.9秒才修好的同一種問題(見`src/presentation/huang_chip_data.py`的
+  批次化教訓)。這裡改成`load_trailing_margin_frames()`／`load_trailing_institutional_
+  trust_net()`各自一次SQL把「全部股票」的融資/法人資料讀出來，再用Python依stock_id分組，
+  避免重蹈覆轍。
+- 只挑「買進方向」的訊號進候選清單(融資超跌反彈/投信連續買超)，三大法人連續
+  賣超(R-SCREEN-06)這種「排除型」訊號刻意不放進來——`daily_candidates`的既有慣例是
+  「都是清楚的做多進場訊號」，混進「應該避開」的警示會讓候選清單語意不一致，這條警示
+  已經在`scan_chip_tier()`／「個股分析」面板顯示，那裡才是它該出現的地方。
+- entry_price/stop_loss：這幾條規則書中都沒有給明確的停損公式(不像R-TREND-14有書中
+  明確的5%~7%數字)，這裡一律用「當日最低點」當停損參考(不額外打折扣)，是工程預設值，
+  不是引用自書中——跟`bull_short_term_stop_loss()`那種「書中明確區間」的函式不同，
+  刻意不重用它，避免誤讓使用者以為這個停損數字也是書中的明確規則。
 """
 
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from datetime import date, datetime
 from typing import Callable
 
 import pandas as pd
 
 from src.data import storage
+from src.indicators import institutional_flow, margin_trading, volume_washout
 from src.indicators.candles import is_mid_long_red_candle
 from src.indicators.consolidation import detect_consolidation, detect_consolidation_breakout
 from src.indicators.gaps import detect_breakaway_gap_down, detect_breakaway_gap_up, detect_gap
@@ -73,9 +101,16 @@ BIG_BLACK_BREAKOUT_LOOKBACK = 20
 CONSOLIDATION_MIN_BARS = 42
 
 
-def screen_bull_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+def screen_bull_short_term_entry(df: pd.DataFrame, min_days: int = 60, bull_trend: pd.Series | None = None) -> dict | None:
     """對單一股票的OHLCV資料(依date遞增排序、index為date)判斷「今天」(最後一列)是否觸發
     R-TREND-14多頭短線進場訊號。資料不足min_days天則回傳None(不足以計算MA20等指標)。
+
+    bull_trend：可選的預先算好的`daily_bull_trend_state(high, low, close, n=5)`結果——
+    這條規則、`screen_single_ma_short_term_long()`、`screen_single_ma_mid_term_long()`
+    三條都需要同一個(n=5)多頭趨勢判斷，2026-08-08前是各自呼叫`daily_bull_trend_state()`
+    重算一次，實測全市場批次掃描時這6條(含鏡射的空頭3條)重複計算佔了23%的運算時間；
+    改成由呼叫端(`screen_all_stocks()`／`analyze_stock_signals()`)每檔股票只算一次、
+    傳進來共用。不傳(None，例如測試或單獨呼叫時)則照舊在函式內部自行計算，行為完全不變。
     """
     if len(df) < min_days:
         return None
@@ -86,7 +121,8 @@ def screen_bull_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict |
     ma10_slope = ma10.diff()
     ma20_slope = ma20.diff()
     volume_prev = volume.shift(1)
-    bull_trend = daily_bull_trend_state(high, low, close, n=5)
+    if bull_trend is None:
+        bull_trend = daily_bull_trend_state(high, low, close, n=5)
 
     t = len(close) - 1
     if pd.isna(ma20_slope.iloc[t]) or pd.isna(volume_prev.iloc[t]) or pd.isna(ma10.iloc[t]):
@@ -112,9 +148,12 @@ def screen_bull_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict |
     }
 
 
-def screen_bear_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+def screen_bear_short_term_entry(df: pd.DataFrame, min_days: int = 60, bear_trend: pd.Series | None = None) -> dict | None:
     """對單一股票的OHLCV資料判斷「今天」是否觸發R-TREND-15空頭短線選股訊號——
     R-TREND-14多頭短線進場的鏡射對稱版本，用`daily_bear_trend_state()`(見trend.py)。
+
+    bear_trend：可選的預先算好結果，理由跟`screen_bull_short_term_entry()`的
+    `bull_trend`參數說明一致(2026-08-08效能優化)。
     """
     if len(df) < min_days:
         return None
@@ -127,7 +166,8 @@ def screen_bear_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict |
     ma20_slope = ma20.diff()
     volume_prev = volume.shift(1)
     low_prev = low.shift(1)
-    bear_trend = daily_bear_trend_state(high, low, close, n=5)
+    if bear_trend is None:
+        bear_trend = daily_bear_trend_state(high, low, close, n=5)
 
     t = len(close) - 1
     if pd.isna(ma20_slope.iloc[t]) or pd.isna(volume_prev.iloc[t]) or pd.isna(ma5.iloc[t]) or pd.isna(low_prev.iloc[t]):
@@ -156,10 +196,16 @@ def screen_bear_short_term_entry(df: pd.DataFrame, min_days: int = 60) -> dict |
 
 def _single_ma_strategy_screen(
     df: pd.DataFrame, min_days: int, strategy_fn, is_long: bool, hold_ma_label: str, signal_name: str,
+    trend: pd.Series | None = None,
 ) -> dict | None:
     """R-MA-22/23/24/25(單一均線短/中線做多做空戰法)共用的wiring邏輯：4個戰法共用同一套
     骨架(見src/strategies/ma_strategies.py開頭說明)，差別只在傳入的策略函式、多空方向、
     停損守哪一條均線(短線守MA5/中線守MA10)——抽成共用函式避免4份幾乎相同的程式碼。
+
+    trend：可選的預先算好的`daily_bull_trend_state()`／`daily_bear_trend_state()`(視
+    is_long而定，n=5)結果，理由跟`screen_bull_short_term_entry()`的`bull_trend`參數
+    說明一致(2026-08-08效能優化，供4個戰法跟短線多空進場規則共用同一份計算)。不傳
+    (None)則照舊在函式內部自行計算。
     """
     if len(df) < min_days:
         return None
@@ -169,7 +215,8 @@ def _single_ma_strategy_screen(
     if pd.isna(ma20.iloc[t]) or pd.isna(ma10.iloc[t]):
         return None
 
-    trend = daily_bull_trend_state(high, low, close, n=5) if is_long else daily_bear_trend_state(high, low, close, n=5)
+    if trend is None:
+        trend = daily_bull_trend_state(high, low, close, n=5) if is_long else daily_bear_trend_state(high, low, close, n=5)
     if is_long:
         result = strategy_fn(close, high, ma5, ma10, ma20, trend) if hold_ma_label == "MA10" else strategy_fn(close, high, ma5, ma20, trend)
     else:
@@ -198,35 +245,35 @@ def _single_ma_strategy_screen(
     }
 
 
-def screen_single_ma_short_term_long(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+def screen_single_ma_short_term_long(df: pd.DataFrame, min_days: int = 60, bull_trend: pd.Series | None = None) -> dict | None:
     """R-MA-22單一均線短線做多戰法：進出場皆守MA5。"""
     return _single_ma_strategy_screen(
         df, min_days, single_ma_short_term_long_strategy, is_long=True, hold_ma_label="MA5",
-        signal_name="R-MA-22單一均線短線做多（88%）",
+        signal_name="R-MA-22單一均線短線做多（88%）", trend=bull_trend,
     )
 
 
-def screen_single_ma_short_term_short(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+def screen_single_ma_short_term_short(df: pd.DataFrame, min_days: int = 60, bear_trend: pd.Series | None = None) -> dict | None:
     """R-MA-23單一均線短線做空戰法，與R-MA-22鏡射對稱。"""
     return _single_ma_strategy_screen(
         df, min_days, single_ma_short_term_short_strategy, is_long=False, hold_ma_label="MA5",
-        signal_name="R-MA-23單一均線短線做空（88%）",
+        signal_name="R-MA-23單一均線短線做空（88%）", trend=bear_trend,
     )
 
 
-def screen_single_ma_mid_term_long(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+def screen_single_ma_mid_term_long(df: pd.DataFrame, min_days: int = 60, bull_trend: pd.Series | None = None) -> dict | None:
     """R-MA-24單一均線中線做多戰法：進場訊號仍用MA5判斷回檔結束，持股/停利改守MA10。"""
     return _single_ma_strategy_screen(
         df, min_days, single_ma_mid_term_long_strategy, is_long=True, hold_ma_label="MA10",
-        signal_name="R-MA-24單一均線中線做多（88%）",
+        signal_name="R-MA-24單一均線中線做多（88%）", trend=bull_trend,
     )
 
 
-def screen_single_ma_mid_term_short(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+def screen_single_ma_mid_term_short(df: pd.DataFrame, min_days: int = 60, bear_trend: pd.Series | None = None) -> dict | None:
     """R-MA-25單一均線中線做空戰法，與R-MA-24鏡射對稱。"""
     return _single_ma_strategy_screen(
         df, min_days, single_ma_mid_term_short_strategy, is_long=False, hold_ma_label="MA10",
-        signal_name="R-MA-25單一均線中線做空（88%）",
+        signal_name="R-MA-25單一均線中線做空（88%）", trend=bear_trend,
     )
 
 
@@ -531,9 +578,98 @@ def screen_mechanical_short(df: pd.DataFrame, min_days: int = 60) -> dict | None
     }
 
 
+def screen_margin_oversold_rebound(df: pd.DataFrame, margin_df: pd.DataFrame | None, min_days: int = 60) -> dict | None:
+    """對單一股票判斷「今天」是否觸發R-CHIP-02融資維持率超跌反彈訊號(陳家豐書中P02-C4)。
+
+    margin_df須為`load_trailing_margin_frames()`批次讀出、該股票對應的融資歷史(欄位
+    close/margin_buy/margin_sell/margin_cash_repayment/margin_today_balance，依date
+    遞增排序)，查無融資資料(該股從未有人融資買賣)回傳None——跟`stock_detail_data.
+    load_margin_maintenance_analysis()`用同一套底層計算(`compute_margin_maintenance_
+    ratio()`)，數字會跟「個股明細」分頁顯示的一致。
+    """
+    if len(df) < min_days or margin_df is None or margin_df.empty:
+        return None
+    ratio = margin_trading.compute_margin_maintenance_ratio(
+        margin_df["close"], margin_df["margin_buy"], margin_df["margin_sell"],
+        margin_df["margin_cash_repayment"], margin_df["margin_today_balance"],
+    )
+    if not bool(margin_trading.margin_oversold_rebound_signal(ratio).iloc[-1]):
+        return None
+
+    from src.rule_docs import parse_confidence
+    confidence = parse_confidence("R-CHIP-02")
+    latest_ratio = ratio.iloc[-1]
+    ratio_text = f"約{latest_ratio * 100:.1f}%" if pd.notna(latest_ratio) else ""
+    return {
+        "signal_name": f"R-CHIP-02融資維持率超跌反彈（{confidence}%）",
+        "entry_price": float(df["close"].iloc[-1]),
+        "stop_loss": float(df["low"].iloc[-1]),
+        "note": f"融資維持率{ratio_text}已連續{margin_trading.OVERSOLD_MIN_CONSECUTIVE_DAYS}天低於120%斷頭線，符合超跌反彈搶短觀察條件(僅適合能嚴設停利的短線操作)",
+    }
+
+
+def screen_institutional_trust_buy_streak(df: pd.DataFrame, trust_net_desc: list[float] | None, min_days: int = 60) -> dict | None:
+    """對單一股票判斷「今天」是否觸發R-CHIP-01投信連續買超觀察訊號(陳家豐書中P04-C2)。
+
+    trust_net_desc須為`load_trailing_institutional_trust_net()`批次讀出、該股票投信
+    每日買賣超淨額、由新到舊排序(index 0=今天)的清單，查無投信資料回傳None。跟
+    `stock_detail_data.load_institutional_flow_analysis()`用同一個`classify_flow_
+    streak()`底層函式，數字會跟「個股明細」分頁顯示的一致。
+    """
+    if len(df) < min_days or not trust_net_desc:
+        return None
+    streak = institutional_flow.classify_flow_streak(trust_net_desc)
+    if not streak["is_buy_watch"]:
+        return None
+
+    from src.rule_docs import parse_confidence
+    confidence = parse_confidence("R-CHIP-01")
+    return {
+        "signal_name": f"R-CHIP-01投信連續買超觀察（{confidence}%）",
+        "entry_price": float(df["close"].iloc[-1]),
+        "stop_loss": float(df["low"].iloc[-1]),
+        "note": f"投信已連續買超{streak['streak_days']}天，達最佳切入點觀察門檻(書中給連續3~5天)",
+    }
+
+
+def screen_volume_washout(df: pd.DataFrame, min_days: int = 60) -> dict | None:
+    """對單一股票判斷「今天」是否觸發R-CHIP-03低檔量縮止跌觀察訊號(陳家豐書中P07-C4)。
+
+    只需要df本身的volume欄位(不需要額外的融資/法人資料)，資料不足
+    `volume_washout.VOLUME_WASHOUT_LOOKBACK`(240)天時，`volume_washout_signal()`
+    內部rolling(min_periods=lookback)本來就會回傳NaN/False，這裡不用另外判斷天數。
+
+    ⚠️ 2026-08-08：這個函式本身可正常運作、也有測試涵蓋，但`screen_all_stocks()`
+    刻意沒有呼叫它——實測對本機真實DB全市場掃描，觸發率高達47%，遠比R-CHIP-01/02
+    雜訊多很多，會讓daily_candidates候選清單失去篩選意義(理由見screen_all_stocks()
+    docstring)。保留這個函式供未來有更好的鑑別方法(例如搭配is_at_low或其他訊號一起
+    判讀)時直接接回screen_all_stocks()，不需要重寫。
+    """
+    if len(df) < min_days:
+        return None
+    signal_series = volume_washout.volume_washout_signal(df["volume"])
+    if not bool(signal_series.iloc[-1]):
+        return None
+
+    from src.rule_docs import parse_confidence
+    confidence = parse_confidence("R-CHIP-03")
+    return {
+        "signal_name": f"R-CHIP-03低檔量縮止跌觀察（{confidence}%）",
+        "entry_price": float(df["close"].iloc[-1]),
+        "stop_loss": float(df["low"].iloc[-1]),
+        "note": "近期均量已萎縮到近1年峰值均量的10分之1以下，符合籌碼洗清、主力再進場觀察條件(書中提醒不宜單獨當高信心買進理由，建議搭配其他訊號一起判讀)",
+    }
+
+
+# 2026-08-08效能優化：screen_bull_short_term_entry/screen_bear_short_term_entry/4個
+# 單一均線戰法(R-MA-22/23/24/25)這6條規則，刻意不放進_SCREEN_FUNCTIONS這個統一迴圈，
+# 拆成_BULL_TREND_SCREEN_FUNCTIONS/_BEAR_TREND_SCREEN_FUNCTIONS兩組——這6條裡有3條
+# 要用同一份`daily_bull_trend_state(n=5)`、3條要用同一份`daily_bear_trend_state(n=5)`，
+# 如果留在同一個迴圈裡個別呼叫、不傳入預先算好的trend，每條規則會各自重算一次，對
+# 同一檔股票重複算6次——實測全市場批次掃描時這部分佔了23%的運算時間(見ai/PLAN.md
+# 2026-08-08該日期章節)。拆成獨立的兩組，讓screen_all_stocks()／analyze_stock_
+# signals()能對每檔股票只算一次bull_trend/bear_trend、傳給整組規則共用。
 _SCREEN_FUNCTIONS = (
-    screen_bull_short_term_entry,
-    screen_bear_short_term_entry,
     screen_narrow_range_bottom_breakout,
     screen_slow_rally_channel_breakout,
     screen_breakout_above_big_black_candle,
@@ -541,12 +677,20 @@ _SCREEN_FUNCTIONS = (
     screen_breakaway_gap_down,
     screen_mechanical_long,
     screen_mechanical_short,
-    screen_single_ma_short_term_long,
-    screen_single_ma_short_term_short,
-    screen_single_ma_mid_term_long,
-    screen_single_ma_mid_term_short,
     screen_dual_ma_long_term_long,
     screen_dual_ma_long_term_short,
+)
+
+_BULL_TREND_SCREEN_FUNCTIONS = (
+    screen_bull_short_term_entry,
+    screen_single_ma_short_term_long,
+    screen_single_ma_mid_term_long,
+)
+
+_BEAR_TREND_SCREEN_FUNCTIONS = (
+    screen_bear_short_term_entry,
+    screen_single_ma_short_term_short,
+    screen_single_ma_mid_term_short,
 )
 
 
@@ -580,13 +724,13 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
     from src.screener.rule_scan import scan_golden_tier
 
     matches: list[dict] = []
-    for screen_fn in _SCREEN_FUNCTIONS:
-        result = screen_fn(df, min_days=min_days)
+
+    def _add_screen_result(result: dict | None) -> None:
         if result is None:
-            continue
+            return
         name_match = _SIGNAL_NAME_PATTERN.match(result["signal_name"])
         if not name_match:
-            continue
+            return
         rule_id, title, confidence = name_match.group(1), name_match.group(2), int(name_match.group(3))
         doc = load_rule_doc(rule_id)
         matches.append({
@@ -597,6 +741,20 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
             "description": doc.get("解讀") if doc else None,
             "reference": doc.get("原文與頁碼") if doc else None,
         })
+
+    for screen_fn in _SCREEN_FUNCTIONS:
+        _add_screen_result(screen_fn(df, min_days=min_days))
+
+    # _BULL_TREND_SCREEN_FUNCTIONS/_BEAR_TREND_SCREEN_FUNCTIONS這6條規則跟
+    # screen_all_stocks()共用同一套「trend只算一次」的效能優化(見那兩個常數的說明)，
+    # 這裡雖然只處理單一股票、效能差異不明顯，但仍然沿用同一份計算避免維護兩套邏輯。
+    if len(df) >= min_days:
+        bull_trend = daily_bull_trend_state(df["high"], df["low"], df["close"], n=5)
+        bear_trend = daily_bear_trend_state(df["high"], df["low"], df["close"], n=5)
+        for screen_fn in _BULL_TREND_SCREEN_FUNCTIONS:
+            _add_screen_result(screen_fn(df, min_days=min_days, bull_trend=bull_trend))
+        for screen_fn in _BEAR_TREND_SCREEN_FUNCTIONS:
+            _add_screen_result(screen_fn(df, min_days=min_days, bear_trend=bear_trend))
 
     for item in scan_golden_tier(df, trend_df=trend_df):
         doc = load_rule_doc(item["rule_id"])
@@ -674,18 +832,62 @@ def summarize_signal_matches(matches: list[dict]) -> dict:
     }
 
 
-def screen_all_stocks(stock_frames: dict[str, pd.DataFrame], min_days: int = 60) -> list[dict]:
+def screen_all_stocks(
+    stock_frames: dict[str, pd.DataFrame],
+    min_days: int = 60,
+    margin_frames: dict[str, pd.DataFrame] | None = None,
+    institutional_trust_net: dict[str, list[float]] | None = None,
+) -> list[dict]:
     """對多檔股票批次跑目前已接上的所有screen_*規則，回傳今天所有觸發訊號的候選清單。
     同一檔股票若同時觸發多條規則，會分別各出現一筆(不同signal_name)，不互相排擠。
 
     stock_frames: {stock_id: df}，df需已依date排序、index為date、含open/high/low/close/volume欄位。
+
+    margin_frames/institutional_trust_net：分別對應`load_trailing_margin_frames()`／
+    `load_trailing_institutional_trust_net()`的批次讀取結果，供R-CHIP-02(融資超跌反彈)／
+    R-CHIP-01(投信連續買超)這兩條籌碼面規則使用；不傳(None)時這兩條規則一律回傳None，
+    只有技術面`_SCREEN_FUNCTIONS`會產生候選(向下相容既有呼叫端與測試)。
+
+    ⚠️ R-CHIP-03(量縮止跌，`screen_volume_washout()`)刻意不放進這裡：2026-08-08實測
+    對本機真實DB全市場~2368檔掃描，觸發率高達47%(1106檔)，遠比R-CHIP-01(39檔)／
+    R-CHIP-02(64檔)雜訊多很多——雖然書中原文本來就說量縮是「市場常態」不是罕見訊號(見
+    volume_washout.py模組docstring)，但把接近半個市場都標成候選股會讓daily_candidates
+    這張表失去篩選意義，經使用者確認先不接進候選清單，只留函式本身(已測試、可隨時
+    接回)，等有更好的鑑別方法(例如搭配`trend_position.py`的is_at_low、或集中度等其他
+    訊號一起判讀)再考慮加回來。
     """
+    margin_frames = margin_frames or {}
+    institutional_trust_net = institutional_trust_net or {}
     candidates: list[dict] = []
     for stock_id, df in stock_frames.items():
         for screen_fn in _SCREEN_FUNCTIONS:
             result = screen_fn(df, min_days=min_days)
             if result is not None:
                 candidates.append({"stock_id": stock_id, **result})
+
+        # 2026-08-08效能優化：bull_trend/bear_trend每檔股票只算一次，供_BULL_TREND_
+        # SCREEN_FUNCTIONS/_BEAR_TREND_SCREEN_FUNCTIONS共6條規則共用(見這兩個常數
+        # 的說明)，取代原本各自在函式內部重算的寫法。df長度不足min_days時這6條規則
+        # 反正一開始就會回傳None，跳過運算，不用白算一次trend。
+        if len(df) >= min_days:
+            bull_trend = daily_bull_trend_state(df["high"], df["low"], df["close"], n=5)
+            bear_trend = daily_bear_trend_state(df["high"], df["low"], df["close"], n=5)
+            for screen_fn in _BULL_TREND_SCREEN_FUNCTIONS:
+                result = screen_fn(df, min_days=min_days, bull_trend=bull_trend)
+                if result is not None:
+                    candidates.append({"stock_id": stock_id, **result})
+            for screen_fn in _BEAR_TREND_SCREEN_FUNCTIONS:
+                result = screen_fn(df, min_days=min_days, bear_trend=bear_trend)
+                if result is not None:
+                    candidates.append({"stock_id": stock_id, **result})
+
+        margin_result = screen_margin_oversold_rebound(df, margin_frames.get(stock_id), min_days=min_days)
+        if margin_result is not None:
+            candidates.append({"stock_id": stock_id, **margin_result})
+
+        trust_result = screen_institutional_trust_buy_streak(df, institutional_trust_net.get(stock_id), min_days=min_days)
+        if trust_result is not None:
+            candidates.append({"stock_id": stock_id, **trust_result})
     return candidates
 
 
@@ -726,6 +928,112 @@ def load_trailing_frames(conn, min_days: int = 60) -> dict[str, pd.DataFrame]:
     return frames
 
 
+# 融資維持率批次篩選的回看窗口(交易日)：跟volume_washout.py的VOLUME_WASHOUT_LOOKBACK
+# (240，約1年)同一個量級的工程估計值——約1年的融資歷史，足夠讓compute_margin_
+# maintenance_ratio()「歷史起點當天餘額視為當天買進」的早期誤差充分收斂(見該函式
+# docstring)，不需要真的讀「全部歷史」。2026-08-08實測：本機DB累積約3.5年融資歷史時，
+# 不設窗口的全量批次查詢(全部~1500檔)要價16秒，改成只抓最近250個交易日後降到約6秒，
+# 差距會隨資料庫歷史持續累積而越拉越大，早晚必須設窗口，不如一開始就設好。
+# `stock_detail_data.load_margin_maintenance_analysis()`(個股明細分頁，一次只查1檔)
+# 仍維持不設窗口的全歷史算法，兩處數字理論上可能有些微差異，但差異只出現在資料庫歷史
+# 起點那段已經收斂掉的早期誤差範圍內，不影響「今天是否超跌反彈」的判斷。
+MARGIN_SCREENING_LOOKBACK_DAYS = 250
+
+# 投信連續買超批次篩選的回看窗口(交易日)：連續買超天數門檻只有3天(見institutional_
+# flow.py的INSTITUTIONAL_STREAK_THRESHOLD)，抓太長沒意義，跟stock_detail_data.
+# load_institutional_flow_analysis()預設的lookback_days=30同一個量級(該函式docstring：
+# 「連續天數不太可能超過30個交易日，抓太長沒意義」)。
+INSTITUTIONAL_TRUST_SCREENING_LOOKBACK_DAYS = 30
+
+
+def _trading_day_cutoff(conn, lookback_days: int) -> str | None:
+    """回傳『倒數第lookback_days個有股價資料的交易日』的日期字串，供load_trailing_
+    margin_frames()／load_trailing_institutional_trust_net()把批次查詢限定在『最近
+    N個交易日』，避免隨資料庫歷史持續累積、批次查詢時間跟著無上限變慢(見上方兩個
+    LOOKBACK常數的說明)。用stock_prices的實際交易日清單而不是`date.today()`往回推算
+    N個日曆天，理由跟run_screen_and_store()的iso_date預設值一樣：週末/國定假日不是
+    交易日，用日曆天回推會抓到過多不需要的天數或抓不夠。stock_prices歷史天數不足
+    lookback_days時，回傳最早的那一天(等同於沒有窗口限制)，不會出錯或漏資料。
+    """
+    row = conn.execute(
+        "SELECT date FROM (SELECT DISTINCT date FROM stock_prices ORDER BY date DESC LIMIT ?) ORDER BY date LIMIT 1",
+        (lookback_days,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def load_trailing_margin_frames(conn) -> dict[str, pd.DataFrame]:
+    """批次讀出『全部股票』最近`MARGIN_SCREENING_LOOKBACK_DAYS`個交易日的融資交易歷史
+    (margin_trading JOIN stock_prices的收盤價)，供screen_margin_oversold_rebound()
+    計算融資維持率用。
+
+    刻意用單一SQL一次讀出全部股票、再用Python依stock_id分組，不是逐檔股票各自查一次——
+    後者對~2000檔股票會變成N+1查詢，在Turso上曾經把觀察清單頁面拖慢到8.9秒才修好(見
+    `src/presentation/huang_chip_data.py`的批次化教訓)，這裡從一開始就採用批次寫法，
+    不重蹈覆轍。回傳{stock_id: df}，df欄位為close/margin_buy/margin_sell/
+    margin_cash_repayment/margin_today_balance，依date遞增排序，缺融資資料的股票不會
+    出現在回傳結果裡。
+    """
+    cutoff = _trading_day_cutoff(conn, MARGIN_SCREENING_LOOKBACK_DAYS)
+    rows = conn.execute(
+        # CROSS JOIN(而非JOIN)是刻意的：SQLite的CROSS JOIN語意等同INNER JOIN，但會強制
+        # 查詢規劃器不要重新排序表的處理順序(一般JOIN在這裡容易被規劃器誤判成先掃
+        # stock_prices(同期間列數較多)再逐列查margin_trading，反而更慢)——2026-08-08
+        # 實測：改成CROSS JOIN強制先用margin_trading的date索引，把這段查詢從~5.7秒
+        # 降到~4.2秒。
+        """
+        SELECT mt.stock_id, mt.date, sp.close, mt.margin_purchase_buy, mt.margin_purchase_sell,
+               mt.margin_purchase_cash_repayment, mt.margin_purchase_today_balance
+        FROM margin_trading mt
+        CROSS JOIN stock_prices sp ON sp.stock_id = mt.stock_id AND sp.date = mt.date
+        WHERE mt.date >= ?
+        ORDER BY mt.stock_id, mt.date
+        """,
+        (cutoff or "",),
+    ).fetchall()
+    by_stock: dict[str, list[tuple]] = defaultdict(list)
+    for stock_id, mdate, close, buy, sell, repay, balance in rows:
+        by_stock[stock_id].append((mdate, close, buy, sell, repay, balance))
+
+    frames: dict[str, pd.DataFrame] = {}
+    for stock_id, stock_rows in by_stock.items():
+        frames[stock_id] = pd.DataFrame(
+            {
+                "close": [r[1] for r in stock_rows],
+                "margin_buy": [r[2] for r in stock_rows],
+                "margin_sell": [r[3] for r in stock_rows],
+                "margin_cash_repayment": [r[4] for r in stock_rows],
+                "margin_today_balance": [r[5] for r in stock_rows],
+            },
+            index=pd.to_datetime([r[0] for r in stock_rows]),
+        )
+    return frames
+
+
+def load_trailing_institutional_trust_net(conn) -> dict[str, list[float]]:
+    """批次讀出『全部股票』最近`INSTITUTIONAL_TRUST_SCREENING_LOOKBACK_DAYS`個交易日
+    投信(Investment_Trust)每日買賣超淨額，依date遞增排序，供screen_institutional_
+    trust_buy_streak()判斷連續買超天數用——只抓投信這一個分類(不是三大法人合計)，因為
+    這裡只接「投信連續買超」這個買進方向的候選訊號(理由見本模組docstring)，
+    `institutional_investors`表的`investor_type='Investment_Trust'`剛好跟
+    `stock_detail_data._INVESTOR_GROUP_MAP`的「投信」一對一對應，不需要額外分類。
+
+    跟`load_trailing_margin_frames()`同樣的N+1顧慮與批次化理由，單一SQL一次讀出全部
+    股票。回傳{stock_id: [由新到舊排序的淨額]}，直接是`classify_flow_streak()`要求的
+    輸入格式，缺投信資料的股票不會出現在回傳結果裡。
+    """
+    cutoff = _trading_day_cutoff(conn, INSTITUTIONAL_TRUST_SCREENING_LOOKBACK_DAYS)
+    rows = conn.execute(
+        "SELECT stock_id, date, buy, sell FROM institutional_investors "
+        "WHERE investor_type = 'Investment_Trust' AND date >= ? ORDER BY stock_id, date",
+        (cutoff or "",),
+    ).fetchall()
+    by_stock: dict[str, list[float]] = defaultdict(list)
+    for stock_id, _date, buy, sell in rows:
+        by_stock[stock_id].append(buy - sell)
+    return {stock_id: list(reversed(values)) for stock_id, values in by_stock.items()}
+
+
 def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) -> list[dict]:
     """只用資料庫裡『目前已有』的資料重新跑一次選股並寫回daily_candidates，不對外抓取任何新資料。
 
@@ -754,7 +1062,12 @@ def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) 
         iso_date = latest_price_date or date.today().isoformat()
 
     frames = load_trailing_frames(conn, min_days=min_days)
-    candidates = screen_all_stocks(frames, min_days=min_days)
+    margin_frames = load_trailing_margin_frames(conn)
+    institutional_trust_net = load_trailing_institutional_trust_net(conn)
+    candidates = screen_all_stocks(
+        frames, min_days=min_days,
+        margin_frames=margin_frames, institutional_trust_net=institutional_trust_net,
+    )
 
     storage.delete_daily_candidates_for_date(conn, iso_date)
     if candidates:

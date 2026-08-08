@@ -1,7 +1,14 @@
 import pandas as pd
 
 import src.screener.daily_screener as daily_screener
-from src.data.storage import init_db, upsert_delisted_stocks, upsert_stock_prices, upsert_stocks
+from src.data.storage import (
+    init_db,
+    upsert_delisted_stocks,
+    upsert_institutional_investors,
+    upsert_margin_trading,
+    upsert_stock_prices,
+    upsert_stocks,
+)
 
 
 def _build_uptrend_df(n_days: int = 70) -> pd.DataFrame:
@@ -211,8 +218,12 @@ def test_analyze_stock_signals_sorts_by_confidence_descending(monkeypatch):
         return {"signal_name": "R-FAKE-02假規則乙（95%）", "entry_price": 1.0, "stop_loss": 0.9, "note": None}
 
     monkeypatch.setattr(daily_screener, "_SCREEN_FUNCTIONS", (fake_low, fake_high))
+    monkeypatch.setattr(daily_screener, "_BULL_TREND_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BEAR_TREND_SCREEN_FUNCTIONS", ())
 
-    matches = daily_screener.analyze_stock_signals(pd.DataFrame({"close": [1]}), min_days=0)
+    # min_days=0時analyze_stock_signals()仍會嘗試算bull_trend/bear_trend(即使上面
+    # 兩個規則清單monkeypatch成空的)，需要high/low欄位，不能只給close
+    matches = daily_screener.analyze_stock_signals(pd.DataFrame({"high": [1], "low": [1], "close": [1]}), min_days=0)
 
     assert [m["rule_id"] for m in matches] == ["R-FAKE-02", "R-FAKE-01"]
     assert matches[0]["description"] is None  # 查無此規則(假規則)，優雅回傳None不crash
@@ -224,6 +235,8 @@ def test_analyze_stock_signals_merges_duplicate_rule_id_notes(monkeypatch):
     判斷，同一個rule_id可能被add()呼叫多次、note文字不同(天期不同)。這裡驗證合併成
     一筆，note是用換行接起來的多行文字，畫面上不會出現同一條規則名稱重複列出兩次。"""
     monkeypatch.setattr(daily_screener, "_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BULL_TREND_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BEAR_TREND_SCREEN_FUNCTIONS", ())
     import src.screener.rule_scan as rule_scan
     monkeypatch.setattr(
         rule_scan, "scan_golden_tier",
@@ -233,7 +246,8 @@ def test_analyze_stock_signals_merges_duplicate_rule_id_notes(monkeypatch):
         ],
     )
 
-    matches = daily_screener.analyze_stock_signals(pd.DataFrame({"close": [1]}), min_days=0)
+    # min_days=0時analyze_stock_signals()仍會嘗試算bull_trend/bear_trend，需要high/low欄位
+    matches = daily_screener.analyze_stock_signals(pd.DataFrame({"high": [1], "low": [1], "close": [1]}), min_days=0)
 
     assert len(matches) == 1
     assert matches[0]["rule_id"] == "R-TREND-03"
@@ -705,7 +719,7 @@ def test_run_screen_and_store_defaults_to_latest_price_date_when_iso_date_omitte
     conn = init_db(":memory:")
     _seed_stock_prices(conn, "2330", n_days=70)  # _seed_stock_prices的日期產生規則下，最後一天是2026-03-14
     candidate = {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None}
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [candidate])
 
     daily_screener.run_screen_and_store(conn, min_days=60)  # 不傳iso_date
 
@@ -720,7 +734,7 @@ def test_run_screen_and_store_writes_candidates_and_returns_them(monkeypatch):
         "stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場",
         "entry_price": 104.0, "stop_loss": 99.0, "note": "測試",
     }
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [fake_candidate])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [fake_candidate])
 
     candidates = daily_screener.run_screen_and_store(conn, iso_date="2026-07-22", min_days=60)
 
@@ -732,7 +746,7 @@ def test_run_screen_and_store_writes_candidates_and_returns_them(monkeypatch):
 def test_run_screen_and_store_writes_nothing_when_no_candidates(monkeypatch):
     conn = init_db(":memory:")
     _seed_stock_prices(conn, "2330", n_days=70)
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
 
     candidates = daily_screener.run_screen_and_store(conn, iso_date="2026-07-22", min_days=60)
 
@@ -753,10 +767,10 @@ def test_run_screen_and_store_rerun_same_date_drops_stale_candidates_not_selecte
     candidate_a = {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None}
     candidate_b = {"stock_id": "1101", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 50.0, "stop_loss": 45.0, "note": None}
 
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate_a])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [candidate_a])
     daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
 
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate_b])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [candidate_b])
     daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
 
     rows = conn.execute("SELECT stock_id FROM daily_candidates WHERE date = '2026-07-23'").fetchall()
@@ -770,10 +784,10 @@ def test_run_screen_and_store_rerun_with_zero_candidates_clears_previous_stale_r
     _seed_stock_prices(conn, "2330", n_days=70)
     candidate_a = {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None}
 
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate_a])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [candidate_a])
     daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
 
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
     daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
 
     count = conn.execute("SELECT COUNT(*) FROM daily_candidates WHERE date = '2026-07-23'").fetchone()[0]
@@ -785,7 +799,7 @@ def test_run_screen_and_store_does_not_affect_other_dates(monkeypatch):
     conn = init_db(":memory:")
     _seed_stock_prices(conn, "2330", n_days=70)
     candidate = {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場", "entry_price": 104.0, "stop_loss": 99.0, "note": None}
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [candidate])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [candidate])
 
     daily_screener.run_screen_and_store(conn, iso_date="2026-07-22", min_days=60)
     daily_screener.run_screen_and_store(conn, iso_date="2026-07-23", min_days=60)
@@ -802,7 +816,7 @@ def test_run_screen_and_store_writes_indicator_cache_for_the_date(monkeypatch):
     src.screener.indicator_precompute.compute_indicator_rows())，不用另外一個步驟。"""
     conn = init_db(":memory:")
     _seed_stock_prices(conn, "2330", n_days=70)  # 最後一天是2026-03-14
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
 
     daily_screener.run_screen_and_store(conn, iso_date="2026-03-14", min_days=60)
 
@@ -955,3 +969,218 @@ def test_run_screen_and_store_for_range_excludes_dates_before_min_days_available
 
     # 2026-03-01~2026-03-03累積天數(57~59)還不到min_days=60門檻，2026-03-04起(60天)才夠
     assert captured == [False, False, False, True, True, True, True, True, True]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 2026-08-08：陳家豐籌碼面3條building block(融資超跌反彈/投信連續買超/量縮止跌)
+# 接進daily_candidates候選清單，見daily_screener.py模組docstring該日期的說明。
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_screen_margin_oversold_rebound_fires_after_consecutive_low_ratio_days():
+    """複用tests/test_stock_detail_data.py同款情境：第1天融資買進1000股、收盤價100元
+    建立加權平均成本100(6成融資，loan_per_share=60)，之後3天收盤價都跌到60元以下，
+    維持率<120%連續3天，今天(最後一天)應該觸發超跌反彈。"""
+    dates = pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-05", "2026-01-06"])
+    df = pd.DataFrame(
+        {"open": [100.0, 70.0, 65.0, 60.0], "high": [100.0, 70.0, 65.0, 60.0],
+         "low": [99.0, 69.0, 64.0, 59.0], "close": [100.0, 70.0, 65.0, 60.0],
+         "volume": [1000, 1000, 1000, 1000]},
+        index=dates,
+    )
+    margin_df = pd.DataFrame(
+        {"close": [100.0, 70.0, 65.0, 60.0],
+         "margin_buy": [1000, 0, 0, 0], "margin_sell": [0, 0, 0, 0],
+         "margin_cash_repayment": [0, 0, 0, 0], "margin_today_balance": [1000, 1000, 1000, 1000]},
+        index=dates,
+    )
+
+    result = daily_screener.screen_margin_oversold_rebound(df, margin_df, min_days=4)
+
+    assert result is not None
+    assert result["signal_name"].startswith("R-CHIP-02")
+    assert result["entry_price"] == 60.0
+    assert result["stop_loss"] == 59.0
+    assert "超跌反彈" in result["note"]
+
+
+def test_screen_margin_oversold_rebound_returns_none_without_margin_data():
+    dates = pd.date_range("2026-01-01", periods=5, freq="B")
+    df = pd.DataFrame(
+        {"open": [10.0] * 5, "high": [10.0] * 5, "low": [9.0] * 5, "close": [10.0] * 5, "volume": [10] * 5},
+        index=dates,
+    )
+    assert daily_screener.screen_margin_oversold_rebound(df, None, min_days=1) is None
+    assert daily_screener.screen_margin_oversold_rebound(df, pd.DataFrame(), min_days=1) is None
+
+
+def test_screen_institutional_trust_buy_streak_fires_after_three_buy_days():
+    dates = pd.date_range("2026-01-01", periods=3, freq="B")
+    df = pd.DataFrame(
+        {"open": [10.0, 10.0, 10.0], "high": [10.0, 10.0, 10.0], "low": [9.0, 9.0, 9.0],
+         "close": [10.0, 10.0, 11.0], "volume": [10, 10, 10]},
+        index=dates,
+    )
+    trust_net_desc = [200.0, 250.0, 300.0]  # 由新到舊，連續3天皆為淨買超
+
+    result = daily_screener.screen_institutional_trust_buy_streak(df, trust_net_desc, min_days=1)
+
+    assert result is not None
+    assert result["signal_name"].startswith("R-CHIP-01")
+    assert result["entry_price"] == 11.0
+    assert result["stop_loss"] == 9.0
+    assert "3" in result["note"]
+
+
+def test_screen_institutional_trust_buy_streak_returns_none_when_streak_too_short():
+    dates = pd.date_range("2026-01-01", periods=2, freq="B")
+    df = pd.DataFrame(
+        {"open": [10.0, 10.0], "high": [10.0, 10.0], "low": [9.0, 9.0], "close": [10.0, 11.0], "volume": [10, 10]},
+        index=dates,
+    )
+    trust_net_desc = [200.0, -50.0]  # 今天雖為買超，但只連續1天(前一天是賣超)，未達3天門檻
+
+    assert daily_screener.screen_institutional_trust_buy_streak(df, trust_net_desc, min_days=1) is None
+    assert daily_screener.screen_institutional_trust_buy_streak(df, None, min_days=1) is None
+    assert daily_screener.screen_institutional_trust_buy_streak(df, [], min_days=1) is None
+
+
+def test_screen_volume_washout_fires_when_volume_shrinks_to_tenth_of_peak():
+    n_days = 250
+    dates = pd.date_range("2020-01-01", periods=n_days, freq="B")
+    volume = [100_000] * (n_days - 5) + [5_000] * 5  # 近5日均量萎縮到峰值均量的5%(<10%門檻)
+    df = pd.DataFrame(
+        {"open": [50.0] * n_days, "high": [51.0] * n_days, "low": [49.0] * n_days,
+         "close": [50.0] * n_days, "volume": volume},
+        index=dates,
+    )
+
+    result = daily_screener.screen_volume_washout(df, min_days=60)
+
+    assert result is not None
+    assert result["signal_name"].startswith("R-CHIP-03")
+    assert result["entry_price"] == 50.0
+    assert result["stop_loss"] == 49.0
+
+
+def test_screen_volume_washout_returns_none_when_history_shorter_than_lookback():
+    n_days = 100  # < VOLUME_WASHOUT_LOOKBACK(240)，rolling峰值算不出來(NaN)
+    dates = pd.date_range("2020-01-01", periods=n_days, freq="B")
+    df = pd.DataFrame(
+        {"open": [50.0] * n_days, "high": [51.0] * n_days, "low": [49.0] * n_days,
+         "close": [50.0] * n_days, "volume": [1000] * n_days},
+        index=dates,
+    )
+    assert daily_screener.screen_volume_washout(df, min_days=60) is None
+
+
+def test_screen_all_stocks_includes_chip_candidates_when_data_provided():
+    """screen_all_stocks()傳入margin_frames/institutional_trust_net後，應該把R-CHIP-01/
+    02候選跟技術面候選一起彙總；沒有對應資料的股票(1101)不受影響，也不會crash。"""
+    dates = pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-05", "2026-01-06"])
+    df = pd.DataFrame(
+        {"open": [100.0, 70.0, 65.0, 60.0], "high": [100.0, 70.0, 65.0, 60.0],
+         "low": [99.0, 69.0, 64.0, 59.0], "close": [100.0, 70.0, 65.0, 60.0],
+         "volume": [1000, 1000, 1000, 1000]},
+        index=dates,
+    )
+    margin_df = pd.DataFrame(
+        {"close": [100.0, 70.0, 65.0, 60.0],
+         "margin_buy": [1000, 0, 0, 0], "margin_sell": [0, 0, 0, 0],
+         "margin_cash_repayment": [0, 0, 0, 0], "margin_today_balance": [1000, 1000, 1000, 1000]},
+        index=dates,
+    )
+    other_df = df.copy()
+
+    candidates = daily_screener.screen_all_stocks(
+        {"2330": df, "1101": other_df}, min_days=4,
+        margin_frames={"2330": margin_df}, institutional_trust_net={"2330": [200.0, 250.0, 300.0]},
+    )
+
+    chip_ids = {(c["stock_id"], c["signal_name"].split("（")[0]) for c in candidates if c["signal_name"].startswith("R-CHIP")}
+    assert ("2330", "R-CHIP-02融資維持率超跌反彈") in chip_ids
+    assert ("2330", "R-CHIP-01投信連續買超觀察") in chip_ids
+    assert all(stock_id != "1101" for stock_id, _ in chip_ids)  # 1101沒有籌碼資料，不應該出現R-CHIP候選
+
+
+def test_load_trailing_margin_frames_joins_close_price_and_groups_by_stock():
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=2)  # 日期2026-01-01/01-02，收盤價都是100.5
+    upsert_margin_trading(conn, [
+        {
+            "stock_id": "2330", "date": d,
+            "margin_purchase_buy": 1000 if i == 0 else 0, "margin_purchase_sell": 0,
+            "margin_purchase_cash_repayment": 0, "margin_purchase_yesterday_balance": None,
+            "margin_purchase_today_balance": 1000, "margin_purchase_limit": None,
+            "short_sale_buy": 0, "short_sale_sell": 0, "short_sale_cash_repayment": 0,
+            "short_sale_yesterday_balance": None, "short_sale_today_balance": None, "short_sale_limit": None,
+            "offset_loan_and_short": None,
+        }
+        for i, d in enumerate(["2026-01-01", "2026-01-02"])
+    ])
+
+    frames = daily_screener.load_trailing_margin_frames(conn)
+
+    assert set(frames.keys()) == {"2330"}
+    df = frames["2330"]
+    assert list(df["margin_today_balance"]) == [1000, 1000]
+    assert list(df["close"]) == [100.5, 100.5]
+
+
+def test_load_trailing_margin_frames_excludes_stocks_without_margin_data():
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=2)
+    assert daily_screener.load_trailing_margin_frames(conn) == {}
+
+
+def test_load_trailing_institutional_trust_net_only_includes_investment_trust_newest_first():
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=1)
+    upsert_institutional_investors(conn, [
+        {"stock_id": "2330", "date": "2026-01-01", "investor_type": "Investment_Trust", "buy": 300, "sell": 100},
+        {"stock_id": "2330", "date": "2026-01-02", "investor_type": "Investment_Trust", "buy": 200, "sell": 50},
+        {"stock_id": "2330", "date": "2026-01-01", "investor_type": "Foreign_Investor", "buy": 900, "sell": 100},
+    ])
+
+    result = daily_screener.load_trailing_institutional_trust_net(conn)
+
+    # 依date遞增算net(01-01:200, 01-02:150)後反轉成由新到舊；外資(Foreign_Investor)不計入
+    assert result == {"2330": [150, 200]}
+
+
+def test_run_screen_and_store_includes_margin_oversold_rebound_candidate():
+    """端對端驗證：run_screen_and_store()現在會一併載入融資資料、寫進daily_candidates，
+    不是只有screen_all_stocks()單元測試層級可以動——用真正的conn跑一次完整路徑，確保
+    load_trailing_margin_frames()跟screen_all_stocks()之間的串接(例如日期索引型別對不
+    上導致join失敗)沒有斷掉。"""
+    conn = init_db(":memory:")
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "2330", "market": "TWSE", "industry": None, "updated_at": "2026-01-06"}])
+    dates = ["2026-01-01", "2026-01-02", "2026-01-05", "2026-01-06"]
+    closes = [100.0, 70.0, 65.0, 60.0]
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": d, "open": c, "high": c, "low": c - 1.0, "close": c, "volume": 1000,
+         "trading_money": None, "trading_turnover": None, "spread": None}
+        for d, c in zip(dates, closes)
+    ])
+    upsert_margin_trading(conn, [
+        {
+            "stock_id": "2330", "date": d,
+            "margin_purchase_buy": 1000 if i == 0 else 0, "margin_purchase_sell": 0,
+            "margin_purchase_cash_repayment": 0, "margin_purchase_yesterday_balance": None,
+            "margin_purchase_today_balance": 1000, "margin_purchase_limit": None,
+            "short_sale_buy": 0, "short_sale_sell": 0, "short_sale_cash_repayment": 0,
+            "short_sale_yesterday_balance": None, "short_sale_today_balance": None, "short_sale_limit": None,
+            "offset_loan_and_short": None,
+        }
+        for i, d in enumerate(dates)
+    ])
+
+    candidates = daily_screener.run_screen_and_store(conn, iso_date=dates[-1], min_days=1)
+
+    chip_candidates = [c for c in candidates if c["signal_name"].startswith("R-CHIP-02")]
+    assert len(chip_candidates) == 1
+    assert chip_candidates[0]["stock_id"] == "2330"
+    row = conn.execute(
+        "SELECT signal_name FROM daily_candidates WHERE date = ? AND stock_id = '2330'", (dates[-1],)
+    ).fetchone()
+    assert row is not None
+    assert row[0].startswith("R-CHIP-02")

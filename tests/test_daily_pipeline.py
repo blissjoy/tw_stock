@@ -80,7 +80,7 @@ def test_run_daily_pipeline_writes_candidates_and_skips_notify_on_dry_run(monkey
     }
     # 特意patch daily_screener.screen_all_stocks（而不是整個run_screen_and_store），讓
     # run_screen_and_store真正的「寫進daily_candidates」邏輯照常執行，才能驗證這條路徑。
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [fake_candidate])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [fake_candidate])
 
     notify_calls = []
     monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: notify_calls.append(("line", text)))
@@ -853,7 +853,7 @@ def test_run_daily_pipeline_writes_done_status_with_candidate_count(monkeypatch,
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
 
@@ -1115,7 +1115,7 @@ def test_run_daily_pipeline_updates_taiex_alongside_stocks(monkeypatch):
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
 
     fake_rows = [{
         "stock_id": daily_pipeline.yfinance_client.TAIEX_STOCK_ID, "date": "2026-07-22",
@@ -1150,7 +1150,7 @@ def test_run_daily_pipeline_refreshes_indicator_window_after_screening(monkeypat
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: [])
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
 
     calls = []
     monkeypatch.setattr(
@@ -1172,7 +1172,7 @@ def test_run_daily_pipeline_continues_when_indicator_refresh_raises(monkeypatch)
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: [])
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
 
     def _raise(conn, end_date, window_days):
         raise RuntimeError("模擬刷新失敗")
@@ -1191,7 +1191,7 @@ def test_run_daily_pipeline_continues_when_taiex_update_raises(monkeypatch):
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
-    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
 
     def _raise(start, end):
         raise RuntimeError("模擬Yahoo Finance暫時打不通")

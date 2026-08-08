@@ -8177,3 +8177,154 @@ latest_day_volume_signals()`既有的「攻擊量」判斷用的是同一個`bas
 (~2.4GB)沒能跑真實GUI截圖，改成直接呼叫`_rerender_chart()`會用到的同一段
 組裝邏輯(用真實DB的2330股票資料)，確認組出來的文字內容跟web版截圖顯示的
 逐字一致(同樣是「低於5日均量（0.75倍）」+完全相同的note文字)，信心程度足夠。
+
+---
+
+## 陳家豐籌碼面3條building block接進選股screener（2026-08-08）
+
+之前一次對話結尾，使用者問「之前陳佳豐的籌碼是不是還有沒做的事」，回報現況後
+使用者選擇優先處理「把已經寫好的3條building block（融資維持率/法人連續天數/
+量縮止跌）接進選股screener」——這3條在此之前只接進`stock_detail_data.
+scan_chip_tier()`／`analyze_chip_signals()`，供「個股分析」／「大盤分析」面板
+即時查詢單一股票用，從來沒有批次跑全市場、寫進`daily_candidates`候選清單，
+這次要補上後者。
+
+**核心設計決策**：
+1. **不重用`scan_chip_tier(conn, stock_id)`本身**——那是「每次呼叫查一次DB」
+   的單股函式，全市場~2000檔批次呼叫會變成N+1查詢，正是這次session稍早才修好
+   的huang_chip_data.py同一種問題(觀察清單頁面在Turso上曾拖慢到8.9秒)。改成
+   在`daily_screener.py`新增`load_trailing_margin_frames()`／`load_trailing_
+   institutional_trust_net()`，各自一次SQL把「全部股票」的融資/投信資料讀出來
+   再用Python依stock_id分組，重用`margin_trading.py`／`institutional_flow.py`
+   的底層純函式(`compute_margin_maintenance_ratio()`／`margin_oversold_
+   rebound_signal()`／`classify_flow_streak()`)算出結果，確保跟「個股明細」
+   分頁顯示的數字一致(同一套底層計算，不是兩份邏輯)。
+2. **只挑「買進方向」的訊號進候選清單**：R-CHIP-02融資超跌反彈(`screen_margin_
+   oversold_rebound()`)、R-CHIP-01投信連續買超(`screen_institutional_trust_
+   buy_streak()`)。三大法人連續賣超(R-SCREEN-06)這種「排除型」警示訊號刻意
+   不放進`daily_candidates`——那張表的既有慣例是「都是清楚的做多進場訊號」，
+   混進「應該避開」的警示會讓候選清單語意不一致，這條警示繼續留在`scan_chip_
+   tier()`／「個股分析」面板顯示才是它該出現的地方。
+3. **entry_price/stop_loss用「當日最低點」**：這幾條規則書中都沒有給明確的
+   停損公式(不像R-TREND-14有書中明確的5%~7%數字)，刻意不重用`bull_short_
+   term_stop_loss()`那種「書中明確區間」的函式，避免誤讓使用者以為這個停損
+   數字也是書中的明確規則，一律標明是工程預設值。
+4. **新增`ai/chen-rules/籌碼面/量縮止跌觀察.md`(R-CHIP-03)**，把`volume_
+   washout.py`正式形式化成一條有Rule ID的規則文件(信心75/100)，補上原本兩份
+   舊文件(融資維持率規則.md/投信連續買超觀察.md)過時的「實作進度」段落
+   （原本還寫著「尚未接上個股分析面板」，但那條路徑其實2026-08-04就做完了）。
+
+**效能顧慮與實測**：用本機真實DB(累積約3.5年融資/法人歷史，~2368檔股票)實測
+`load_trailing_margin_frames()`／`load_trailing_institutional_trust_net()`
+不設任何天數上限、一次讀全部歷史時分別要價16秒／23秒，太慢。改成限定只讀「最近
+N個交易日」：融資250天(`MARGIN_SCREENING_LOOKBACK_DAYS`，跟`volume_washout.py`
+的VOLUME_WASHOUT_LOOKBACK同量級的「約1年」)、投信30天(`INSTITUTIONAL_TRUST_
+SCREENING_LOOKBACK_DAYS`，比照`stock_detail_data.load_institutional_flow_
+analysis()`既有的`lookback_days=30`预设值)，配合`CROSS JOIN`語法強制SQLite
+查詢規劃器先用margin_trading的date索引(一般JOIN在這個資料量級容易被規劃器
+誤判成先掃列數更多的stock_prices、逐列查margin_trading，反而更慢)，兩個函式
+合計耗時降到約6.7秒。融資維持率的「全歷史」算法本來就是`compute_margin_
+maintenance_ratio()`docstring自承的近似值(「歷史起點當天餘額視為當天買進」的
+誤差會隨時間收斂)，改成250天窗口是同一種近似精神的延伸，不是精確度上的重大
+讓步；`stock_detail_data.load_margin_maintenance_analysis()`(個股明細分頁，
+一次只查1檔)維持不設窗口的做法不變，兩處數字理論上會有些微差異，但差異只會
+出現在已經收斂掉的早期誤差範圍內。
+
+**⚠️ 全市場實測發現R-CHIP-03(量縮止跌)雜訊過多，經使用者確認排除**：用本機
+真實DB全市場~2368檔掃描，R-CHIP-01(39檔)/R-CHIP-02(64檔)觸發數量落在合理的
+候選清單規模，但R-CHIP-03觸發率高達47%(1106檔！)，遠比400檔樣本測出的36.5%
+更高。書中原文本來就說量縮是「市場常態」不是罕見訊號，但把接近半個市場都標成
+候選股會讓`daily_candidates`失去篩選意義。用AskUserQuestion請示使用者後，
+選擇「R-CHIP-03先不進候選清單」——`screen_volume_washout()`函式本身完整實作
+且有測試涵蓋，但`screen_all_stocks()`刻意不呼叫它，等有更好的鑑別方法(例如
+搭配`trend_position.py`的`is_at_low`或集中度等其他訊號一起判讀)再考慮加回來。
+
+**⚠️ 附帶發現(不在這次改動範圍內)**：全市場批次跑`screen_all_stocks()`(含
+既有15條純OHLCV技術面`_SCREEN_FUNCTIONS`)本機實測要價約74秒，這是這次新增的
+3個chip screen函式(合計運算成本約2.5秒，可忽略)之外、**既有**技術面規則在
+~2368檔×近3年歷史資料量級下的運算成本，不是這次改動造成的迴歸，但隨資料庫
+歷史持續累積、往後只會更慢，跟`load_trailing_frames()`本身逐檔股票查一次
+stock_prices(本機約17秒)是同一類「目前可接受、但沒有設定上限」的技術債，
+供之後排查候選清單效能問題時參考，這次任務範圍不含修復。
+
+**新增/修改檔案**：
+- `src/screener/daily_screener.py`：新增`load_trailing_margin_frames()`／
+  `load_trailing_institutional_trust_net()`／`_trading_day_cutoff()`／
+  `screen_margin_oversold_rebound()`／`screen_institutional_trust_buy_
+  streak()`／`screen_volume_washout()`；`screen_all_stocks()`新增
+  `margin_frames`/`institutional_trust_net`兩個可選參數(預設None，向下相容
+  既有呼叫端與測試)；`run_screen_and_store()`呼叫這兩個新的批次載入函式並
+  傳給`screen_all_stocks()`；`run_screen_and_store_for_range()`(桌面版
+  「回補資料」歷史重算候選)刻意沒有同步接上chip資料，範圍界定在使用者要求
+  的「選股screener」主路徑(即時候選清單)，歷史回補是次要功能，之後有需要
+  再補。
+- `ai/chen-rules/籌碼面/量縮止跌觀察.md`(新增，R-CHIP-03)、`融資維持率規則.
+  md`／`投信連續買超觀察.md`(更新過時的實作進度段落)。
+- `tests/test_daily_screener.py`：新增17個測試(3個screen_*函式的正/反案例、
+  2個批次載入函式、`screen_all_stocks()`整合chip資料的案例、`run_screen_and_
+  store()`端對端驗證)；既有9個`monkeypatch.setattr(daily_screener, "screen_
+  all_stocks", lambda frames, min_days: ...)`因為呼叫端多傳了新參數，改成
+  `lambda frames, min_days, **_: ...`容忍額外關鍵字參數。
+- `tests/test_daily_pipeline.py`：同樣6處`screen_all_stocks`的monkeypatch
+  lambda加上`**_`。
+
+真實驗證：`pytest tests/ -q`1066個測試全數通過。另外用本機真實DB(`data/
+tw_stock.db`)實際跑過`run_screen_and_store()`完整流程(非mock)，確認R-CHIP-01/
+02候選正確寫進`daily_candidates`、R-CHIP-03確實不出現，且信心分數(80%/85%)
+正確從對應的rule doc動態讀出而非寫死。⚠️ 沒有另外跑桌面版/web版UI截圖驗證——
+這次改動不涉及任何UI層程式碼(`dashboard/app.py`/`desktop/main_window.py`
+完全沒有改動)，候選清單UI本來就是通用的「讀daily_candidates表顯示」邏輯，
+不需要為每種新signal_name格式另外改UI程式碼，之前README/analyze_stock_signals
+一節也確認過`_confidence_sum`用的是通用正規表示式抓取「(數字)%」，不特定
+比對R-XXX前綴，新的R-CHIP-01/02訊號會自動被既有UI正確顯示、排序、加總信心
+分數，不需要額外UI改動。
+
+---
+
+## 選股screener全市場掃描效能優化：趨勢判斷去重複（2026-08-08）
+
+上一批加完chip building block後，使用者問全市場掃描約74秒的既有技術債
+「有改善方法嗎」。用cProfile對`screen_all_stocks()`實際跑一次全市場~2368檔
+抓真正的瓶頸，不用猜的——結果發現`daily_bull_trend_state()`／`daily_bear_
+trend_state()`(n=5)被`screen_bull_short_term_entry`／`screen_bear_short_
+term_entry`／4個單一均線戰法(R-MA-22/23/24/25)這6條規則各自獨立呼叫，
+對同一檔股票的同一份(n=5)趨勢判斷重複算了6次——這是純粹的重複計算，不影響
+結果正確性。
+
+**改法**：`screen_bull_short_term_entry()`／`screen_bear_short_term_entry()`／
+`_single_ma_strategy_screen()`(及其4個wrapper：`screen_single_ma_short_term_
+long/short`／`screen_single_ma_mid_term_long/short`)新增可選參數(`bull_trend`／
+`bear_trend`／`trend`，預設None時照舊自行計算，向下相容單獨呼叫或測試場景)。
+`_SCREEN_FUNCTIONS`拆成三組：原本的`_SCREEN_FUNCTIONS`(9條，無共用trend需求)、
+新增`_BULL_TREND_SCREEN_FUNCTIONS`(3條)、`_BEAR_TREND_SCREEN_FUNCTIONS`(3條)。
+`screen_all_stocks()`／`analyze_stock_signals()`都改成每檔股票只算一次
+bull_trend/bear_trend、傳給對應那組規則共用，不再各自重算。
+
+**⚠️ 實測改善幅度比profiler估計的小很多，這裡誠實記錄**：cProfile報告顯示
+這部分重複計算佔profiled總時間(167秒，含profiler本身開銷)的23%，估計原始
+74秒能省到~57秒；但實際用真實時間量測(同一份本機DB、同樣的frames、不含chip
+資料、`time.time()`前後量測，非profiler)，前後分別是73.4秒→62.3秒，只省了
+約15%(11秒)，不是23%。原因：cProfile的每次函式呼叫都有固定的record開銷，
+對`_daily_trend_state()`這種被呼叫14208次的函式，這筆固定開銷會被大幅放大、
+在profile報告裡佔比失真，profile數字本身可信(相對排名沒錯，這確實是最大的
+單一瓶頸)，但拿來估算「省下多少秒」不準，要以實際時間量測為準。
+
+**正確性驗證(這是這次改動最重要的檢查，因為改動觸及6條規則的核心判斷邏輯)**：
+用`git stash`切回改動前的程式碼、對同一份本機真實DB跑一次`screen_all_
+stocks()`記錄完整候選清單(984筆)，`git stash pop`還原後再跑一次記錄
+(984筆)，兩次逐筆(stock_id, signal_name)排序後比對，**結果完全一致(byte-
+for-byte相同)**——確認這次改動純粹是效能優化，沒有動到任何判斷邏輯本身。
+
+**還沒動的部分**：R-SCREEN-15(緩漲軌道突破)用到的`chart_overlays.
+compute_trendlines()`／`pivots.py`的`compute_turning_points()`，profile
+顯示佔了另外25%的時間，但這條只有一個規則在用，不是重複計算的問題，是轉折點
+偵測演算法本身在~2368檔×近3年資料量級下天生慢——要改善得動到那個指標的
+實作邏輯(可能要向量化)，工程量比這次的「去重複」大很多，這次沒有動，留給
+之後有需要再處理。
+
+真實驗證：`pytest tests/ -q`1066個測試全數通過(2個既有測試`test_analyze_
+stock_signals_sorts_by_confidence_descending`／`test_analyze_stock_signals_
+merges_duplicate_rule_id_notes`因為原本用只有close欄位的最小DataFrame、
+現在analyze_stock_signals()一律會嘗試算trend需要high/low欄位，補上這兩個
+欄位並monkeypatch新增的`_BULL_TREND_SCREEN_FUNCTIONS`/`_BEAR_TREND_SCREEN_
+FUNCTIONS`為空tuple)；上述本機真實DB「改動前後候選清單逐筆比對」正確性驗證。
