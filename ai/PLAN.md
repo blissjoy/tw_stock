@@ -8788,3 +8788,35 @@ text()`：對`load_stock_universe_for_date()`已合併好的`signal_name`字串(
 8個、`tests/test_chart_data.py`4個)。對`data/tw_stock.db`複本(不動正式DB)跑
 `run_screen_and_store()`完整驗證端對端無crash，人工檢視輸出內容合理，複本用完
 即刪除。
+
+---
+
+## 選股候選/警示分開顯示接上桌面版+網頁版UI（2026-08-09）
+
+延續上一節，使用者選擇「接UI」——把已經寫好的`chart_data.split_candidate_and_
+warning_signal_text()`實際接進兩個前端的選股畫面，讓警示真正跟候選分開顯示，
+不再只是文字前綴可以肉眼辨識。
+
+**桌面版**(`desktop/main_window.py`)：候選清單表格`setColumnCount(13)`→`14`，
+在「訊號(信心%)」欄後插入新的「警示」欄，`_SIGNAL_COLUMN`(4)後新增`_WARNING_
+COLUMN`(5)同樣設Stretch；`_NUMERIC_COLUMNS`索引集合從`{5,6,7,8,9,10,12}`整體
+右移成`{6,7,8,9,10,11,13}`；`_reload_candidates()`呼叫`split_candidate_and_
+warning_signal_text()`把`signal_name`拆成候選/警示兩段，各自用既有的`_truncate_
+signal_lines()`截斷顯示、完整內容仍放tooltip。
+
+**網頁版**(`dashboard/app.py`)：`candidates_df[["signal_name", "warning_name"]]
+= candidates_df["signal_name"].apply(...)`拆欄，`column_order`/`column_config`
+加入`warning_name`("警示")。**踩到一個顯示bug**：`split_candidate_and_warning_
+signal_text()`沒有內容時回傳Python`None`(不是NaN)，`st.dataframe`會把`None`
+渲染成字面文字"None"而不是空白(SQL LEFT JOIN查無資料時原本是NaN，兩者在這個
+元件的顯示行為不同)——用`.fillna("")`修正，pandas對None/NaN一視同仁。
+
+真實驗證：兩邊都實際啟動並截圖確認。網頁版用Playwright，先確認「⚠️排除：R-
+SCREEN-06外資連續賣超（75%）」正確出現在獨立的「警示」欄、訊號欄同時保持空白
+(不是顯示"None")；過程中順便觸發了一次「立即重新篩選」，讓正式`data/tw_stock.db`
+的`daily_candidates`實際寫入了新的R-CHIP-10/R-SCREEN-06訊號(672筆)，這是預期
+且安全的操作(跟按鈕平常的行為一致，只是重算現有資料，不呼叫任何外部API)。桌面版
+直接呼叫`MainWindow()`(帶`LOCAL_DB_PATH`)截圖確認同樣正確：6195(詩肯)正確顯示
+在獨立「警示」欄，其餘沒有警示的股票該欄顯示"-"。`pytest tests/ -q`1123個測試
+維持全數通過(UI渲染邏輯本身依專案慣例用截圖驗證，不寫單元測試)。截圖與驗證用
+腳本皆已從scratchpad刪除。

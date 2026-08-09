@@ -51,6 +51,7 @@ from src.presentation.chart_data import (  # noqa: E402
     load_holidays_for_chart,
     load_price_history,
     resolve_stock_id,
+    split_candidate_and_warning_signal_text,
 )
 from src.presentation import pipeline_status  # noqa: E402
 from src.presentation.chart_render import render_chart_html  # noqa: E402
@@ -2385,6 +2386,21 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                         color = portfolio_data.listing_type_color(row.get("listing_type"))
                         return [f"color: {color}" if col == "name" else "" for col in row.index]
 
+                    # 「警示」欄2026-08-09新增：daily_candidates裡投信/外資連續賣超這類
+                    # 「排除型」訊號(signal_name帶daily_screener.WARNING_SIGNAL_PREFIX
+                    # 前綴)不該跟真正的買進候選混在同一欄，用split_candidate_and_
+                    # warning_signal_text()拆成兩欄分開顯示，照抄桌面版main_window.py
+                    # 同一天做的「警示」欄wiring。
+                    candidates_df[["signal_name", "warning_name"]] = candidates_df["signal_name"].apply(
+                        lambda v: pd.Series(split_candidate_and_warning_signal_text(v))
+                    )
+                    # split_candidate_and_warning_signal_text()沒有內容時回傳Python
+                    # None(不是NaN)，st.dataframe會把None渲染成字面文字"None"而不是空白
+                    # (原本SQL LEFT JOIN查無資料時是NaN，兩者在這個元件的顯示行為不同)，
+                    # 這裡統一fillna("")成空字串，pandas的fillna對None/NaN一視同仁。
+                    candidates_df["signal_name"] = candidates_df["signal_name"].fillna("")
+                    candidates_df["warning_name"] = candidates_df["warning_name"].fillna("")
+
                     # ⚠️ 數字欄位先轉成「已格式化好的字串」("-"代表缺值)，不依賴column_config.
                     # NumberColumn自動格式化——見_fmt_or_dash()的說明。entry_price/stop_loss/
                     # sar_value/sar_distance_pct對「全市場但沒觸發過任何朱家泓規則」或「還沒
@@ -2405,12 +2421,13 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                         use_container_width=True, hide_index=True,
                         on_select="rerun", selection_mode=["multi-row", "single-cell"], key="candidates_table",
                         column_order=[
-                            "stock_id", "name", "industry", "signal_name", "close", "entry_price",
+                            "stock_id", "name", "industry", "signal_name", "warning_name", "close", "entry_price",
                             "stop_loss", "pct_change", "volume", "sar_value", "sar_status", "sar_distance_pct",
                         ],
                         column_config={
                             "stock_id": "股票代號", "name": "名稱", "industry": "產業別",
                             "signal_name": "訊號(信心%)",  # 信心分數已經內含在signal_name字串裡(見daily_screener.py)，這裡只是把「(信心%)」這個提示放進欄位標題，不用每一列都重複寫「信心」兩個字
+                            "warning_name": "警示",
                             "close": "收盤價", "entry_price": "進場價", "stop_loss": "停損價",
                             "pct_change": "漲跌幅(%)", "volume": "成交量",
                             "sar_value": "SAR值", "sar_status": "SAR狀態", "sar_distance_pct": "SAR距離%",
