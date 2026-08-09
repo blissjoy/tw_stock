@@ -585,6 +585,54 @@ def test_load_volume_washout_signal_returns_none_when_history_too_short():
     _seed_stock(conn, "2330", "台積電", prices)
 
     assert stock_detail_data.load_volume_washout_signal(conn, "2330") is None
+
+
+def _seed_holder_shares(conn, stock_id: str, rows_by_date: dict) -> None:
+    from src.data.storage import upsert_holder_shares_distribution
+
+    rows = [
+        {
+            "stock_id": stock_id, "date": date_, "holding_shares_level": level,
+            "people": None, "unit": None, "percent": percent, "updated_at": "2026-08-09T00:00:00",
+        }
+        for date_, levels in rows_by_date.items()
+        for level, percent in levels.items()
+    ]
+    upsert_holder_shares_distribution(conn, rows)
+
+
+def test_load_ownership_distribution_analysis_returns_none_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_ownership_distribution_analysis(conn, "2330") is None
+
+
+def test_scan_chip_tier_detects_ownership_flow_from_retail_to_whale():
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-08-08", "close": 500.0}])
+    _seed_holder_shares(conn, "2330", {
+        "2026-08-01": {"more than 1,000,001": 70.0, "1-999": 4.0},
+        "2026-08-08": {"more than 1,000,001": 72.0, "1-999": 3.0},
+    })
+
+    analysis = stock_detail_data.load_ownership_distribution_analysis(conn, "2330")
+    assert analysis["direction"] == "籌碼從散戶流向大股東，股價多半續漲"
+
+    results = stock_detail_data.scan_chip_tier(conn, "2330")
+    chip_07 = [r for r in results if r["rule_id"] == "R-CHIP-07"]
+    assert len(chip_07) == 1
+    assert "續漲" in chip_07[0]["note"]
+
+
+def test_scan_chip_tier_skips_ownership_signal_when_direction_unclear():
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-08-08", "close": 500.0}])
+    _seed_holder_shares(conn, "2330", {
+        "2026-08-01": {"more than 1,000,001": 70.0, "1-999": 4.0},
+        "2026-08-08": {"more than 1,000,001": 71.0, "1-999": 4.5},  # 兩者同向增加，無明確方向
+    })
+
+    results = stock_detail_data.scan_chip_tier(conn, "2330")
+    assert not any(r["rule_id"] == "R-CHIP-07" for r in results)
     assert stock_detail_data.scan_chip_tier(conn, "2330") == []
 
 

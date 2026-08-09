@@ -8665,3 +8665,42 @@ expander的`key`裡，讓按鈕點擊後所有expander都拿到全新、從未�
 真實驗證：`python -c "import json; json.load(...)"`確認`_manifest.json`格式正確可解析；
 逐一比對manifest裡31筆`file`欄位跟`ai/chen-rules/籌碼面/`底下實際檔案，31個全部對得上、
 無缺漏無多餘。這次是純文件/規則建檔工作，沒有改動任何程式碼，`pytest tests/ -q`不受影響。
+
+---
+
+## 實作可程式化「是/部分」層裡零卡點的3條規則：R-CHIP-07/14/15（2026-08-09）
+
+延續上一節的建檔工作，使用者問「可程式化『是』3條、『部分』13條，這些可現在做嗎？」，
+盤點後分三層回報：零卡點可立刻做(R-CHIP-07/14/15)、差一步查證/補資料(MOPS報表代碼、
+TWSE OpenAPI基本面資料)、卡在`broker_chips`做不了。使用者選擇「第一層三條全部做」。
+
+**R-CHIP-07(集保股權分散判讀)**：新增`src/indicators/ownership_distribution.py`，
+`classify_holder_identity()`(20/800/1000張三級距分類)、`ownership_concentration()`
+(股權集中度%)、`chip_flow_direction()`(比較最新2個公告日期判讀方向)。刻意獨立於
+`huang_chip_signals.py`之外——後者是外部JS一字不差複刻，門檻不能為了共用而調整。
+接進`src/presentation/stock_detail_data.py`的`scan_chip_tier()`成為R-CHIP-07訊號。
+⚠️`holder_shares_distribution`表只涵蓋「觀察清單」股票，非清單內股票這裡不會觸發，
+是既有資料範圍限制。
+
+**R-CHIP-15(鎖漲停後隔日走勢統計)**：新增`src/indicators/limit_up_stats.py`
+(`is_limit_up()`近似9.5%門檻、`next_day_event_stats()`、`summarize_events()`)，
+`scripts/validate_limit_up_next_day_stats.py`對`data/tw_stock.db`真實資料跑了一次
+(近5年，樣本32,136筆)。**結果**：方向大致還在(開高機率64.3% vs書中75.7%，收盤平均
++1.81% vs+0.70%)，但波動風險比書中2014年前數字大2~3倍(振幅8.22% vs 4.73%、最低點
+跌幅-2.28% vs -0.78%)，且這次驗證的是「全市場所有鎖漲停」而非書中原本鎖定的「短線
+券商所為」子集合(需要`broker_chips`才能篩選，卡住)。**決定不接進即時UI訊號**，只
+記錄成統計驗證結果——跟R-CHIP-03當初因觸發率過高而不接候選清單同一種審慎判斷。
+
+**R-CHIP-14(股價表態仲裁元原則)**：新增`src/indicators/signal_backtest.py`，
+`forward_return_stats()`(觸發日期清單+收盤價序列+觀察天數→勝率/平均報酬率，樣本
+不足時n=0且結果為None而非0)、`arbitrate()`(兩個方向相反訊號依事後報酬率判定誰贏)。
+⚠️這次只做了通用回測工具本身，`arbitrate()`需要先有「訊號衝突偵測」機制才能真正
+接上即時UI，本專案目前的訊號彼此獨立顯示、沒有這個機制，仍停留在工具層次；`forward_
+return_stats()`已可獨立使用，但這次還沒有實際拿它驗證任何一條既有規則的歷史勝率。
+
+三條規則檔(`ai/chen-rules/籌碼面/`)與`_manifest.json`的`implemented`欄位已同步更新。
+
+真實驗證：`pytest tests/ -q`1106個測試全數通過(新增`tests/test_ownership_
+distribution.py`12個、`tests/test_signal_backtest.py`7個、`tests/test_limit_up_
+stats.py`8個、`tests/test_stock_detail_data.py`新增3個)。`validate_limit_up_next_
+day_stats.py`對正式`data/tw_stock.db`實際跑過一次，驗證輸出截圖/暫存檔已刪除。

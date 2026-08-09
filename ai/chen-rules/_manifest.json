@@ -108,8 +108,8 @@
       "programmable": "是",
       "backtestable": "是",
       "confidence": "78/100 中高",
-      "implemented": false,
-      "note": "資料源與相近邏輯已存在於src/indicators/huang_chip_signals.py的classify_holder_change()，但陳家豐視角的20/800/1000張分類尚未獨立實作"
+      "implemented": true,
+      "note": "2026-08-09實作於src/indicators/ownership_distribution.py，接進scan_chip_tier()，但holder_shares_distribution只涵蓋觀察清單股票"
     },
     {
       "rule_id": "R-CHIP-08",
@@ -192,8 +192,8 @@
       "programmable": "部分",
       "backtestable": "是",
       "confidence": "60/100 中",
-      "implemented": false,
-      "note": "非獨立觸發訊號，是應內建進所有籌碼規則回測評分邏輯的元方法論"
+      "implemented": true,
+      "note": "2026-08-09實作通用回測工具forward_return_stats()/arbitrate()於src/indicators/signal_backtest.py，但即時訊號衝突偵測機制仍未接上，停留在工具層次"
     },
     {
       "rule_id": "R-CHIP-15",
@@ -204,8 +204,8 @@
       "programmable": "是",
       "backtestable": "是",
       "confidence": "75/100 中高",
-      "implemented": false,
-      "note": "資料已就緒，只需重新統計驗證書中2014年前數字的時效性"
+      "implemented": true,
+      "note": "2026-08-09用近5年真實資料驗證(scripts/validate_limit_up_next_day_stats.py)，方向大致成立但波動風險比書中數字大2~3倍，決定不接進即時UI訊號"
     },
     {
       "rule_id": "R-CHIP-16",

@@ -2,13 +2,14 @@
 （吃`conn`，回傳`dict`/`None`），不依賴任何UI框架，跟chart_data.py/portfolio_data.py
 同一套分工慣例，讓桌面版desktop/main_window.py只負責把這裡的結果組成HTML/表格顯示。
 
-2026-08-02新增。目前只有「交易資訊」「法人買賣總覽」「資券變化總覽」三個區塊有真實
-資料來源（分別對應stock_prices/institutional_investors/margin_trading這三張表，
-scripts/daily_pipeline.py每天會實際寫入)；「主力進出」需要券商分點籌碼(broker_chips
-表，schema已建好但抓取器要FinMind付費方案才能接上)、「大戶籌碼」需要股權分散/大戶
-持股資料(目前schema完全沒有對應的表)，這兩個區塊目前沒有資料來源，這裡不提供對應
-查詢函式，呼叫端(desktop/main_window.py)直接顯示「尚未串接資料來源」的框架，不是
-這裡回傳空dict硬湊。
+2026-08-02新增。「交易資訊」「法人買賣總覽」「資券變化總覽」三個區塊有真實資料來源
+（分別對應stock_prices/institutional_investors/margin_trading這三張表，scripts/
+daily_pipeline.py每天會實際寫入)；「主力進出」需要券商分點籌碼(broker_chips表，
+schema已建好但抓取器要FinMind付費方案才能接上)，這個區塊目前沒有資料來源，這裡不
+提供對應查詢函式，呼叫端(desktop/main_window.py)直接顯示「尚未串接資料來源」的框架，
+不是這裡回傳空dict硬湊。「大戶籌碼」2026-08-09起有資料來源(見load_ownership_
+distribution_analysis()，但只涵蓋「觀察清單」裡的股票，見holder_shares_distribution
+表的既有範圍限制)。
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from src.indicators import institutional_flow, margin_trading, volume_washout
+from src.indicators import institutional_flow, margin_trading, ownership_distribution, volume_washout
 
 # 三大法人5類細項(見src/data/twse_client.py的_INSTITUTIONAL_COLUMN_MAP，欄位命名
 # 對應FinMind TaiwanStockInstitutionalInvestorsBuySell)合併成一般常見的3個分類——
@@ -522,6 +523,26 @@ def load_volume_washout_signal(conn, stock_id: str) -> bool | None:
     return bool(volume_washout.volume_washout_signal(volume_series).iloc[-1])
 
 
+def load_ownership_distribution_analysis(conn, stock_id: str) -> dict | None:
+    """R-CHIP-07集保股權分散判讀規則(見src/indicators/ownership_distribution.py)，
+    供scan_chip_tier()判斷籌碼流向方向。⚠️`holder_shares_distribution`表只對「觀察
+    清單」裡的股票有資料(見src/data/holder_shares_sync.py)，不是全市場——查詢清單外
+    的股票會回傳None，這是既有的資料範圍限制，不是bug。資料筆數不足2個公告日期時
+    (該股不在觀察清單、或剛加入還沒抓過第2次)，底層chip_flow_direction()同樣回傳
+    None，這裡原樣往上傳遞。
+    """
+    rows = conn.execute(
+        "SELECT date, holding_shares_level, percent FROM holder_shares_distribution WHERE stock_id = ? ORDER BY date DESC",
+        (stock_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    rows_by_date: dict[str, list[dict]] = defaultdict(list)
+    for date_, level, percent in rows:
+        rows_by_date[date_].append({"holding_shares_level": level, "percent": percent})
+    return ownership_distribution.chip_flow_direction(rows_by_date)
+
+
 def scan_chip_tier(conn, stock_id: str) -> list[dict]:
     """回傳籌碼面「今天」實際觸發的規則清單，每筆為{"rule_id": ..., "note": ...}——
     跟`src.screener.rule_scan.scan_golden_tier()`同一種「今天有沒有觸發」語意，但這裡
@@ -530,7 +551,7 @@ def scan_chip_tier(conn, stock_id: str) -> list[dict]:
     的架構不同，所以放在這裡(跟本模組其餘函式一樣是DB查詢層)而不是rule_scan.py。查無
     資料回傳空list，不是None，跟scan_golden_tier()的慣例一致。
 
-    2026-08-04新增，供「個股分析」/「大盤分析」面板的「籌碼面」區塊使用，目前接了4條
+    2026-08-04新增，供「個股分析」/「大盤分析」面板的「籌碼面」區塊使用，目前接了5條
     規則，都是本專案已經在「個股明細」分頁用過的既有判讀邏輯，這裡只是重新包裝成
     「今天有沒有觸發」的訊號格式：
     - R-SCREEN-06(朱家泓)：三大法人連續賣超達INSTITUTIONAL_STREAK_THRESHOLD天。
@@ -546,6 +567,12 @@ def scan_chip_tier(conn, stock_id: str) -> list[dict]:
       同樣的顧慮影響——顯示「這檔股票今天量縮」是單純陳述事實，不是從全市場篩出
       一份「值得注意」的候選名單，兩者定位不同，所以R-CHIP-03只接這裡、不接候選
       清單。
+    - R-CHIP-07(陳家豐，見ai/chen-rules/籌碼面/集保股權分散判讀規則.md，2026-08-09
+      新增)：集保股權分散表最新2個公告日期比較，大股東(>1,000張)持股增加+散戶
+      (<=20張)持股減少(或反向)，判定為有明確方向的籌碼流向。⚠️`holder_shares_
+      distribution`只對「觀察清單」裡的股票有資料，非清單內股票這裡不會觸發，是
+      既有資料範圍限制、不是bug；只接這裡，不接`daily_screener.py`候選清單(全市場
+      掃描沒有意義，因為多數股票根本沒有這份資料)。
     """
     results: list[dict] = []
     flow = load_institutional_flow_analysis(conn, stock_id)
@@ -582,6 +609,18 @@ def scan_chip_tier(conn, stock_id: str) -> list[dict]:
         results.append({
             "rule_id": "R-CHIP-03",
             "note": "近期均量已萎縮到近1年峰值均量的10分之1以下，符合籌碼洗清、主力再進場觀察條件(書中提醒不宜單獨當高信心買進理由，建議搭配其他訊號一起判讀)",
+        })
+
+    ownership = load_ownership_distribution_analysis(conn, stock_id)
+    if ownership is not None and ownership["direction"] != "無明確方向":
+        results.append({
+            "rule_id": "R-CHIP-07",
+            "note": (
+                f"集保股權分散({ownership['prev_date']}→{ownership['latest_date']})："
+                f"大股東(>1,000張)持股{ownership['whale_pct']:.2f}%"
+                f"({ownership['whale_diff']:+.2f}%)，散戶(<=20張)持股{ownership['retail_pct']:.2f}%"
+                f"({ownership['retail_diff']:+.2f}%)，{ownership['direction']}"
+            ),
         })
     return results
 
