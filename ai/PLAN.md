@@ -8704,3 +8704,39 @@ return_stats()`已可獨立使用，但這次還沒有實際拿它驗證任何�
 distribution.py`12個、`tests/test_signal_backtest.py`7個、`tests/test_limit_up_
 stats.py`8個、`tests/test_stock_detail_data.py`新增3個)。`validate_limit_up_next_
 day_stats.py`對正式`data/tw_stock.db`實際跑過一次，驗證輸出截圖/暫存檔已刪除。
+
+---
+
+## R-CHIP-14 即時訊號衝突偵測正式接上（2026-08-09）
+
+上一節R-CHIP-14只做了通用回測工具本身，使用者接著問「即時的『訊號衝突偵測』機制還
+沒接上，那能接上嗎？」，確認可行後這次正式接上。
+
+**做法**：`src/presentation/stock_detail_data.py`新增`_signal_direction()`(把
+scan_chip_tier()既有5條規則標上買/賣方向，R-CHIP-02/07依note文字關鍵字判斷方向，
+因為同一rule_id可能代表相反方向)、`_historical_signal_trigger_dates()`(重建某條
+規則在該股完整歷史上的所有觸發日期，R-CHIP-02/03沿用既有向量化函式，R-SCREEN-06/
+R-CHIP-01新增`institutional_flow.py`的`flow_streak_series()`向量化版本避免O(n²)，
+R-CHIP-07用holder_shares_distribution公告日期逐對比較)、`detect_chip_signal_
+conflict()`(今天若同時出現買/賣矛盾訊號，對雙方各自跑`forward_return_stats()`
+算歷史勝率)，接進`scan_chip_tier()`輸出。
+
+**過程中抓到並修正2個問題**：
+1. **方向性bug**：`forward_return_stats()`的`win_rate`定義固定是「股價上漲比例」，
+   賣訊號要「準」代表股價要跌，賣方向的win_rate要取`1-原始值`，第一版寫錯，靠測試
+   抓到。
+2. **假矛盾**：R-CHIP-02同時觸發斷頭警示(賣)跟超跌反彈(買)時，不是真矛盾——這兩者
+   是同一份融資維持率資料在不同時間窗口的解讀(超跌反彈成立時斷頭警示邏輯上必然也
+   成立)，不符合書中「主力買vs投信賣」這種不同來源意見不合的原意。改成只在能找到
+   `rule_id`不同的買/賣配對時才判定為矛盾。
+
+輸出範例：「訊號矛盾：R-CHIP-03(買方向，本股歷史勝率39%，n=297) vs R-SCREEN-06
+(賣方向，本股歷史勝率61%，n=157)同時觸發，僅供歷史參考，不保證這次結果相同」——
+明確標註是歷史統計不是預測，不能讓使用者誤以為系統已經幫忙解決矛盾。
+
+真實驗證：`pytest tests/ -q`1113個測試全過(新增`tests/test_institutional_flow.py`
+3個(向量化streak函式用既有逐日函式當ground truth回歸驗證)、`tests/test_stock_
+detail_data.py`5個，含一個「同rule_id假矛盾」回歸測試)。對正式`data/tw_stock.db`
+真實300檔股票跑`scan_chip_tier()`，0個crash，28檔觸發R-CHIP-14矛盾偵測(9.3%)，
+輸出文字人工檢視內容合理。`ai/chen-rules/籌碼面/股價表態仲裁元原則.md`與
+`_manifest.json`已同步更新。

@@ -193,7 +193,7 @@
       "backtestable": "是",
       "confidence": "60/100 中",
       "implemented": true,
-      "note": "2026-08-09實作通用回測工具forward_return_stats()/arbitrate()於src/indicators/signal_backtest.py，但即時訊號衝突偵測機制仍未接上，停留在工具層次"
+      "note": "2026-08-09分兩階段完成：通用回測工具(signal_backtest.py)＋即時訊號衝突偵測正式接上scan_chip_tier()，300檔真實股票驗證0 crash、28檔觸發"
     },
     {
       "rule_id": "R-CHIP-15",

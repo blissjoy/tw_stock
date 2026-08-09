@@ -692,3 +692,90 @@ def test_load_mops_capital_changes_sorts_newest_first():
 def test_load_mops_capital_changes_returns_empty_list_when_no_data():
     conn = _main_conn()
     assert stock_detail_data.load_mops_capital_changes(conn, "9999") == []
+
+
+def test_detect_chip_signal_conflict_computes_historical_win_rates():
+    """建構60天的合成資料：第8天(idx7)是一次歷史上的「三大法人連續3天賣超」觸發，
+    觸發後10個交易日股價從100跌到90(賣訊號猜對，反向股價下跌)；第28天(idx27)是
+    一次歷史上的「投信連續3天買超」觸發，觸發後10個交易日股價從100漲到119(買訊號
+    猜對，股價上漲)；最後3天(idx57~59)同時符合「三大法人賣超」與「投信買超」兩個
+    方向相反的訊號(比照既有test_scan_chip_tier_detects_institutional_sell_and_
+    trust_buy_streaks()的手法：外資大賣壓過投信買超讓三大法人合計仍賣超)——這是
+    今天的矛盾訊號，因為缺乏未來10天資料不會被算進歷史勝率統計，只用來觸發R-CHIP-14。
+    """
+    from datetime import date as _date, timedelta as _timedelta
+
+    conn = _main_conn()
+    start = _date(2026, 1, 1)
+    n_days = 60
+    dates = [(start + _timedelta(days=i)).isoformat() for i in range(n_days)]
+
+    # 股價：idx0~6維持100；idx7(歷史賣超觸發日)=100；idx8~17由99線性跌到90(賣訊號贏)；
+    # idx18~26維持90；idx27(歷史買超觸發日)=100；idx28~37由101線性漲到119(買訊號贏)；
+    # 其餘維持119(含今天矛盾訊號那3天，數值不影響結果，因為會被排除出歷史統計)。
+    closes = [100.0] * 7 + [100.0]
+    closes += [99.0 - i for i in range(10)]  # idx8~17: 99,98,...,90
+    closes += [90.0] * 9  # idx18~26
+    closes += [100.0]  # idx27
+    closes += [101.0 + 2 * i for i in range(10)]  # idx28~37: 101,103,...,119
+    closes += [119.0] * (n_days - len(closes))
+    assert len(closes) == n_days
+
+    _seed_stock(conn, "2330", "台積電", [{"date": d, "close": c} for d, c in zip(dates, closes)])
+
+    institutional_by_date: dict[str, dict[str, tuple[int, int]]] = {}
+    for i in (5, 6, 7):  # 歷史賣超觸發：外資連續3天淨賣超
+        institutional_by_date[dates[i]] = {"Foreign_Investor": (0, 100)}
+    for i in (25, 26, 27):  # 歷史買超觸發：投信連續3天淨買超
+        institutional_by_date[dates[i]] = {"Investment_Trust": (100, 0)}
+    for i in (57, 58, 59):  # 今天的矛盾訊號：外資大賣壓過投信買超，三大法人合計仍賣超
+        institutional_by_date[dates[i]] = {"Foreign_Investor": (100, 500), "Investment_Trust": (300, 100)}
+    _seed_institutional(conn, "2330", institutional_by_date)
+
+    results = stock_detail_data.scan_chip_tier(conn, "2330")
+
+    rule_ids = {r["rule_id"] for r in results}
+    assert {"R-SCREEN-06", "R-CHIP-01", "R-CHIP-14"} <= rule_ids
+
+    conflict_note = next(r["note"] for r in results if r["rule_id"] == "R-CHIP-14")
+    assert "R-CHIP-01" in conflict_note
+    assert "R-SCREEN-06" in conflict_note
+
+    conflict = stock_detail_data.detect_chip_signal_conflict(conn, "2330", results)
+    assert conflict["buy_rule_id"] == "R-CHIP-01"
+    assert conflict["buy_win_rate"] == 1.0
+    assert conflict["buy_n"] == 1
+    assert conflict["sell_rule_id"] == "R-SCREEN-06"
+    assert conflict["sell_win_rate"] == 1.0
+    assert conflict["sell_n"] == 1
+
+
+def test_detect_chip_signal_conflict_none_when_no_opposing_signals():
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 100.0}])
+    results = [{"rule_id": "R-CHIP-01", "note": "投信買超"}]
+    assert stock_detail_data.detect_chip_signal_conflict(conn, "2330", results) is None
+
+
+def test_detect_chip_signal_conflict_none_when_only_same_rule_id_opposes_itself():
+    """R-CHIP-02同時觸發斷頭警示(賣)跟超跌反彈(買)時，不算矛盾——這兩者是同一份
+    融資維持率資料在不同時間窗口的解讀，超跌反彈成立時斷頭警示邏輯上必然也成立，
+    不是「不同來源意見不合」。"""
+    conn = _main_conn()
+    results = [
+        {"rule_id": "R-CHIP-02", "note": "融資維持率約100.0%已跌破斷頭線(120%)，留意斷頭賣壓"},
+        {"rule_id": "R-CHIP-02", "note": "融資維持率連續低於120%(超跌)，符合搶短線反彈觀察條件"},
+    ]
+    assert stock_detail_data.detect_chip_signal_conflict(conn, "2330", results) is None
+
+
+def test_detect_chip_signal_conflict_none_when_no_historical_sample():
+    """今天雖然矛盾，但這條規則在這檔股票的歷史上從未出現過(樣本數0)，不能算出
+    歷史勝率，應回傳None而不是硬湊一個數字。"""
+    conn = _main_conn()
+    _seed_stock(conn, "2330", "台積電", [{"date": "2026-07-31", "close": 100.0}])
+    _seed_institutional(conn, "2330", {
+        "2026-07-31": {"Foreign_Investor": (100, 500), "Investment_Trust": (300, 100)},
+    })
+    results = stock_detail_data.scan_chip_tier(conn, "2330")
+    assert not any(r["rule_id"] == "R-CHIP-14" for r in results)

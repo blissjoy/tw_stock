@@ -25,6 +25,8 @@ main_window.py)顯示結果時要附上對應分類的可信度提醒，不能�
 
 from __future__ import annotations
 
+import pandas as pd
+
 INSTITUTIONAL_STREAK_THRESHOLD = 3  # 三大法人連續賣超警示：朱家泓淘汰法明確門檻(R-SCREEN-06)。
 # 投信連續買超觀察：陳家豐書中給3~5天，這裡採下限3天，讓買賣兩個方向判斷邏輯一致，也
 # 讓外資/自營商套用同一個函式時有一致的比較基準(可信度高低留給呼叫端的文字說明處理，
@@ -56,3 +58,19 @@ def classify_flow_streak(net_values_desc: list[float]) -> dict:
         "is_sell_warning": direction == "sell" and streak >= INSTITUTIONAL_STREAK_THRESHOLD,
         "is_buy_watch": direction == "buy" and streak >= INSTITUTIONAL_STREAK_THRESHOLD,
     }
+
+
+def flow_streak_series(net_asc: pd.Series) -> pd.Series:
+    """net_asc：由舊到新排序的每日買賣超淨額。回傳每一天的「連續同方向天數」整數
+    Series，跟classify_flow_streak()對「今天」算的邏輯一致(方向由當天淨額正負決定，
+    淨額為0時streak重置為0)，但改用向量化算法一次算出整段歷史每一天的值，避免對長
+    歷史逐日呼叫classify_flow_streak()造成O(n^2)開銷。
+
+    2026-08-09新增，供`src/presentation/stock_detail_data.py`的`detect_chip_signal_
+    conflict()`(R-CHIP-14訊號矛盾偵測)重建R-SCREEN-06／R-CHIP-01這兩條規則的完整
+    歷史觸發日期用。
+    """
+    sign = net_asc.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    group_id = (sign != sign.shift()).cumsum()
+    streak = sign.groupby(group_id).cumcount() + 1
+    return streak.where(sign != 0, 0)

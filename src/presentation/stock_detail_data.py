@@ -18,7 +18,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from src.indicators import institutional_flow, margin_trading, ownership_distribution, volume_washout
+from src.indicators import institutional_flow, margin_trading, ownership_distribution, signal_backtest, volume_washout
 
 # 三大法人5類細項(見src/data/twse_client.py的_INSTITUTIONAL_COLUMN_MAP，欄位命名
 # 對應FinMind TaiwanStockInstitutionalInvestorsBuySell)合併成一般常見的3個分類——
@@ -543,6 +543,178 @@ def load_ownership_distribution_analysis(conn, stock_id: str) -> dict | None:
     return ownership_distribution.chip_flow_direction(rows_by_date)
 
 
+_ARBITRATION_HORIZON_DAYS = 10  # 觸發後往前看幾個交易日算報酬率，書中R-CHIP-14沒給
+# 精確天數，工程估計值，跟R-CHIP-02超跌反彈連續天數等其他「書中未給」的門檻同性質。
+
+# scan_chip_tier()裡每個規則的方向標籤：買訊號vs賣訊號，供detect_chip_signal_
+# conflict()判斷「今天是否同時出現方向相反的訊號」。R-CHIP-02/R-CHIP-07的方向
+# 依note文字內容而定(同一個rule_id可能代表兩種相反方向)，用note關鍵字區分。
+_SIGNAL_DIRECTION_BY_NOTE_KEYWORD = {
+    "R-CHIP-02": {"斷頭": "sell", "超跌": "buy"},
+    "R-CHIP-07": {"續漲": "buy", "續跌": "sell"},
+}
+_SIGNAL_DIRECTION_FIXED = {
+    "R-SCREEN-06": "sell",
+    "R-CHIP-01": "buy",
+    "R-CHIP-03": "buy",
+}
+
+
+def _signal_direction(rule_id: str, note: str) -> str | None:
+    if rule_id in _SIGNAL_DIRECTION_FIXED:
+        return _SIGNAL_DIRECTION_FIXED[rule_id]
+    keyword_map = _SIGNAL_DIRECTION_BY_NOTE_KEYWORD.get(rule_id)
+    if keyword_map is None:
+        return None
+    for keyword, direction in keyword_map.items():
+        if keyword in note:
+            return direction
+    return None
+
+
+def _historical_signal_trigger_dates(conn, stock_id: str, rule_id: str, direction: str) -> list[str] | None:
+    """重建rule_id這條規則、direction這個方向，在這檔股票完整歷史上的觸發日期清單，
+    供detect_chip_signal_conflict()算歷史勝率用。只支援已經接進scan_chip_tier()的
+    5條規則，其餘rule_id回傳None(理論上不會被呼叫到，因為呼叫端只會傳scan_chip_
+    tier()真的觸發過的rule_id)。
+    """
+    if rule_id in ("R-SCREEN-06", "R-CHIP-01"):
+        dates_desc, net_by_date = _fetch_institutional_by_date(conn, stock_id, max_days=100_000)
+        if not dates_desc:
+            return None
+        dates_asc = list(reversed(dates_desc))
+        group = "三大法人" if rule_id == "R-SCREEN-06" else "投信"
+        net_asc = pd.Series([net_by_date[d].get(group, 0) for d in dates_asc], index=dates_asc)
+        streak = institutional_flow.flow_streak_series(net_asc)
+        sign = net_asc.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+        wanted_sign = -1 if direction == "sell" else 1
+        triggered = (sign == wanted_sign) & (streak >= institutional_flow.INSTITUTIONAL_STREAK_THRESHOLD)
+        return list(triggered[triggered].index)
+
+    if rule_id == "R-CHIP-02":
+        rows = conn.execute(
+            """
+            SELECT sp.date, sp.close, mt.margin_purchase_buy, mt.margin_purchase_sell,
+                   mt.margin_purchase_cash_repayment, mt.margin_purchase_today_balance
+            FROM margin_trading mt
+            JOIN stock_prices sp ON sp.stock_id = mt.stock_id AND sp.date = mt.date
+            WHERE mt.stock_id = ?
+            ORDER BY mt.date ASC
+            """,
+            (stock_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        dates = [r[0] for r in rows]
+        m_close = pd.Series([r[1] for r in rows], index=dates)
+        margin_buy = pd.Series([r[2] for r in rows], index=dates)
+        margin_sell = pd.Series([r[3] for r in rows], index=dates)
+        margin_repay = pd.Series([r[4] for r in rows], index=dates)
+        margin_balance = pd.Series([r[5] for r in rows], index=dates)
+        ratio = margin_trading.compute_margin_maintenance_ratio(m_close, margin_buy, margin_sell, margin_repay, margin_balance)
+        if direction == "sell":
+            triggered = (ratio < margin_trading.MARGIN_LIQUIDATION_RATIO) & ratio.notna()
+        else:
+            triggered = margin_trading.margin_oversold_rebound_signal(ratio)
+        return list(triggered[triggered].index)
+
+    if rule_id == "R-CHIP-03":
+        rows = conn.execute("SELECT date, volume FROM stock_prices WHERE stock_id = ? ORDER BY date ASC", (stock_id,)).fetchall()
+        if len(rows) < volume_washout.VOLUME_WASHOUT_LOOKBACK:
+            return None
+        dates = [r[0] for r in rows]
+        volume_series = pd.Series([r[1] for r in rows], index=dates)
+        triggered = volume_washout.volume_washout_signal(volume_series)
+        return list(triggered[triggered].index)
+
+    if rule_id == "R-CHIP-07":
+        rows = conn.execute(
+            "SELECT date, holding_shares_level, percent FROM holder_shares_distribution WHERE stock_id = ? ORDER BY date ASC",
+            (stock_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        rows_by_date: dict[str, list[dict]] = defaultdict(list)
+        for date_, level, percent in rows:
+            rows_by_date[date_].append({"holding_shares_level": level, "percent": percent})
+        sorted_dates = sorted(rows_by_date.keys())
+        wanted_text = "續漲" if direction == "buy" else "續跌"
+        trigger_dates = []
+        for i in range(1, len(sorted_dates)):
+            window = {sorted_dates[i]: rows_by_date[sorted_dates[i]], sorted_dates[i - 1]: rows_by_date[sorted_dates[i - 1]]}
+            result = ownership_distribution.chip_flow_direction(window)
+            if result is not None and wanted_text in result["direction"]:
+                trigger_dates.append(sorted_dates[i])
+        return trigger_dates
+
+    return None
+
+
+def detect_chip_signal_conflict(conn, stock_id: str, scan_results: list[dict]) -> dict | None:
+    """R-CHIP-14股價表態仲裁元原則(見ai/chen-rules/籌碼面/股價表態仲裁元原則.md)第
+    一次接上即時UI：對scan_chip_tier()「今天」的觸發結果，偵測是否同時出現方向相反
+    (買/賣)的訊號，若有，用src.indicators.signal_backtest.forward_return_stats()
+    分別計算雙方訊號在「這檔股票自己的歷史」上、觸發後_ARBITRATION_HORIZON_DAYS個
+    交易日的報酬率統計，回傳給使用者參考。
+
+    ⚠️這是「歷史統計」不是「未卜先知」——書中原文的仲裁邏輯本來就是事後才能驗證(看
+    股價實際表態)，這裡能做到的即時功能，是「用過去發生過的同類矛盾，這次哪一方
+    通常比較準」當參考，不保證這次的結果會跟歷史一致，呼叫端顯示時不能講成「系統已
+    幫你解決矛盾」。
+
+    同一個rule_id同時出現買/賣兩個方向(例如R-CHIP-02的斷頭警示vs超跌反彈，這兩者
+    其實是同一份融資維持率資料在不同時間窗口的解讀，超跌反彈成立時斷頭警示邏輯上
+    必然也成立，不是「不同來源意見不合」)不視為矛盾——書中原意是「主力買vs投信賣」
+    這種獨立資料源互相衝突，只在能找到rule_id不同的買/賣配對時才判定為矛盾。多個
+    候選配對時取第一個(依scan_results原始順序)代表；任一方歷史觸發次數為0(n=0，
+    樣本不足)時回傳None，不是「其中一方勝率0%」；沒有跨規則矛盾(只有單一方向、
+    完全沒有訊號、或矛盾雙方剛好都來自同一個rule_id)也回傳None。
+    """
+    buy_items = [r for r in scan_results if _signal_direction(r["rule_id"], r["note"]) == "buy"]
+    sell_items = [r for r in scan_results if _signal_direction(r["rule_id"], r["note"]) == "sell"]
+    if not buy_items or not sell_items:
+        return None
+
+    buy_item = sell_item = None
+    for candidate_buy in buy_items:
+        for candidate_sell in sell_items:
+            if candidate_buy["rule_id"] != candidate_sell["rule_id"]:
+                buy_item, sell_item = candidate_buy, candidate_sell
+                break
+        if buy_item is not None:
+            break
+    if buy_item is None:
+        return None
+
+    price_rows = conn.execute("SELECT date, close FROM stock_prices WHERE stock_id = ? ORDER BY date ASC", (stock_id,)).fetchall()
+    if not price_rows:
+        return None
+    close = pd.Series([r[1] for r in price_rows], index=[r[0] for r in price_rows])
+
+    buy_dates = _historical_signal_trigger_dates(conn, stock_id, buy_item["rule_id"], "buy")
+    sell_dates = _historical_signal_trigger_dates(conn, stock_id, sell_item["rule_id"], "sell")
+    if not buy_dates or not sell_dates:
+        return None
+
+    buy_stats = signal_backtest.forward_return_stats(buy_dates, close, _ARBITRATION_HORIZON_DAYS)
+    sell_stats = signal_backtest.forward_return_stats(sell_dates, close, _ARBITRATION_HORIZON_DAYS)
+    if buy_stats["n"] == 0 or sell_stats["n"] == 0:
+        return None
+
+    return {
+        "buy_rule_id": buy_item["rule_id"],
+        "buy_win_rate": buy_stats["win_rate"],  # 買訊號的「勝率」＝觸發後股價上漲的比例，跟forward_return_stats()的定義同方向
+        "buy_n": buy_stats["n"],
+        "sell_rule_id": sell_item["rule_id"],
+        # 賣訊號的「勝率」＝觸發後股價下跌的比例——forward_return_stats()的win_rate
+        # 定義固定是「股價上漲比例」(不分方向)，賣訊號要「準」代表股價要跌，所以這裡
+        # 取1減(補數)，不能直接沿用sell_stats["win_rate"](那代表賣訊號觸發後股價
+        # 上漲的比例，等於賣訊號「錯」的比例，方向會顛倒)。
+        "sell_win_rate": 1 - sell_stats["win_rate"],
+        "sell_n": sell_stats["n"],
+    }
+
+
 def scan_chip_tier(conn, stock_id: str) -> list[dict]:
     """回傳籌碼面「今天」實際觸發的規則清單，每筆為{"rule_id": ..., "note": ...}——
     跟`src.screener.rule_scan.scan_golden_tier()`同一種「今天有沒有觸發」語意，但這裡
@@ -573,6 +745,10 @@ def scan_chip_tier(conn, stock_id: str) -> list[dict]:
       distribution`只對「觀察清單」裡的股票有資料，非清單內股票這裡不會觸發，是
       既有資料範圍限制、不是bug；只接這裡，不接`daily_screener.py`候選清單(全市場
       掃描沒有意義，因為多數股票根本沒有這份資料)。
+    - R-CHIP-14(陳家豐，見ai/chen-rules/籌碼面/股價表態仲裁元原則.md，2026-08-09
+      新增)：不是獨立訊號，是上面5條規則裡若同時出現方向相反的買/賣訊號，額外
+      附加一筆「歷史上這種矛盾情況，雙方各自勝率多少」的參考資訊(見detect_chip_
+      signal_conflict())，只在真的偵測到矛盾時才出現，不會單獨觸發。
     """
     results: list[dict] = []
     flow = load_institutional_flow_analysis(conn, stock_id)
@@ -620,6 +796,19 @@ def scan_chip_tier(conn, stock_id: str) -> list[dict]:
                 f"大股東(>1,000張)持股{ownership['whale_pct']:.2f}%"
                 f"({ownership['whale_diff']:+.2f}%)，散戶(<=20張)持股{ownership['retail_pct']:.2f}%"
                 f"({ownership['retail_diff']:+.2f}%)，{ownership['direction']}"
+            ),
+        })
+
+    conflict = detect_chip_signal_conflict(conn, stock_id, results)
+    if conflict is not None:
+        results.append({
+            "rule_id": "R-CHIP-14",
+            "note": (
+                f"訊號矛盾：{conflict['buy_rule_id']}(買方向，本股歷史勝率"
+                f"{conflict['buy_win_rate']:.0%}，n={conflict['buy_n']})"
+                f" vs {conflict['sell_rule_id']}(賣方向，本股歷史勝率"
+                f"{conflict['sell_win_rate']:.0%}，n={conflict['sell_n']})同時觸發，"
+                f"僅供歷史參考，不保證這次結果相同"
             ),
         })
     return results
