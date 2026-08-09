@@ -17,7 +17,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from src.indicators import institutional_flow, margin_trading
+from src.indicators import institutional_flow, margin_trading, volume_washout
 
 # 三大法人5類細項(見src/data/twse_client.py的_INSTITUTIONAL_COLUMN_MAP，欄位命名
 # 對應FinMind TaiwanStockInstitutionalInvestorsBuySell)合併成一般常見的3個分類——
@@ -496,16 +496,42 @@ def load_margin_maintenance_analysis(conn, stock_id: str) -> dict | None:
     }
 
 
+def load_volume_washout_signal(conn, stock_id: str) -> bool | None:
+    """R-CHIP-03低檔量縮止跌觀察(見src/indicators/volume_washout.py)，供scan_chip_
+    tier()判斷「今天」是否觸發。只需要stock_prices的成交量歷史，不設查詢天數上限
+    (跟本模組load_margin_maintenance_analysis()等其他單股查詢函式一致，這裡只查
+    1檔股票，全部歷史的查詢成本可忽略，不需要像daily_screener.py批次跑全市場那樣
+    刻意截斷)——⚠️若改成只抓`VOLUME_WASHOUT_LOOKBACK`(240)天剛好夠用，
+    volume_washout_signal()內部「近5日均量」的平滑步驟會先吃掉前4天當暖身，
+    導致rolling(240)峰值窗口在剛好240筆資料時反而湊不齊240個有效值、算出NaN，
+    查全部歷史沒有這個邊界問題。
+
+    資料筆數不足`VOLUME_WASHOUT_LOOKBACK`天(240)時回傳None(該股歷史太短，無法
+    判斷)，不是False——None代表「查不出來」，False代表「查得出來、但沒有觸發」，
+    兩者語意不同，呼叫端(scan_chip_tier())只在True時才加進結果清單，None/False
+    都不加，所以目前呼叫端看不出這個區分，但保留這個語意供之後有需要區分「無法
+    判斷」跟「未觸發」的呼叫端使用。
+    """
+    rows = conn.execute(
+        "SELECT volume FROM stock_prices WHERE stock_id = ? ORDER BY date ASC",
+        (stock_id,),
+    ).fetchall()
+    if len(rows) < volume_washout.VOLUME_WASHOUT_LOOKBACK:
+        return None
+    volume_series = pd.Series([r[0] for r in rows])
+    return bool(volume_washout.volume_washout_signal(volume_series).iloc[-1])
+
+
 def scan_chip_tier(conn, stock_id: str) -> list[dict]:
     """回傳籌碼面「今天」實際觸發的規則清單，每筆為{"rule_id": ..., "note": ...}——
     跟`src.screener.rule_scan.scan_golden_tier()`同一種「今天有沒有觸發」語意，但這裡
-    涵蓋法人籌碼/融資融券規則(R-SCREEN-06／R-CHIP-*)，需要直接查DB(institutional_
-    investors/margin_trading表)，跟scan_golden_tier()純吃OHLCV DataFrame的架構不同，
-    所以放在這裡(跟本模組其餘函式一樣是DB查詢層)而不是rule_scan.py。查無資料回傳空
-    list，不是None，跟scan_golden_tier()的慣例一致。
+    涵蓋法人籌碼/融資融券/量能規則(R-SCREEN-06／R-CHIP-*)，需要直接查DB(institutional_
+    investors/margin_trading/stock_prices表)，跟scan_golden_tier()純吃OHLCV DataFrame
+    的架構不同，所以放在這裡(跟本模組其餘函式一樣是DB查詢層)而不是rule_scan.py。查無
+    資料回傳空list，不是None，跟scan_golden_tier()的慣例一致。
 
-    2026-08-04新增，供「個股分析」/「大盤分析」面板的「籌碼面」區塊使用。目前只接了
-    3條規則，都是本專案已經在「個股明細」分頁用過的既有判讀邏輯，這裡只是重新包裝成
+    2026-08-04新增，供「個股分析」/「大盤分析」面板的「籌碼面」區塊使用，目前接了4條
+    規則，都是本專案已經在「個股明細」分頁用過的既有判讀邏輯，這裡只是重新包裝成
     「今天有沒有觸發」的訊號格式：
     - R-SCREEN-06(朱家泓)：三大法人連續賣超達INSTITUTIONAL_STREAK_THRESHOLD天。
     - R-CHIP-01(陳家豐，見ai/chen-rules/籌碼面/投信連續買超觀察.md)：投信連續買超
@@ -513,6 +539,13 @@ def scan_chip_tier(conn, stock_id: str) -> list[dict]:
     - R-CHIP-02(陳家豐，見ai/chen-rules/籌碼面/融資維持率規則.md)：融資維持率跌破
       120%斷頭線，或連續N天低於120%的超跌反彈訊號——兩者可能同時成立，各自成一筆
       (呼叫端analyze_chip_signals()會合併成同一個rule_id、note用換行接起來)。
+    - R-CHIP-03(陳家豐，見ai/chen-rules/籌碼面/量縮止跌觀察.md)：近期均量萎縮到近
+      1年峰值均量的10分之1以下。2026-08-08曾評估接進`daily_screener.py`的
+      `daily_candidates`候選清單，但實測全市場觸發率高達47%，會讓候選清單失去
+      篩選意義而作罷；這裡(個股分析面板，只顯示「當前正在看的這一檔股票」)不受
+      同樣的顧慮影響——顯示「這檔股票今天量縮」是單純陳述事實，不是從全市場篩出
+      一份「值得注意」的候選名單，兩者定位不同，所以R-CHIP-03只接這裡、不接候選
+      清單。
     """
     results: list[dict] = []
     flow = load_institutional_flow_analysis(conn, stock_id)
@@ -544,6 +577,12 @@ def scan_chip_tier(conn, stock_id: str) -> list[dict]:
                 "rule_id": "R-CHIP-02",
                 "note": "融資維持率連續低於120%(超跌)，符合搶短線反彈觀察條件",
             })
+
+    if load_volume_washout_signal(conn, stock_id):
+        results.append({
+            "rule_id": "R-CHIP-03",
+            "note": "近期均量已萎縮到近1年峰值均量的10分之1以下，符合籌碼洗清、主力再進場觀察條件(書中提醒不宜單獨當高信心買進理由，建議搭配其他訊號一起判讀)",
+        })
     return results
 
 

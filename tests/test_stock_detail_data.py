@@ -559,6 +559,34 @@ def test_scan_chip_tier_returns_empty_list_when_no_data():
     assert stock_detail_data.scan_chip_tier(conn, "9999") == []
 
 
+def test_load_volume_washout_signal_fires_when_volume_shrinks_to_tenth_of_peak():
+    conn = _main_conn()
+    n_days = 250
+    from datetime import date as _date, timedelta as _timedelta
+    start = _date(2020, 1, 1)
+    prices = []
+    for i in range(n_days):
+        volume = 5_000 if i >= n_days - 5 else 100_000  # 最近5天萎縮到峰值的5%(<10%門檻)
+        prices.append({"date": (start + _timedelta(days=i)).isoformat(), "close": 50.0, "volume": volume})
+    _seed_stock(conn, "2330", "台積電", prices)
+
+    assert stock_detail_data.load_volume_washout_signal(conn, "2330") is True
+
+    results = stock_detail_data.scan_chip_tier(conn, "2330")
+    assert any(r["rule_id"] == "R-CHIP-03" for r in results)
+
+
+def test_load_volume_washout_signal_returns_none_when_history_too_short():
+    conn = _main_conn()
+    from datetime import date as _date, timedelta as _timedelta
+    start = _date(2020, 1, 1)
+    prices = [{"date": (start + _timedelta(days=i)).isoformat(), "close": 50.0, "volume": 1000} for i in range(100)]
+    _seed_stock(conn, "2330", "台積電", prices)
+
+    assert stock_detail_data.load_volume_washout_signal(conn, "2330") is None
+    assert stock_detail_data.scan_chip_tier(conn, "2330") == []
+
+
 def test_analyze_chip_signals_merges_duplicate_rule_id_and_sorts_by_confidence():
     """複用上面兩個情境的資料：R-CHIP-02同時觸發斷頭+超跌，應該合併成一筆(note用
     換行接起來)，且信心分數(85)比R-SCREEN-06(75)高，排序應該在前面。"""

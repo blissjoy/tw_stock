@@ -8448,3 +8448,42 @@ PySide6 GUI、程式化捲動個股明細分頁後截圖，確認內容與web版
 web版本機啟動真實Streamlit、Playwright截圖確認4566(使用者提出疑問的真實案例)
 「個股明細」正確顯示新加註文字，位置緊接在「法人近期籌碼」標題下方、「投信：
 持平　外資：方向未定」上方，跟使用者原始疑問畫面完全對應。
+
+---
+
+## R-CHIP-03(量縮止跌)接進「個股分析」籌碼面（2026-08-09）
+
+使用者問「目前已經寫好的籌碼分析RULE可以怎麼把有符合的顯示在個股分析的籌碼面?
+已接上嗎?」——查證後回報：R-SCREEN-06(三大法人連續賣超)/R-CHIP-01(投信連續
+買超)/R-CHIP-02(融資維持率)這3條，2026-08-04就已經接進`stock_detail_data.
+scan_chip_tier()`／`analyze_chip_signals()`，個股分析／大盤分析面板的「籌碼面」
+區塊已經在用；只有2026-08-08新增的R-CHIP-03(量縮止跌)沒有接——因為那天判斷
+「這條全市場觸發率47%，不適合進daily_candidates候選清單」時，順手把它整個
+排除在外，但沒有意識到「候選清單」跟「個股分析面板」是兩種不同定位，47%觸發率
+的顧慮只適用於前者(候選清單要維持篩選意義)，不適用於後者(個股分析本來就是
+「這檔股票今天符合哪些規則」的完整清單，顯示「這檔股票量縮」只是陳述事實，
+不會因為很多股票都符合就失去意義)。
+
+**改法**：`src/presentation/stock_detail_data.py`新增`load_volume_washout_
+signal(conn, stock_id)`，查該股全部成交量歷史(不設查詢天數上限，跟本模組其餘
+單股查詢函式的既有慣例一致)算`volume_washout.volume_washout_signal()`；
+`scan_chip_tier()`新增這第4條規則的判斷分支。
+
+**⚠️ 寫的時候先踩到一個自己的邊界案例bug**：一開始SQL用`LIMIT VOLUME_WASHOUT_
+LOOKBACK`(240)只抓最近240筆，測試時發現算出來永遠是None——追查後發現
+`volume_washout_signal()`內部「近5日均量」平滑步驟會先吃掉前4筆當暖身(min_
+periods=5)，導致剛好240筆資料時，後續rolling(240)峰值窗口反而湊不齊240個
+「有效」值(前4筆平滑後是NaN)，算出NaN。改成不設查詢上限(跟`load_margin_
+maintenance_analysis()`等既有函式一致，反正只查1檔股票，全部歷史的查詢成本
+可忽略)後解決，寫測試時就先發現、修好，沒有留到之後才被發現。
+
+**UI完全不用改**：`analyze_chip_signals()`回傳的dict結構跟`daily_screener.
+analyze_stock_signals()`完全一致，`dashboard/app.py`／`desktop/main_window.py`
+本來就是通用顯示邏輯(不特定比對R-CHIP-01/02這種寫死的規則ID清單)，R-CHIP-03
+自動出現在「總結分析」的「籌碼面」摘要跟展開清單裡，不需要任何UI層改動。
+
+真實驗證：新增2個測試(`tests/test_stock_detail_data.py`)，`pytest tests/ -q`
+1068個測試全數通過。直接呼叫`scan_chip_tier()`對本機真實DB多檔已知會觸發量縮
+的股票(1104/1220/1233)驗證正確回傳R-CHIP-03；web版本機啟動真實Streamlit、
+Playwright截圖確認1104「個股分析」面板正確顯示「2. 籌碼面：本次共觸發1條規則
+...信心最高的訊號：R-CHIP-03 低檔量縮止跌觀察（75%）」。
