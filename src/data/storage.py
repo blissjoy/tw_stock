@@ -285,6 +285,22 @@ def upsert_holder_shares_distribution(conn: sqlite3.Connection, rows: list[dict]
     conn.commit()
 
 
+def upsert_mops_capital_changes(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """rows的每個dict需含 stock_id/name/market/year_month/fetched_at，見schema.sql的
+    mops_capital_changes說明。ON CONFLICT時更新name/fetched_at(同一個(stock_id,
+    market, year_month)重複執行只更新抓取時間跟名稱，不會累積重複列)。"""
+    conn.executemany(
+        """
+        INSERT INTO mops_capital_changes (stock_id, name, market, year_month, fetched_at)
+        VALUES (:stock_id, :name, :market, :year_month, :fetched_at)
+        ON CONFLICT(stock_id, market, year_month) DO UPDATE SET
+            name = excluded.name, fetched_at = excluded.fetched_at
+        """,
+        rows,
+    )
+    conn.commit()
+
+
 def upsert_delisted_stocks(conn: sqlite3.Connection, rows: list[dict]) -> None:
     """rows的每個dict需含 stock_id/name/delisted_date/reason/noted_at，見schema.sql的
     delisted_stocks說明。ON CONFLICT時只更新reason/noted_at，不覆蓋已知的delisted_date

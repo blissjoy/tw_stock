@@ -16,6 +16,12 @@ cp .env.example .env   # 填入下方「需要的憑證」（本機優先模式�
 pytest tests/ -q
 ```
 
+若要使用`scripts/fetch_mops_capital_changes.py`（MOPS公司增減資表手動抓取腳本），
+`pip install`不會自動下載瀏覽器執行檔，需要另外執行一次：
+```bash
+playwright install chromium
+```
+
 ## 本機執行方式
 
 ### PySide6桌面版（主要日常使用方式）

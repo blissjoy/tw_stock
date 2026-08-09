@@ -8487,3 +8487,60 @@ analyze_stock_signals()`完全一致，`dashboard/app.py`／`desktop/main_window
 的股票(1104/1220/1233)驗證正確回傳R-CHIP-03；web版本機啟動真實Streamlit、
 Playwright截圖確認1104「個股分析」面板正確顯示「2. 籌碼面：本次共觸發1條規則
 ...信心最高的訊號：R-CHIP-03 低檔量縮止跌觀察（75%）」。
+
+---
+
+## MOPS(公開資訊觀測站)重新查證：改版後可用Playwright取得減資/增資公司清單（2026-08-09）
+
+延續前一輪對話，使用者問「目前已經寫好的籌碼分析RULE可以怎麼把有符合的顯示在
+個股分析的籌碼面?已接上嗎? MOPS公告可以怎麼做?」，前半段(R-CHIP-03接進個股分析
+籌碼面)已記錄在上一節，這節記錄MOPS的查證與實作。
+
+**重大發現：MOPS已經改版，`_待確認總表.md`原本「MOPS是JS動態頁面，WebFetch讀不到」
+的結論已經過時**。用Playwright實際進去操作，發現網站重新設計成Angular SPA，背後是
+乾淨的JSON API：`POST /mops/api/redirectToIRB`帶`{year, marketKind, month,
+fileNoOfIRB}`，`fileNoOfIRB`參數對應各種報表代碼(這次驗證了`IRB160`=公司增減資表，
+連結頁面裡還看到IRB110/130/140/150/170/180/190/200等一系列董監事股權/質押異動報表
+推測都走同一個端點，但這次只驗證了IRB160一個)。這個API本身不直接回傳資料，回傳一個
+靜態報表網址(例如`https://siis.twse.com.tw/publish/sii/115IRB160_01.HTM`)，那個
+網址才是真正的Big5編碼HTML報表內容。
+
+**⚠️ 關鍵限制**：直接用`requests`/`urllib`打`/mops/api/redirectToIRB`會被WAF擋下
+(回傳「FOR SECURITY REASONS, THIS PAGE CAN NOT BE ACCESSED」的自訂封鎖頁)，必須
+先用Playwright載入`https://mops.twse.com.tw/mops/web/index`首頁建立正常的cookie/
+referer，再用該分頁自己的`fetch()`(不是外部request context)呼叫API才會成功——這是
+`src/data/mops_client.py`使用Playwright而不是`requests`的唯一原因。
+
+**執行方式決策**：使用者確認先做成手動執行的獨立腳本(`scripts/fetch_mops_capital_
+changes.py`)，不接進`daily_pipeline.py`的自動排程——理由：①IRB160報表本身是月頻率
+更新，不需要跟現有pipeline一天跑8次；②這是全新、還沒長期驗證過穩定性的爬蟲邏輯，
+先不要影響目前運作穩定的核心每日排程(現在其實已經改成本機Windows工作排程器在跑，
+GitHub Actions排程07-23因Turso額度用完已暫停，見`.github/workflows/daily_
+pipeline.yml`)。
+
+**新增檔案**：
+- `src/data/mops_client.py`：`fetch_capital_change_companies()`(整合Playwright
+  流程)＋`parse_capital_change_html()`(純函式，解析Big5 HTML)。舊式HTML缺少完整
+  `<TR>`開合標籤，用BeautifulSoup寬鬆解析，表頭列靠「代號不是數字開頭」過濾掉。
+- `scripts/fetch_mops_capital_changes.py`：手動執行腳本，預設抓「現在」民國年/月
+  的上市+上櫃資料，`--year`/`--month`/`--market`可指定。
+- `src/data/schema.sql`新增`mops_capital_changes`表(stock_id/name/market/
+  year_month/fetched_at)，`storage.py`新增`upsert_mops_capital_changes()`。
+- `requirements.txt`新增`playwright`／`beautifulsoup4`，並在說明裡特別註記
+  這跟weasyprint那則「不選Playwright因為Streamlit Cloud負擔重」的考量不衝突——
+  那裡是要在雲端即時轉PDF，這裡是本機手動執行的抓取腳本。README補上
+  `playwright install chromium`的一次性設定步驟(pip install不會自動下載瀏覽器
+  執行檔)。
+
+**已知限制，下次繼續**：IRB160報表目前只看得到「公司代號+名稱」，沒有增資/減資
+方向、金額、恢復交易日期——P05-C2「減資股第一天效應」需要的「恢復交易日期」還沒
+解決，之後要嘛比對`stock_prices`自己抓交易中斷後的恢復交易日、要嘛找MOPS其他報表
+補上；P07-C3「股東會過戶日」用的報表也還沒找到，這兩條規則目前只是把「資料來源
+確認可行」往前推進一步，還沒真正能接進規則邏輯。`_待確認總表.md`已同步更新這些
+項目的狀態。
+
+真實驗證：`pytest tests/ -q`1074個測試全數通過(新增`tests/test_mops_client.py`
+3個測試、`tests/test_storage.py`3個測試，皆為純函式/DB層測試，不含真實網路請求)。
+另外用真實網路連線完整跑過`fetch_capital_change_companies('115','01','sii')`
+(91家公司)與`python scripts/fetch_mops_capital_changes.py --local-db <測試DB>`
+端對端流程，確認資料正確寫入`mops_capital_changes`表，測試檔案與DB用完即刪除。

@@ -235,6 +235,20 @@ CREATE TABLE IF NOT EXISTS tpex_delisting_watch (
     consecutive_days    INTEGER NOT NULL DEFAULT 1
 );
 
+-- 公開資訊觀測站(MOPS)「公司增減資表」(IRB160報表)，見src/data/mops_client.py。
+-- 2026-08-09新增，目前只存得到「哪些股票在哪個年月有增減資公告」這個中性事實
+-- (沒有方向/金額/恢復交易日期，見該模組docstring的已知限制)，供之後接上陳家豐
+-- 《看懂籌碼》P05-C2「減資股第一天效應」規則時使用。只有scripts/fetch_mops_
+-- capital_changes.py手動執行時會寫入，不在daily_pipeline.py的自動排程裡。
+CREATE TABLE IF NOT EXISTS mops_capital_changes (
+    stock_id     TEXT NOT NULL,
+    name         TEXT,
+    market       TEXT NOT NULL,  -- 'sii'(上市)或'otc'(上櫃)，對應MOPS查詢表單的marketKind參數
+    year_month   TEXT NOT NULL,  -- 民國年月，例如"11501"，是查詢當下指定的年/月，不是報表本身可能涵蓋的範圍
+    fetched_at   TEXT NOT NULL,
+    PRIMARY KEY (stock_id, market, year_month)
+);
+
 -- web版對主DB Turso帳號有實質額度風險的「高風險動作」(回補資料、手動抓取今日資料)
 -- 共用的速率限制紀錄表，見src/data/admin_action_rate_limit.py。2026-08-05新增，
 -- 一開始只給回補資料用(表名一度叫backfill_attempts)，後來手動抓取今日資料按鈕

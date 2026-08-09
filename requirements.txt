@@ -43,3 +43,16 @@ google-auth-oauthlib>=1.2
 # (pip本身不會帶，見README)，Streamlit Cloud的Debian容器透過packages.txt裝系統套件即可。
 weasyprint>=62.0
 kaleido>=0.2.1
+
+# MOPS(公開資訊觀測站)客戶端(src/data/mops_client.py)：2026-08-09新增，目前只用在
+# scripts/fetch_mops_capital_changes.py這支手動執行的獨立腳本，不在daily_pipeline.py
+# 的自動排程裡。playwright是這裡才第一次真正需要——MOPS的API會擋掉沒有經過真實瀏覽器
+# 分頁(cookie/referer)的請求，requests/urllib直接打會被WAF擋下，只能用Playwright載入
+# 首頁後從分頁自己的fetch()呼叫才會成功，見mops_client.py模組docstring。⚠️只pip
+# install不會自動下載瀏覽器執行檔，第一次使用前要另外手動執行一次
+# `playwright install chromium`。跟weasyprint那則說明提到的「選它不選Playwright是因為
+# Streamlit Cloud負擔重」是同一個Playwright，但用途不同：那裡是要在Streamlit Cloud上
+# 即時轉PDF(不適合帶Chromium)，這裡是手動在本機執行的抓取腳本(本機已有Chromium)，
+# 兩者互不衝突。
+playwright>=1.61
+beautifulsoup4>=4.15

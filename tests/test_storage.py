@@ -15,6 +15,7 @@ from src.data.storage import (
     upsert_delisted_stocks,
     upsert_institutional_investors,
     upsert_margin_trading,
+    upsert_mops_capital_changes,
     upsert_securities_traders,
     upsert_stock_prices,
     upsert_stocks,
@@ -94,6 +95,53 @@ def test_upsert_delisted_stocks_does_not_overwrite_existing_delisted_date():
 def test_list_delisted_stock_ids_empty_when_none_recorded():
     conn = _fresh_db()
     assert list_delisted_stock_ids(conn) == set()
+
+
+def test_upsert_mops_capital_changes_then_query():
+    conn = _fresh_db()
+    upsert_mops_capital_changes(conn, [
+        {"stock_id": "1101", "name": "臺灣水泥股份有限公司", "market": "sii",
+         "year_month": "11501", "fetched_at": "2026-08-09T17:00:00"},
+        {"stock_id": "1316", "name": "上曜建設開發股份有限公司", "market": "sii",
+         "year_month": "11501", "fetched_at": "2026-08-09T17:00:00"},
+    ])
+
+    rows = conn.execute(
+        "SELECT stock_id, name FROM mops_capital_changes WHERE year_month = '11501' ORDER BY stock_id"
+    ).fetchall()
+    assert rows == [("1101", "臺灣水泥股份有限公司"), ("1316", "上曜建設開發股份有限公司")]
+
+
+def test_upsert_mops_capital_changes_updates_name_and_fetched_at_on_conflict():
+    """同一個(stock_id, market, year_month)重複執行(例如同一個月重跑腳本)應該更新
+    name/fetched_at，不會累積出重複列。"""
+    conn = _fresh_db()
+    upsert_mops_capital_changes(conn, [
+        {"stock_id": "1101", "name": "舊名稱", "market": "sii",
+         "year_month": "11501", "fetched_at": "2026-08-01T00:00:00"},
+    ])
+    upsert_mops_capital_changes(conn, [
+        {"stock_id": "1101", "name": "臺灣水泥股份有限公司", "market": "sii",
+         "year_month": "11501", "fetched_at": "2026-08-09T17:00:00"},
+    ])
+
+    rows = conn.execute("SELECT stock_id, name, fetched_at FROM mops_capital_changes").fetchall()
+    assert rows == [("1101", "臺灣水泥股份有限公司", "2026-08-09T17:00:00")]
+
+
+def test_upsert_mops_capital_changes_keeps_same_stock_separate_by_market():
+    """同一檔股票代號理論上不會同時是上市又上櫃，但market欄位放進PRIMARY KEY是為了
+    保守起見(避免萬一資料來源本身有誤，兩個市場別的紀錄互相覆蓋掉)。"""
+    conn = _fresh_db()
+    upsert_mops_capital_changes(conn, [
+        {"stock_id": "1101", "name": "測試", "market": "sii",
+         "year_month": "11501", "fetched_at": "2026-08-09T17:00:00"},
+        {"stock_id": "1101", "name": "測試", "market": "otc",
+         "year_month": "11501", "fetched_at": "2026-08-09T17:00:00"},
+    ])
+
+    count = conn.execute("SELECT COUNT(*) FROM mops_capital_changes WHERE stock_id = '1101'").fetchone()[0]
+    assert count == 2
 
 
 def test_ensure_schema_adds_ma200_column_to_pre_existing_daily_indicators_table():
