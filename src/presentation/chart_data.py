@@ -447,6 +447,31 @@ def apply_candidate_filters(
     return result
 
 
+def split_candidate_and_warning_signal_text(signal_name: str | None) -> tuple[str | None, str | None]:
+    """把`load_stock_universe_for_date()`回傳的`signal_name`欄位(多條規則用"\\n"分隔
+    合併成一個字串)拆成(候選訊號文字, 警示訊號文字)兩段——2026-08-09新增，供投信/
+    外資連續賣超這類「排除警示」(見`src.screener.daily_screener.WARNING_SIGNAL_
+    PREFIX`)跟一般買進候選共用`daily_candidates`同一張表時，UI端分開顯示用，不能把
+    「應該避開」的警示混進「進場建議」清單裡一起呈現。
+
+    直接對已合併好的字串按行分類，不重新查DB、不改動`load_stock_universe_for_date()`
+    既有的合併邏輯——呼叫端(桌面版/網頁版)在原本顯示`signal_name`的地方，改成分別
+    顯示這裡回傳的兩段文字即可。任一段沒有內容時回傳None(不是空字串)，方便呼叫端用
+    `if candidate_text:`判斷要不要顯示該欄。
+    """
+    from src.screener.daily_screener import WARNING_SIGNAL_PREFIX
+
+    if not signal_name:
+        return None, None
+    lines = signal_name.split("\n")
+    candidate_lines = [line for line in lines if not line.startswith(WARNING_SIGNAL_PREFIX)]
+    warning_lines = [line for line in lines if line.startswith(WARNING_SIGNAL_PREFIX)]
+    return (
+        "\n".join(candidate_lines) if candidate_lines else None,
+        "\n".join(warning_lines) if warning_lines else None,
+    )
+
+
 def list_candidate_dates(conn) -> list[str]:
     """回傳daily_candidates裡所有有紀錄的日期，由新到舊排序，供候選清單的日期選單使用。"""
     cur = conn.execute("SELECT DISTINCT date FROM daily_candidates ORDER BY date DESC")

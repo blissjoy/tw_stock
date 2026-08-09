@@ -8740,3 +8740,51 @@ detail_data.py`5個，含一個「同rule_id假矛盾」回歸測試)。對正�
 真實300檔股票跑`scan_chip_tier()`，0個crash，28檔觸發R-CHIP-14矛盾偵測(9.3%)，
 輸出文字人工檢視內容合理。`ai/chen-rules/籌碼面/股價表態仲裁元原則.md`與
 `_manifest.json`已同步更新。
+
+---
+
+## 外資連續買/賣超、投信連續賣超接進選股（2026-08-09）
+
+使用者問「觀察清單的籌碼面欄位有辦法接在選股嗎？可以查到外資/投信連續買/賣幾日
+or買轉賣的資料嗎？」，盤點後發現：投信連續買超(R-CHIP-01)已經在候選清單、三大
+法人連續賣超(R-SCREEN-06)刻意不放進候選清單(排除型訊號)、外資連續買/賣超完全
+沒做、買轉賣沒有做成全市場篩選、大戶/散戶週變化(黃豐凱F/G)因為`holder_shares_
+distribution`只涵蓋觀察清單股票，結構上接不進選股(除非把F/G抓取範圍擴大到全
+市場，屬於FinMind額度成本決定)。使用者選擇：外資連續買/賣超(推薦，跟投信同一套
+邏輯)+投信連續賣超(當提醒/排除標記，不當買進候選)。
+
+**警示區塊架構決定**：使用者選擇共用`daily_candidates`表、用`signal_name`前綴
+標記區分，不新建資料表。
+
+**做法**：`src/screener/daily_screener.py`新增：
+- `load_trailing_foreign_investor_net()`：外資定義沿用`stock_detail_data._
+  INVESTOR_GROUP_MAP`——`Foreign_Investor`+`Foreign_Dealer_Self`合計。
+- `WARNING_SIGNAL_PREFIX = "⚠️排除："`常數。
+- `screen_foreign_investor_buy_streak()`：外資連續3天買超，引用R-CHIP-10(外資
+  訊號有效性條件)的信心分數，note明確附上書中警告(本專案目前無市值/權值股分類
+  資料，沒有先過濾大型股，請使用者自行留意)。
+- `screen_institutional_trust_sell_streak()`／`screen_foreign_investor_sell_
+  streak()`：連續3天賣超，引用R-SCREEN-06信心分數，signal_name加`WARNING_
+  SIGNAL_PREFIX`前綴。
+- 接進`screen_all_stocks()`(新增`foreign_investor_net`參數)／`run_screen_and_
+  store()`(自動載入並傳入)，`scripts/daily_pipeline.py`跟兩個前端的「立即重新
+  篩選」按鈕共用同一個函式，不需要另外改。
+
+`src/presentation/chart_data.py`新增`split_candidate_and_warning_signal_
+text()`：對`load_stock_universe_for_date()`已合併好的`signal_name`字串(多條
+規則用"\n"分隔)依前綴拆成(候選文字, 警示文字)兩段，供UI分開顯示——**這次只做
+到這裡，UI(桌面版/網頁版的實際顯示畫面)還沒有接上這個helper**，目前兩個前端
+看到的`signal_name`欄位仍是候選+警示混在同一欄，只是文字上有前綴可以肉眼區分，
+視覺上的「分開區塊」還沒做。
+
+**真實資料踩到的觀察**：對正式`data/tw_stock.db`複本跑`run_screen_and_store()`，
+外資連續買超觸發312/2496檔(12.5%)，比投信連續買超(39檔，1.6%)雜訊高出很多——
+不像R-CHIP-03量縮止跌那樣誇張(47%)，但也是最近幾條規則裡比例第二高的，且書中
+本來就明確警告外資訊號對大型股不可信、這裡又沒有市值資料能過濾，這個雜訊比例
+需要使用者知悉，之後可能要考慮加門檻(例如提高連續天數)或想辦法補市值資料才能
+真正過濾大型股。投信連續賣超53檔、外資連續賣超307檔。
+
+真實驗證：`pytest tests/ -q`1123個測試全過(新增`tests/test_daily_screener.py`
+8個、`tests/test_chart_data.py`4個)。對`data/tw_stock.db`複本(不動正式DB)跑
+`run_screen_and_store()`完整驗證端對端無crash，人工檢視輸出內容合理，複本用完
+即刪除。

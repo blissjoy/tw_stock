@@ -645,6 +645,94 @@ def screen_institutional_trust_buy_streak(df: pd.DataFrame, trust_net_desc: list
     }
 
 
+# 「排除型」候選訊號的signal_name標記前綴：跟screen_institutional_trust_buy_streak()
+# 這種「買進候選」共用daily_candidates同一張表(2026-08-09使用者決定，不另建新表)，
+# 但語意是「這檔股票今天有賣超警訊，應排除/謹慎」而非「買進機會」。UI端(chart_data.py
+# 的split_candidate_and_warning_signals())依這個前綴字串切分成候選/警示兩組顯示，
+# 不能混在一起呈現成同一份「進場建議」清單，否則會誤導使用者。
+WARNING_SIGNAL_PREFIX = "⚠️排除："
+
+
+def screen_institutional_trust_sell_streak(df: pd.DataFrame, trust_net_desc: list[float] | None, min_days: int = 60) -> dict | None:
+    """對單一股票判斷「今天」是否觸發投信連續賣超警訊——跟screen_institutional_trust_
+    buy_streak()同一份`trust_net_desc`資料、同一個`classify_flow_streak()`底層函式，
+    只是改看`is_sell_warning`而非`is_buy_watch`。
+
+    引用朱家泓淘汰法R-SCREEN-06「三大法人連續賣超要避開」(見`ai/zhu-rules/選股策略/
+    淘汰法選股排除規則.md`)的信心分數，這裡把範圍縮小到投信這一個分類單獨判斷(R-
+    SCREEN-06原文是三大法人合計)，跟`stock_detail_data.scan_chip_tier()`目前對三大
+    法人合計判斷R-SCREEN-06是不同顆粒度，但沿用同一套「連續賣超要避開」的方法論。
+    signal_name加上`WARNING_SIGNAL_PREFIX`前綴，`run_screen_and_store()`一樣寫進
+    `daily_candidates`，但呼叫端要用該前綴區分「候選」和「警示」，不能混著當進場建議。
+    """
+    if len(df) < min_days or not trust_net_desc:
+        return None
+    streak = institutional_flow.classify_flow_streak(trust_net_desc)
+    if not streak["is_sell_warning"]:
+        return None
+
+    from src.rule_docs import parse_confidence
+    confidence = parse_confidence("R-SCREEN-06")
+    return {
+        "signal_name": f"{WARNING_SIGNAL_PREFIX}R-SCREEN-06投信連續賣超（{confidence}%）",
+        "entry_price": float(df["close"].iloc[-1]),
+        "stop_loss": float(df["low"].iloc[-1]),
+        "note": f"投信已連續賣超{streak['streak_days']}天，達停損觀察門檻，非買進訊號",
+    }
+
+
+def screen_foreign_investor_buy_streak(df: pd.DataFrame, foreign_net_desc: list[float] | None, min_days: int = 60) -> dict | None:
+    """對單一股票判斷「今天」是否觸發外資連續買超觀察訊號——跟screen_institutional_
+    trust_buy_streak()同一套`classify_flow_streak()`邏輯，資料來源改用`load_trailing_
+    foreign_investor_net()`。
+
+    引用R-CHIP-10「外資訊號有效性條件」(見`ai/chen-rules/籌碼面/外資訊號有效性條件.md`)
+    的信心分數——書中明確提醒外資買賣超訊號只有中小型/非權值股才有參考價值，權值股/
+    大型股受全球布局、期貨套利、指數調整干擾不宜採信；本專案目前沒有市值/是否為權值股
+    的分類資料(股本/市值尚未串接，見該規則檔「可程式化」欄位說明)，這裡**沒有**先過濾
+    掉大型權值股，note文字明確附上這個限制提醒，避免使用者對台積電這類權值股的外資
+    連續買超訊號照單全收。
+    """
+    if len(df) < min_days or not foreign_net_desc:
+        return None
+    streak = institutional_flow.classify_flow_streak(foreign_net_desc)
+    if not streak["is_buy_watch"]:
+        return None
+
+    from src.rule_docs import parse_confidence
+    confidence = parse_confidence("R-CHIP-10")
+    return {
+        "signal_name": f"R-CHIP-10外資連續買超觀察（{confidence}%）",
+        "entry_price": float(df["close"].iloc[-1]),
+        "stop_loss": float(df["low"].iloc[-1]),
+        "note": (
+            f"外資已連續買超{streak['streak_days']}天；⚠️書中提醒外資訊號只有中小型/"
+            "非權值股才有參考價值，本專案目前無法自動判斷是否為權值股，請自行留意"
+        ),
+    }
+
+
+def screen_foreign_investor_sell_streak(df: pd.DataFrame, foreign_net_desc: list[float] | None, min_days: int = 60) -> dict | None:
+    """對單一股票判斷「今天」是否觸發外資連續賣超警訊——跟screen_institutional_trust_
+    sell_streak()同一套邏輯與R-SCREEN-06信心引用，資料來源改用`load_trailing_foreign_
+    investor_net()`。signal_name同樣加上`WARNING_SIGNAL_PREFIX`前綴。
+    """
+    if len(df) < min_days or not foreign_net_desc:
+        return None
+    streak = institutional_flow.classify_flow_streak(foreign_net_desc)
+    if not streak["is_sell_warning"]:
+        return None
+
+    from src.rule_docs import parse_confidence
+    confidence = parse_confidence("R-SCREEN-06")
+    return {
+        "signal_name": f"{WARNING_SIGNAL_PREFIX}R-SCREEN-06外資連續賣超（{confidence}%）",
+        "entry_price": float(df["close"].iloc[-1]),
+        "stop_loss": float(df["low"].iloc[-1]),
+        "note": f"外資已連續賣超{streak['streak_days']}天，達停損觀察門檻，非買進訊號",
+    }
+
+
 def screen_volume_washout(df: pd.DataFrame, min_days: int = 60) -> dict | None:
     """對單一股票判斷「今天」是否觸發R-CHIP-03低檔量縮止跌觀察訊號(陳家豐書中P07-C4)。
 
@@ -850,16 +938,24 @@ def screen_all_stocks(
     min_days: int = 60,
     margin_frames: dict[str, pd.DataFrame] | None = None,
     institutional_trust_net: dict[str, list[float]] | None = None,
+    foreign_investor_net: dict[str, list[float]] | None = None,
 ) -> list[dict]:
     """對多檔股票批次跑目前已接上的所有screen_*規則，回傳今天所有觸發訊號的候選清單。
     同一檔股票若同時觸發多條規則，會分別各出現一筆(不同signal_name)，不互相排擠。
 
     stock_frames: {stock_id: df}，df需已依date排序、index為date、含open/high/low/close/volume欄位。
 
-    margin_frames/institutional_trust_net：分別對應`load_trailing_margin_frames()`／
-    `load_trailing_institutional_trust_net()`的批次讀取結果，供R-CHIP-02(融資超跌反彈)／
-    R-CHIP-01(投信連續買超)這兩條籌碼面規則使用；不傳(None)時這兩條規則一律回傳None，
-    只有技術面`_SCREEN_FUNCTIONS`會產生候選(向下相容既有呼叫端與測試)。
+    margin_frames/institutional_trust_net/foreign_investor_net：分別對應`load_
+    trailing_margin_frames()`／`load_trailing_institutional_trust_net()`／`load_
+    trailing_foreign_investor_net()`的批次讀取結果，供R-CHIP-02(融資超跌反彈)／
+    R-CHIP-01(投信連續買超)／R-CHIP-10(外資連續買超)＋投信/外資連續賣超警訊使用；
+    不傳(None)時這些籌碼面規則一律回傳None，只有技術面`_SCREEN_FUNCTIONS`會產生
+    候選(向下相容既有呼叫端與測試)。
+
+    ⚠️ 2026-08-09新增的投信/外資連續賣超這兩條，signal_name會帶`WARNING_SIGNAL_
+    PREFIX`前綴，一樣寫進回傳清單、一樣會被`run_screen_and_store()`存進`daily_
+    candidates`，但語意是「排除警示」不是「買進候選」——呼叫端(UI)要用這個前綴分開
+    顯示，不能當成一般候選股列出，理由見`WARNING_SIGNAL_PREFIX`常數說明。
 
     ⚠️ R-CHIP-03(量縮止跌，`screen_volume_washout()`)刻意不放進這裡：2026-08-08實測
     對本機真實DB全市場~2368檔掃描，觸發率高達47%(1106檔)，遠比R-CHIP-01(39檔)／
@@ -871,6 +967,7 @@ def screen_all_stocks(
     """
     margin_frames = margin_frames or {}
     institutional_trust_net = institutional_trust_net or {}
+    foreign_investor_net = foreign_investor_net or {}
     candidates: list[dict] = []
     for stock_id, df in stock_frames.items():
         for screen_fn in _SCREEN_FUNCTIONS:
@@ -901,6 +998,18 @@ def screen_all_stocks(
         trust_result = screen_institutional_trust_buy_streak(df, institutional_trust_net.get(stock_id), min_days=min_days)
         if trust_result is not None:
             candidates.append({"stock_id": stock_id, **trust_result})
+
+        trust_sell_result = screen_institutional_trust_sell_streak(df, institutional_trust_net.get(stock_id), min_days=min_days)
+        if trust_sell_result is not None:
+            candidates.append({"stock_id": stock_id, **trust_sell_result})
+
+        foreign_buy_result = screen_foreign_investor_buy_streak(df, foreign_investor_net.get(stock_id), min_days=min_days)
+        if foreign_buy_result is not None:
+            candidates.append({"stock_id": stock_id, **foreign_buy_result})
+
+        foreign_sell_result = screen_foreign_investor_sell_streak(df, foreign_investor_net.get(stock_id), min_days=min_days)
+        if foreign_sell_result is not None:
+            candidates.append({"stock_id": stock_id, **foreign_sell_result})
     return candidates
 
 
@@ -1047,6 +1156,37 @@ def load_trailing_institutional_trust_net(conn) -> dict[str, list[float]]:
     return {stock_id: list(reversed(values)) for stock_id, values in by_stock.items()}
 
 
+def load_trailing_foreign_investor_net(conn) -> dict[str, list[float]]:
+    """批次讀出『全部股票』最近`INSTITUTIONAL_TRUST_SCREENING_LOOKBACK_DAYS`個交易日
+    外資每日買賣超淨額，依date遞增排序，供screen_foreign_investor_buy_streak()／
+    screen_foreign_investor_sell_streak()判斷連續買/賣超天數用——沿用跟`stock_
+    detail_data._INVESTOR_GROUP_MAP`一致的「外資」定義：`Foreign_Investor`(外資本身)
+    +`Foreign_Dealer_Self`(外資自營商，較少見)兩個investor_type合計，不是只算前者。
+    跟`load_trailing_institutional_trust_net()`共用同一個回看窗口常數(門檻同樣只有
+    3天，抓太長沒意義)。
+
+    回傳{stock_id: [由新到舊排序的淨額]}，格式跟`load_trailing_institutional_trust_
+    net()`一致，直接是`classify_flow_streak()`要求的輸入格式。
+    """
+    cutoff = _trading_day_cutoff(conn, INSTITUTIONAL_TRUST_SCREENING_LOOKBACK_DAYS)
+    rows = conn.execute(
+        "SELECT stock_id, date, buy, sell FROM institutional_investors "
+        "WHERE investor_type IN ('Foreign_Investor', 'Foreign_Dealer_Self') AND date >= ? "
+        "ORDER BY stock_id, date",
+        (cutoff or "",),
+    ).fetchall()
+    net_by_stock_date: dict[tuple[str, str], float] = defaultdict(float)
+    for stock_id, date_, buy, sell in rows:
+        net_by_stock_date[(stock_id, date_)] += buy - sell
+    by_stock: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for (stock_id, date_), net in net_by_stock_date.items():
+        by_stock[stock_id].append((date_, net))
+    return {
+        stock_id: [net for _date, net in sorted(values, key=lambda x: x[0], reverse=True)]
+        for stock_id, values in by_stock.items()
+    }
+
+
 def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) -> list[dict]:
     """只用資料庫裡『目前已有』的資料重新跑一次選股並寫回daily_candidates，不對外抓取任何新資料。
 
@@ -1077,9 +1217,11 @@ def run_screen_and_store(conn, iso_date: str | None = None, min_days: int = 60) 
     frames = load_trailing_frames(conn, min_days=min_days)
     margin_frames = load_trailing_margin_frames(conn)
     institutional_trust_net = load_trailing_institutional_trust_net(conn)
+    foreign_investor_net = load_trailing_foreign_investor_net(conn)
     candidates = screen_all_stocks(
         frames, min_days=min_days,
         margin_frames=margin_frames, institutional_trust_net=institutional_trust_net,
+        foreign_investor_net=foreign_investor_net,
     )
 
     storage.delete_daily_candidates_for_date(conn, iso_date)

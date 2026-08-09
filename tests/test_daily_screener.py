@@ -1044,6 +1044,68 @@ def test_screen_institutional_trust_buy_streak_returns_none_when_streak_too_shor
     assert daily_screener.screen_institutional_trust_buy_streak(df, [], min_days=1) is None
 
 
+def test_screen_institutional_trust_sell_streak_fires_after_three_sell_days():
+    dates = pd.date_range("2026-01-01", periods=3, freq="B")
+    df = pd.DataFrame(
+        {"open": [10.0, 10.0, 10.0], "high": [10.0, 10.0, 10.0], "low": [9.0, 9.0, 9.0],
+         "close": [10.0, 10.0, 9.0], "volume": [10, 10, 10]},
+        index=dates,
+    )
+    trust_net_desc = [-200.0, -250.0, -300.0]  # 由新到舊，連續3天皆為淨賣超
+
+    result = daily_screener.screen_institutional_trust_sell_streak(df, trust_net_desc, min_days=1)
+
+    assert result is not None
+    assert result["signal_name"].startswith(daily_screener.WARNING_SIGNAL_PREFIX)
+    assert "R-SCREEN-06" in result["signal_name"]
+    assert "3" in result["note"]
+
+
+def test_screen_institutional_trust_sell_streak_returns_none_when_streak_too_short():
+    dates = pd.date_range("2026-01-01", periods=2, freq="B")
+    df = pd.DataFrame(
+        {"open": [10.0, 10.0], "high": [10.0, 10.0], "low": [9.0, 9.0], "close": [10.0, 9.0], "volume": [10, 10]},
+        index=dates,
+    )
+    trust_net_desc = [-200.0, 50.0]  # 今天賣超但只連續1天(前一天是買超)，未達3天門檻
+    assert daily_screener.screen_institutional_trust_sell_streak(df, trust_net_desc, min_days=1) is None
+    assert daily_screener.screen_institutional_trust_sell_streak(df, None, min_days=1) is None
+
+
+def test_screen_foreign_investor_buy_streak_fires_after_three_buy_days():
+    dates = pd.date_range("2026-01-01", periods=3, freq="B")
+    df = pd.DataFrame(
+        {"open": [10.0, 10.0, 10.0], "high": [10.0, 10.0, 10.0], "low": [9.0, 9.0, 9.0],
+         "close": [10.0, 10.0, 11.0], "volume": [10, 10, 10]},
+        index=dates,
+    )
+    foreign_net_desc = [200.0, 250.0, 300.0]
+
+    result = daily_screener.screen_foreign_investor_buy_streak(df, foreign_net_desc, min_days=1)
+
+    assert result is not None
+    assert result["signal_name"].startswith("R-CHIP-10")
+    assert not result["signal_name"].startswith(daily_screener.WARNING_SIGNAL_PREFIX)
+    assert "3" in result["note"]
+    assert "權值股" in result["note"]  # 附上書中警告，不能對大型股照單全收
+
+
+def test_screen_foreign_investor_sell_streak_fires_after_three_sell_days():
+    dates = pd.date_range("2026-01-01", periods=3, freq="B")
+    df = pd.DataFrame(
+        {"open": [10.0, 10.0, 10.0], "high": [10.0, 10.0, 10.0], "low": [9.0, 9.0, 9.0],
+         "close": [10.0, 10.0, 9.0], "volume": [10, 10, 10]},
+        index=dates,
+    )
+    foreign_net_desc = [-200.0, -250.0, -300.0]
+
+    result = daily_screener.screen_foreign_investor_sell_streak(df, foreign_net_desc, min_days=1)
+
+    assert result is not None
+    assert result["signal_name"].startswith(daily_screener.WARNING_SIGNAL_PREFIX)
+    assert "R-SCREEN-06" in result["signal_name"]
+
+
 def test_screen_volume_washout_fires_when_volume_shrinks_to_tenth_of_peak():
     n_days = 250
     dates = pd.date_range("2020-01-01", periods=n_days, freq="B")
@@ -1102,6 +1164,28 @@ def test_screen_all_stocks_includes_chip_candidates_when_data_provided():
     assert all(stock_id != "1101" for stock_id, _ in chip_ids)  # 1101沒有籌碼資料，不應該出現R-CHIP候選
 
 
+def test_screen_all_stocks_includes_foreign_investor_and_sell_warnings():
+    """screen_all_stocks()傳入foreign_investor_net後，外資連續買超應正常成為候選；
+    投信/外資連續賣超則應該以WARNING_SIGNAL_PREFIX標記出現在同一份清單裡，不是被
+    排除在外(呼叫端UI才依前綴分開顯示，這裡只確認資料本身有正確產生)。"""
+    dates = pd.date_range("2026-01-01", periods=3, freq="B")
+    df = pd.DataFrame(
+        {"open": [10.0, 10.0, 10.0], "high": [10.0, 10.0, 10.0], "low": [9.0, 9.0, 9.0],
+         "close": [10.0, 10.0, 11.0], "volume": [10, 10, 10]},
+        index=dates,
+    )
+
+    candidates = daily_screener.screen_all_stocks(
+        {"2330": df}, min_days=3,
+        institutional_trust_net={"2330": [-200.0, -250.0, -300.0]},  # 投信連續賣超
+        foreign_investor_net={"2330": [200.0, 250.0, 300.0]},  # 外資連續買超
+    )
+
+    signal_names = [c["signal_name"] for c in candidates]
+    assert any(name.startswith("R-CHIP-10") for name in signal_names)
+    assert any(name.startswith(daily_screener.WARNING_SIGNAL_PREFIX) and "R-SCREEN-06投信" in name for name in signal_names)
+
+
 def test_load_trailing_margin_frames_joins_close_price_and_groups_by_stock():
     conn = init_db(":memory:")
     _seed_stock_prices(conn, "2330", n_days=2)  # 日期2026-01-01/01-02，收盤價都是100.5
@@ -1145,6 +1229,24 @@ def test_load_trailing_institutional_trust_net_only_includes_investment_trust_ne
 
     # 依date遞增算net(01-01:200, 01-02:150)後反轉成由新到舊；外資(Foreign_Investor)不計入
     assert result == {"2330": [150, 200]}
+
+
+def test_load_trailing_foreign_investor_net_combines_foreign_investor_and_dealer_self():
+    """外資定義沿用stock_detail_data._INVESTOR_GROUP_MAP：Foreign_Investor+
+    Foreign_Dealer_Self合計，不是只算前者；投信(Investment_Trust)不計入。"""
+    conn = init_db(":memory:")
+    _seed_stock_prices(conn, "2330", n_days=1)
+    upsert_institutional_investors(conn, [
+        {"stock_id": "2330", "date": "2026-01-01", "investor_type": "Foreign_Investor", "buy": 900, "sell": 100},
+        {"stock_id": "2330", "date": "2026-01-01", "investor_type": "Foreign_Dealer_Self", "buy": 50, "sell": 10},
+        {"stock_id": "2330", "date": "2026-01-02", "investor_type": "Foreign_Investor", "buy": 100, "sell": 300},
+        {"stock_id": "2330", "date": "2026-01-01", "investor_type": "Investment_Trust", "buy": 300, "sell": 100},
+    ])
+
+    result = daily_screener.load_trailing_foreign_investor_net(conn)
+
+    # 01-01: (900-100)+(50-10)=840；01-02: 100-300=-200；反轉成由新到舊
+    assert result == {"2330": [-200, 840]}
 
 
 def test_run_screen_and_store_includes_margin_oversold_rebound_candidate():
