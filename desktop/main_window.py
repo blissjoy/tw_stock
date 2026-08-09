@@ -374,6 +374,12 @@ class _CollapsibleBox(QWidget):
         if not self._expanded:
             self._on_toggle()
 
+    def collapse(self) -> None:
+        """收合這個區塊(已經收合的話不做任何事)——2026-08-09新增，跟expand()對稱，
+        供「個股明細」的「全部收合」按鈕使用。"""
+        if self._expanded:
+            self._on_toggle()
+
 
 class _FloatingTopButton(QPushButton):
     """浮動在QScrollArea右下角、隨畫面捲動固定跟隨的「回頂部」按鈕。2026-08-04新增，
@@ -1545,6 +1551,20 @@ class MainWindow(QMainWindow):
         """
         overview_tab = QWidget()
         overview_layout = QVBoxLayout(overview_tab)
+
+        # 「全部展開／全部收合」：2026-08-09新增，使用者要求6個區塊(交易資訊/法人買賣
+        # 總覽/主力進出/資券變化總覽/大戶籌碼/MOPS增減資紀錄)個別展開/收合之外，還要
+        # 能一次全部展開或全部收合，不用逐一點6次。放在最上方、6個_CollapsibleBox
+        # 之前，按鈕的click handler裡直接走self._stock_overview_boxes(下面迴圈建立)。
+        overview_toolbar = QHBoxLayout()
+        expand_all_btn = QPushButton("全部展開")
+        collapse_all_btn = QPushButton("全部收合")
+        expand_all_btn.clicked.connect(lambda: self._set_all_stock_overview_boxes_expanded(True))
+        collapse_all_btn.clicked.connect(lambda: self._set_all_stock_overview_boxes_expanded(False))
+        overview_toolbar.addWidget(expand_all_btn)
+        overview_toolbar.addWidget(collapse_all_btn)
+        overview_toolbar.addStretch()
+        overview_layout.addLayout(overview_toolbar)
 
         # 預設的checkable QPushButton在Fusion風格下checked/unchecked視覺差異很小，
         # 使用者不容易一眼看出目前是哪個檢視——明確加style讓checked狀態變成藍底白字，
@@ -4089,6 +4109,13 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         不是QTextBrowser，但_set_autoheight_html()用到的API(setHtml/document()/
         frameWidth()/setFixedHeight())兩者共通，可以直接共用同一個方法。"""
         self._set_autoheight_html(self._stock_overview_views[title], html_content)
+
+    def _set_all_stock_overview_boxes_expanded(self, expanded: bool) -> None:
+        """「個股明細」的「全部展開」／「全部收合」按鈕，2026-08-09新增。逐一呼叫
+        每個_CollapsibleBox的expand()/collapse()(已經是目標狀態的話這兩個方法本身
+        就不做事，不用在這裡另外判斷)。"""
+        for box in self._stock_overview_boxes.values():
+            box.expand() if expanded else box.collapse()
 
     def _build_overview_quote_html(self, stock_id: str) -> str:
         """「交易資訊」區塊內容，對應temp/個股詳情-1.jpg。2026-08-03改版：均價/成交

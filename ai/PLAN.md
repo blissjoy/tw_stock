@@ -8584,3 +8584,42 @@ html()`)，web版`render_stock_overview_section()`加一個對應的`st.expander
 changes()`的2個測試)。對正式`data/tw_stock.db`實際跑過抓取(706筆/405檔)；
 web版(帶`LOCAL_DB_PATH`)、桌面版(先設好環境變數再建`MainWindow()`)都截圖
 確認1560(中砂)正確顯示4筆「115年06/05/04/03月（上市）」紀錄，內容逐字一致。
+
+---
+
+## 個股明細「全部展開/全部收合」＋澄清桌面版LOCAL_DB_PATH本來就正確（2026-08-09）
+
+使用者指出上一節記錄的「桌面版查無資料」講法容易誤會成產品本身的bug，特別澄清：
+**桌面版正常啟動(`desktop/main.py`)本來就會`os.environ.setdefault()`指向本機
+DB，預設就是連LOCAL，一直都是對的**。前一節踩到的「查無資料」單純是我為了截圖
+寫的ad-hoc驗證腳本繞過了`main.py`入口點(直接`import desktop.main_window`建立
+`MainWindow()`)，沒有真的執行到那行`setdefault()`，是驗證腳本的產物，不是要修的
+真實問題。這裡不需要也沒有改動任何連線邏輯，純粹是釐清認知。
+
+**新功能**：個股明細6個可收合區塊（交易資訊/法人買賣總覽/主力進出/資券變化
+總覽/大戶籌碼/MOPS增減資紀錄）太多，使用者要求加「全部展開/全部收合」。
+
+- 桌面版：`desktop/main_window.py`的`_CollapsibleBox`新增`collapse()`方法
+  (原本只有`expand()`)，`_build_stock_overview_tab()`頂部加「全部展開」/
+  「全部收合」兩顆按鈕，`_set_all_stock_overview_boxes_expanded(expanded)`
+  遍歷`_stock_overview_boxes`逐一呼叫`.expand()`/`.collapse()`。
+- web版：`dashboard/app.py`同樣位置加兩顆按鈕。
+
+**踩到一個Streamlit `st.expander(key=...)`的元件限制，花了不少時間排查**：
+直接改`st.session_state[key]`再`st.rerun()`想控制已經渲染過的expander狀態，
+結果不可靠——收合(True→False)有時有效，但展開(False→True)幾乎沒有效果，即使
+背後session_state的值確實已經改成True。系統性排除了好幾種寫法(要不要傳
+`expanded`預設值、迴圈vs展開寫、`pop()`vs直接賦值、有無包在`st.columns()`裡)，
+在獨立小測試app跟真實`dashboard/app.py`裡的行為還不完全一致，找出唯一可靠的
+解法：**每次按「全部展開/收合」都讓生成計數器(`gen`)加一，把`gen`嵌進每個
+expander的`key`裡，讓按鈕點擊後所有expander都拿到全新、從未出現過的key**（而
+不是去改已存在元件的狀態），同時把`expanded=`參數傳成變數而非寫死的字面值。
+原理是Streamlit只有在widget的key完全沒有session_state紀錄時（等同全新初始化）
+才會可靠套用`expanded=`字面值，這跟「更新已存在widget狀態」是不同、更可靠的
+程式路徑。
+
+真實驗證：`pytest tests/ -q`維持1076個測試全數通過(這是UI互動行為，依專案慣例
+用真實截圖驗證，沒有另外加單元測試)。web版用Playwright對真實dashboard(帶
+`LOCAL_DB_PATH`)做了3輪完整收合→展開→收合循環，桌面版用真實`MainWindow`
+(帶`LOCAL_DB_PATH`)對1560兩種狀態各截圖一次，兩邊6個區塊的箭頭方向與內容
+顯示都正確，驗證用截圖已刪除。

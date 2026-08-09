@@ -588,7 +588,44 @@ def main() -> None:
         的「## 個股明細」標題——桌面版對應的inner tab內容本身沒有重複標題(分頁
         標籤本身就是標題)，這個函式現在是被包在st.tabs()的「個股明細」分頁裡呼叫。
         """
-        with st.expander("交易資訊", expanded=True):
+        # 「全部展開／全部收合」：2026-08-09新增，使用者要求6個區塊個別展開/收合
+        # 之外，還要能一次全部展開或全部收合。
+        #
+        # ⚠️ 這裡的寫法是實測踩過坑才定案的，記錄清楚避免之後改壞：st.expander()
+        # 帶key時，直接把session_state[key]改成目標值(True/False)再rerun，實測
+        # 「收合」方向常常正常生效，但「展開」方向即使session_state確實已經變成
+        # True，畫面上的expander卻常常維持收合——這個現象在單頁小範例裡有時會動、
+        # 有時不會動，行為不穩定，看起來是st.expander()這個元件對「同一個key、
+        # 只改session_state值」這種更新路徑的支援並不可靠(streamlit 1.60.0)。
+        # 唯一實測穩定可靠(連續切換多次都正確)的做法：**不要對同一個key改
+        # session_state值**，而是每次按「全部展開/收合」都讓generation計數器
+        # +1、所有expander的key都帶上這個generation號碼——這樣每次群組操作都是
+        # 給widget一把「全新、從沒出現過」的key，同時直接把這次的目標展開狀態
+        # 當成expanded=的字面值傳入(不是True的寫死值，是bulk_default這個變數)，
+        # 讓每個expander在「第一次以這把新key出現」的當下就正確初始化成目標
+        # 狀態。個別區塊自己點頭部箭頭展開/收合，在同一個generation內仍然正常
+        # 運作(那是widget自己原生的session_state追蹤，不受這裡影響)。
+        overview_titles = ["交易資訊", "法人買賣總覽", "主力進出", "資券變化總覽", "大戶籌碼", "MOPS增減資紀錄"]
+        gen_key = f"stock_overview_gen_{stock_id}"
+        default_key = f"stock_overview_bulk_default_{stock_id}"
+
+        col_expand, col_collapse, _ = st.columns([1, 1, 6])
+        if col_expand.button("全部展開", key=f"stock_overview_expand_all_{stock_id}"):
+            st.session_state[default_key] = True
+            st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
+            st.rerun()
+        if col_collapse.button("全部收合", key=f"stock_overview_collapse_all_{stock_id}"):
+            st.session_state[default_key] = False
+            st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
+            st.rerun()
+
+        _overview_gen = st.session_state.get(gen_key, 0)
+        _overview_bulk_default = st.session_state.get(default_key, True)
+
+        def _stock_overview_expander_key(title: str) -> str:
+            return f"stock_overview_expanded_{stock_id}_{title}_{_overview_gen}"
+
+        with st.expander("交易資訊", expanded=_overview_bulk_default, key=_stock_overview_expander_key("交易資訊")):
             quote = stock_detail_data.load_quote_summary(conn, stock_id)
             if quote is None:
                 st.write("查無成交資料。")
@@ -621,7 +658,7 @@ def main() -> None:
                     c3.caption(label2)
                     c4.markdown(value2, unsafe_allow_html=True)
 
-        with st.expander("法人買賣總覽", expanded=True):
+        with st.expander("法人買賣總覽", expanded=_overview_bulk_default, key=_stock_overview_expander_key("法人買賣總覽")):
             cumulative = stock_detail_data.load_institutional_cumulative(conn, stock_id)
             if cumulative is None:
                 st.write("查無法人買賣資料。")
@@ -658,10 +695,10 @@ def main() -> None:
                 _render_institutional_flow_analysis(flow, momentum)
                 _render_huang_chip_supplementary(conn, stock_id)
 
-        with st.expander("主力進出", expanded=True):
+        with st.expander("主力進出", expanded=_overview_bulk_default, key=_stock_overview_expander_key("主力進出")):
             st.caption("⚠️ 尚未串接資料來源（需要券商分點籌碼資料，schema已預留broker_chips表，待FinMind付費方案開通後才能接上）。")
 
-        with st.expander("資券變化總覽", expanded=True):
+        with st.expander("資券變化總覽", expanded=_overview_bulk_default, key=_stock_overview_expander_key("資券變化總覽")):
             margin_view = st.radio(
                 "檢視", ["當日", "累計"], key=f"margin_view_{stock_id}", horizontal=True, label_visibility="collapsed",
             )
@@ -699,10 +736,10 @@ def main() -> None:
                     st.dataframe(pd.DataFrame(rows).set_index(""), use_container_width=True)
             _render_margin_maintenance_analysis(maintenance)
 
-        with st.expander("大戶籌碼", expanded=True):
+        with st.expander("大戶籌碼", expanded=_overview_bulk_default, key=_stock_overview_expander_key("大戶籌碼")):
             st.caption("⚠️ 尚未串接資料來源（需要股權分散/大戶持股統計資料，目前資料庫schema還沒有對應的表）。")
 
-        with st.expander("MOPS增減資紀錄", expanded=True):
+        with st.expander("MOPS增減資紀錄", expanded=_overview_bulk_default, key=_stock_overview_expander_key("MOPS增減資紀錄")):
             # 2026-08-09新增：只顯示「哪個月有公司增減資公告」這個中性事實(見
             # stock_detail_data.load_mops_capital_changes()的已知限制)，沒有方向/
             # 金額/恢復交易日期，也不做任何規則判讀，避免使用者誤以為系統已經幫忙
