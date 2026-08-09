@@ -577,9 +577,9 @@ def main() -> None:
             )
 
     def render_stock_overview_section(stock_id: str) -> None:
-        """「個股明細」5個區塊：交易資訊/法人買賣總覽/主力進出/資券變化總覽/大戶籌碼，
-        照抄desktop/main_window.py的_build_stock_overview_tab()版面結構(5個各自
-        獨立可收合的區塊，這裡用st.expander(expanded=True)取代_CollapsibleBox，
+        """「個股明細」6個區塊：交易資訊/法人買賣總覽/主力進出/資券變化總覽/大戶籌碼/
+        MOPS增減資紀錄(2026-08-09新增)，照抄desktop/main_window.py的_build_stock_
+        overview_tab()版面結構(各自獨立可收合的區塊，這裡用st.expander(expanded=True)取代_CollapsibleBox，
         預設展開一致)。只有個股資訊分頁呼叫，大盤不顯示這個區塊(桌面版也是同樣的
         個股專屬邊界，見_build_market_tab()跟_build_stock_detail_tab()是分開的
         兩份inner tabs，大盤那份沒有「個股明細」)。主力進出/大戶籌碼目前資料庫
@@ -701,6 +701,23 @@ def main() -> None:
 
         with st.expander("大戶籌碼", expanded=True):
             st.caption("⚠️ 尚未串接資料來源（需要股權分散/大戶持股統計資料，目前資料庫schema還沒有對應的表）。")
+
+        with st.expander("MOPS增減資紀錄", expanded=True):
+            # 2026-08-09新增：只顯示「哪個月有公司增減資公告」這個中性事實(見
+            # stock_detail_data.load_mops_capital_changes()的已知限制)，沒有方向/
+            # 金額/恢復交易日期，也不做任何規則判讀，避免使用者誤以為系統已經幫忙
+            # 判斷過是增資還是減資。照抄desktop/main_window.py的_build_overview_
+            # mops_capital_changes_html()同一套邏輯。
+            records = stock_detail_data.load_mops_capital_changes(conn, stock_id)
+            if not records:
+                st.caption("查無資料（該股票這段期間沒有增減資公告，或尚未手動執行 scripts/fetch_mops_capital_changes.py 抓取）。")
+            else:
+                st.caption("⚠️ 僅顯示「哪個年月有公司增減資公告」，來源：公開資訊觀測站（MOPS）公司增減資表。尚未區分增資／減資方向、金額、恢復交易日期。")
+                market_label = {"sii": "上市", "otc": "上櫃"}
+                for r in records:
+                    year, month = r["year_month"][:-2], r["year_month"][-2:]
+                    market_text = market_label.get(r["market"], r["market"])
+                    st.write(f"- {year}年{month}月（{market_text}）")
 
     # ------------------------------------------------------------------
     # 個股報表PDF匯出（2026-08-05新增，見ai/PLAN.md第10批）

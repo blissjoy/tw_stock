@@ -74,19 +74,32 @@ def parse_capital_change_html(html: str) -> list[dict]:
 
 
 def fetch_capital_change_companies(year: str, month: str, market: str = "sii") -> list[dict]:
-    """整合fetch+parse，跑一次Playwright流程拿到某年月/市場別的增減資公司清單。
+    """單一年月/市場別的便利函式，內部就是呼叫`fetch_capital_change_companies_batch()`
+    只查一筆。多個年月/市場別要一次抓時請直接用batch版本，避免重複啟動瀏覽器的開銷
+    (見該函式docstring)。"""
+    return fetch_capital_change_companies_batch([(year, month, market)]).get((year, month, market), [])
 
-    year/month：民國年/月字串(例如"115"/"07")，對應MOPS查詢表單的「資料年度」／
-    「月份」欄位。market：MOPS的marketKind參數，"sii"=上市，"otc"=上櫃。
 
-    查無資料(該年月剛好沒有任何公司辦理增減資，或該年月尚未由MOPS公告)回傳空list，
-    不拋例外——呼叫端(scripts/fetch_mops_capital_changes.py)自行決定要不要提示
-    使用者「這個月剛好沒有資料」還是「抓取失敗」。
+def fetch_capital_change_companies_batch(
+    queries: list[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], list[dict]]:
+    """`fetch_capital_change_companies()`的批次版：對多組(year, month, market)查詢，
+    只啟動一次瀏覽器/一個分頁重複呼叫，不是每組查詢各自開關一次瀏覽器——
+    `scripts/fetch_mops_capital_changes.py`要抓多個月份時應該用這個版本，啟動瀏覽器
+    本身的開銷(~1~2秒)不需要重複付出。
+
+    回傳{(year, month, market): [{"stock_id","name"}, ...]}，查無資料的組合對應
+    空list(不是缺key)，不拋例外——呼叫端自行決定要不要提示使用者「這個月剛好沒有
+    資料」還是「抓取失敗」。
 
     ⚠️ 需要`playwright install chromium`先裝好瀏覽器執行檔，只`pip install
     playwright`不會自動下載，見本模組docstring。
     """
     from playwright.sync_api import sync_playwright
+
+    result: dict[tuple[str, str, str], list[dict]] = {q: [] for q in queries}
+    if not queries:
+        return result
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -95,32 +108,34 @@ def fetch_capital_change_companies(year: str, month: str, market: str = "sii") -
             page.goto(MOPS_INDEX_URL, timeout=30000)
             page.wait_for_timeout(1500)  # 等首頁的JS完成初始化，太快呼叫API有時會失敗
 
-            redirect_result = page.evaluate(
-                """
-                async ({year, month, market, fileNoOfIRB}) => {
-                    const resp = await fetch('/mops/api/redirectToIRB', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({year, marketKind: market, month, fileNoOfIRB})
-                    });
-                    return await resp.json();
-                }
-                """,
-                {"year": year, "month": month, "market": market, "fileNoOfIRB": CAPITAL_CHANGE_FILE_NO},
-            )
-            if redirect_result.get("code") != 200 or not redirect_result.get("result"):
-                return []
-            report_url = redirect_result["result"]["url"]
-
             request_context = p.request.new_context()
             try:
-                resp = request_context.get(report_url)
-                if resp.status != 200:
-                    return []
-                html = resp.body().decode("big5", errors="replace")
+                for year, month, market in queries:
+                    redirect_result = page.evaluate(
+                        """
+                        async ({year, month, market, fileNoOfIRB}) => {
+                            const resp = await fetch('/mops/api/redirectToIRB', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({year, marketKind: market, month, fileNoOfIRB})
+                            });
+                            return await resp.json();
+                        }
+                        """,
+                        {"year": year, "month": month, "market": market, "fileNoOfIRB": CAPITAL_CHANGE_FILE_NO},
+                    )
+                    if redirect_result.get("code") != 200 or not redirect_result.get("result"):
+                        continue
+                    report_url = redirect_result["result"]["url"]
+
+                    resp = request_context.get(report_url)
+                    if resp.status != 200:
+                        continue
+                    html = resp.body().decode("big5", errors="replace")
+                    result[(year, month, market)] = parse_capital_change_html(html)
             finally:
                 request_context.dispose()
         finally:
             browser.close()
 
-    return parse_capital_change_html(html)
+    return result

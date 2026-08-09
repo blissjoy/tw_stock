@@ -626,3 +626,18 @@ def analyze_chip_signals(conn, stock_id: str) -> list[dict]:
         m["note"] = "\n".join(m["note"]) if m["note"] else None
     result.sort(key=lambda m: m["confidence"], reverse=True)
     return result
+
+
+def load_mops_capital_changes(conn, stock_id: str) -> list[dict]:
+    """MOPS「公司增減資表」(IRB160)裡跟這檔股票相關的紀錄，依year_month新到舊排序，
+    見src/data/mops_client.py模組docstring的完整背景。回傳[{"year_month","market",
+    "fetched_at"}, ...]，只是「哪個年月有增減資公告」這個中性事實——⚠️沒有增資/減資
+    方向、金額、恢復交易日期，呼叫端(desktop/main_window.py／dashboard/app.py)顯示
+    時不能誤植成「已經幫忙判斷是增資還是減資」。查無資料(該股這段期間沒有公告，或
+    scripts/fetch_mops_capital_changes.py還沒手動執行過)回傳空list。
+    """
+    rows = conn.execute(
+        "SELECT year_month, market, fetched_at FROM mops_capital_changes WHERE stock_id = ? ORDER BY year_month DESC",
+        (stock_id,),
+    ).fetchall()
+    return [{"year_month": r[0], "market": r[1], "fetched_at": r[2]} for r in rows]

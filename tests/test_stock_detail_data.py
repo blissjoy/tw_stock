@@ -5,6 +5,7 @@ from src.data.storage import (
     init_db,
     upsert_institutional_investors,
     upsert_margin_trading,
+    upsert_mops_capital_changes,
     upsert_stock_prices,
     upsert_stocks,
 )
@@ -621,3 +622,25 @@ def test_analyze_chip_signals_merges_duplicate_rule_id_and_sorts_by_confidence()
 def test_analyze_chip_signals_returns_empty_list_when_no_data():
     conn = _main_conn()
     assert stock_detail_data.analyze_chip_signals(conn, "9999") == []
+
+
+def test_load_mops_capital_changes_sorts_newest_first():
+    conn = _main_conn()
+    upsert_mops_capital_changes(conn, [
+        {"stock_id": "1560", "name": "中國砂輪企業股份有限公司", "market": "sii",
+         "year_month": "11503", "fetched_at": "2026-08-09T17:00:00"},
+        {"stock_id": "1560", "name": "中國砂輪企業股份有限公司", "market": "sii",
+         "year_month": "11505", "fetched_at": "2026-08-09T17:00:00"},
+        {"stock_id": "1560", "name": "中國砂輪企業股份有限公司", "market": "sii",
+         "year_month": "11504", "fetched_at": "2026-08-09T17:00:00"},
+    ])
+
+    result = stock_detail_data.load_mops_capital_changes(conn, "1560")
+
+    assert [r["year_month"] for r in result] == ["11505", "11504", "11503"]
+    assert result[0]["market"] == "sii"
+
+
+def test_load_mops_capital_changes_returns_empty_list_when_no_data():
+    conn = _main_conn()
+    assert stock_detail_data.load_mops_capital_changes(conn, "9999") == []

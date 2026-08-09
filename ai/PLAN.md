@@ -8544,3 +8544,43 @@ pipeline.yml`)。
 另外用真實網路連線完整跑過`fetch_capital_change_companies('115','01','sii')`
 (91家公司)與`python scripts/fetch_mops_capital_changes.py --local-db <測試DB>`
 端對端流程，確認資料正確寫入`mops_capital_changes`表，測試檔案與DB用完即刪除。
+
+---
+
+## MOPS增減資紀錄接進「個股明細」＋正式對本機DB跑一次資料（2026-08-09）
+
+延續上一節，使用者確認要「個股明細裡加一個『MOPS增減資紀錄』區塊，先跑一次資料」。
+
+**先對正式的`data/tw_stock.db`跑一次抓取**：`python scripts/fetch_mops_capital_
+changes.py`(預設`--months-back 6`，上市+上櫃都抓)，115年07/08月查無資料(尚未由
+MOPS公告)，115年03~06月共抓到706筆(405檔不重複股票)，正式寫進本機DB的
+`mops_capital_changes`表。過程中把`mops_client.py`加了`fetch_capital_change_
+companies_batch()`批次版本(只啟動一次瀏覽器重複查詢多組年月/市場別，不是每組
+查詢各自開關一次瀏覽器)，`fetch_capital_change_companies()`改成內部呼叫batch版
+只查一筆，`scripts/fetch_mops_capital_changes.py`新增`--months-back`參數(預設6)
+改用批次版本一次抓多個月。
+
+**UI新增**：`src/presentation/stock_detail_data.py`新增`load_mops_capital_
+changes(conn, stock_id)`(依year_month新到舊排序)，桌面版`_STOCK_OVERVIEW_
+BLOCKS`加入第6個區塊「MOPS增減資紀錄」(`_build_overview_mops_capital_changes_
+html()`)，web版`render_stock_overview_section()`加一個對應的`st.expander()`。
+兩邊都只顯示「哪個年月有增減資公告」，明確加註「尚未區分增資/減資方向、金額、
+恢復交易日期」，不假裝系統已經判讀過方向。刻意只加在「個股明細」，沒有加進
+「產出報表」PDF那份獨立的`detail_builders`字典(這次沒有要求)。
+
+**⚠️ 驗證時踩到一個環境變數陷阱，值得記錄**：第一次用Playwright/PySide6截圖
+驗證時，web版跟桌面版都顯示「查無資料」，明明DB裡確實有706筆——追查發現是
+`src/data/connection.py`的`get_default_connection()`沒讀到`LOCAL_DB_PATH`
+環境變數時會**預設連線Turso**，不是本機檔案。正式的`dashboard/app.py`／
+`desktop/main.py`平常都有各自的機制確保這個環境變數有設好(桌面版`main.py`
+用`os.environ.setdefault()`寫死指向本機DB)，但這次驗證時：web版是直接下
+`streamlit run`沒有帶環境變數；桌面版是我為了截圖寫的ad-hoc測試腳本直接
+`import desktop.main_window`建立`MainWindow()`，跳過了`desktop/main.py`
+入口點裡設環境變數的那一行——兩次都不是程式本身的bug，是驗證腳本沒有走
+正常的啟動路徑。改成明確帶`LOCAL_DB_PATH=data/tw_stock.db`後兩邊都正確顯示。
+這個陷阱之後驗證時還會再遇到，記下來避免重複排查。
+
+真實驗證：`pytest tests/ -q`1076個測試全數通過(新增`load_mops_capital_
+changes()`的2個測試)。對正式`data/tw_stock.db`實際跑過抓取(706筆/405檔)；
+web版(帶`LOCAL_DB_PATH`)、桌面版(先設好環境變數再建`MainWindow()`)都截圖
+確認1560(中砂)正確顯示4筆「115年06/05/04/03月（上市）」紀錄，內容逐字一致。

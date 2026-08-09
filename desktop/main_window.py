@@ -1513,10 +1513,12 @@ class MainWindow(QMainWindow):
         _FloatingTopButton(detail_scroll)
         bottom_layout.addWidget(self.detail_inner_tabs)
 
-    # 「個股明細」5個區塊的標題，同時是_build_stock_overview_tab()建立_CollapsibleBox
+    # 「個股明細」6個區塊的標題，同時是_build_stock_overview_tab()建立_CollapsibleBox
     # 的順序、也是_refresh_stock_overview_view()對應each區塊QTextEdit屬性名稱的依據
-    # (見_STOCK_OVERVIEW_BLOCK_ATTRS)。
-    _STOCK_OVERVIEW_BLOCKS = ["交易資訊", "法人買賣總覽", "主力進出", "資券變化總覽", "大戶籌碼"]
+    # (見_STOCK_OVERVIEW_BLOCK_ATTRS)。「MOPS增減資紀錄」2026-08-09新增，只放在這個
+    # 即時互動畫面用的清單，刻意不加進_build_report_html()「產出報表」PDF那份獨立的
+    # detail_builders字典(使用者這次只要求「個股明細」，範圍不含報表匯出)。
+    _STOCK_OVERVIEW_BLOCKS = ["交易資訊", "法人買賣總覽", "主力進出", "資券變化總覽", "大戶籌碼", "MOPS增減資紀錄"]
 
     def _build_stock_overview_tab(self) -> None:
         """「個股明細」內層tab(detail_inner_tabs第3個分頁，index==2)：交易資訊/法人
@@ -4076,6 +4078,7 @@ iframe {{ width: 100%; height: 900px; border: none; }}
             "主力進出": self._build_overview_dealer_html,
             "資券變化總覽": self._build_overview_margin_html,
             "大戶籌碼": self._build_overview_chip_html,
+            "MOPS增減資紀錄": self._build_overview_mops_capital_changes_html,
         }
         for title, builder in builders.items():
             self._set_overview_block_html(title, builder(stock_id))
@@ -4496,6 +4499,33 @@ iframe {{ width: 100%; height: 900px; border: none; }}
             "<tr><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr></table>"
         )
         return warning + table
+
+    def _build_overview_mops_capital_changes_html(self, stock_id: str) -> str:
+        """「MOPS增減資紀錄」區塊內容，2026-08-09新增。只顯示「哪個月有公司增減資
+        公告」這個中性事實(見stock_detail_data.load_mops_capital_changes()的已知
+        限制)，沒有增資/減資方向、金額、恢復交易日期，也不做任何規則判讀——刻意不
+        猜測是增資還是減資，避免使用者誤以為系統已經幫忙判斷過。資料只有手動執行過
+        scripts/fetch_mops_capital_changes.py才會有，查無資料時的提示文字說明這點，
+        不是單純顯示「-」。
+        """
+        records = stock_detail_data.load_mops_capital_changes(self.conn, stock_id)
+        if not records:
+            return (
+                '<p style="color:#999999;">查無資料（該股票這段期間沒有增減資公告，'
+                "或尚未手動執行 scripts/fetch_mops_capital_changes.py 抓取）。</p>"
+            )
+        market_label = {"sii": "上市", "otc": "上櫃"}
+        lines = [
+            '<p style="color:#999999;">⚠️ 僅顯示「哪個年月有公司增減資公告」，來源：公開資訊觀測站'
+            "（MOPS）公司增減資表。尚未區分增資／減資方向、金額、恢復交易日期。</p>",
+            "<ul>",
+        ]
+        for r in records:
+            year, month = r["year_month"][:-2], r["year_month"][-2:]
+            market_text = market_label.get(r["market"], r["market"])
+            lines.append(f"<li>{year}年{month}月（{market_text}）</li>")
+        lines.append("</ul>")
+        return "".join(lines)
 
     # ------------------------------------------------------------------
     # 按鈕
