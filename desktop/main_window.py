@@ -1271,7 +1271,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.intraday_label)
 
         self.candidates_table = QTableWidget()
-        self.candidates_table.setColumnCount(14)
+        self.candidates_table.setColumnCount(13)
         # 表頭第0欄用_CheckableHeaderView取代預設的QHeaderView，讓表頭本身就是一個
         # 「全選/取消全選」的checkbox——2026-08-04新增，必須在setHorizontalHeaderLabels()
         # 之前設定(晚一步取得的header變數才會是這個自訂類別)。
@@ -1279,12 +1279,12 @@ class MainWindow(QMainWindow):
         self.candidates_table.setHorizontalHeader(self._candidates_header)
         # 第0欄是勾選欄(見下面_reload_candidates())，2026-08-04新增，供「加入庫存」/
         # 「加入觀察清單」批次動作使用；其餘欄位順序不變，只是索引整體+1。
-        # 「警示」欄2026-08-09新增，緊接在「訊號(信心%)」欄之後：daily_candidates裡
-        # 投信/外資連續賣超這類「排除型」訊號(signal_name帶daily_screener.WARNING_
-        # SIGNAL_PREFIX前綴，見chart_data.split_candidate_and_warning_signal_text())
-        # 不該跟真正的買進候選混在同一欄，分開一欄才不會誤導使用者把警示當成進場建議。
+        # 2026-08-09曾經把「警示」拆成獨立一欄，但使用者反映會把版面撐開，改回合併在
+        # 同一欄裡顯示(標頭改名「訊號(信心%)/警示」)——警示內容本身仍帶daily_screener.
+        # WARNING_SIGNAL_PREFIX("⚠️排除：")前綴，肉眼還是能跟一般候選訊號區分，只是
+        # 不佔獨立欄寬。
         self.candidates_table.setHorizontalHeaderLabels([
-            "", "股票代號", "名稱", "產業別", "訊號(信心%)", "警示", "收盤價", "進場價", "停損價",
+            "", "股票代號", "名稱", "產業別", "訊號(信心%)/警示", "收盤價", "進場價", "停損價",
             "漲跌幅(%)", "成交量(張)", "SAR值", "SAR狀態", "SAR距離%",
         ])
         # 數值欄位靠右對齊(見下面_reload_candidates()裡的setTextAlignment)時，文字會
@@ -1292,8 +1292,8 @@ class MainWindow(QMainWindow):
         self.candidates_table.setStyleSheet("QTableWidget::item { padding-right: 10px; }")
         # ⚠️ 之前對整個header統一套用Stretch，會讓8欄一律平分寬度——「訊號」欄內容通常
         # 遠比其他欄位長，平分寬度下wrap出來的行數暴增、視覺上看起來像沒有斷行。改成除了
-        # 「訊號」「警示」欄以外都用ResizeToContents(依內容自動給剛好的寬度)，多出來的
-        # 空間留給這兩欄(Stretch)，這樣wrap後的行數才會合理。
+        # 「訊號」欄以外都用ResizeToContents(依內容自動給剛好的寬度)，多出來的空間全部
+        # 留給「訊號」欄(Stretch)，這樣wrap後的行數才會合理。
         header = self.candidates_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         _CANDIDATE_CHECKBOX_COLUMN = 0
@@ -1301,8 +1301,6 @@ class MainWindow(QMainWindow):
         self.candidates_table.setColumnWidth(_CANDIDATE_CHECKBOX_COLUMN, 30)
         _SIGNAL_COLUMN = 4
         header.setSectionResizeMode(_SIGNAL_COLUMN, QHeaderView.ResizeMode.Stretch)
-        _WARNING_COLUMN = 5
-        header.setSectionResizeMode(_WARNING_COLUMN, QHeaderView.ResizeMode.Stretch)
         # 欄寬只有在視窗真正顯示、完成layout後才會是最終數值，_reload_candidates()在
         # __init__()裡就會被呼叫一次(視窗還沒show()、欄寬還是預設值)，resizeRowsToContents()
         # 這時算出來的列高會用到錯誤的欄寬、之後不會自動修正，導致文字被截斷看起來像沒
@@ -3313,9 +3311,8 @@ class MainWindow(QMainWindow):
         self.candidates_table.setSortingEnabled(False)
         self.candidates_table.setRowCount(len(df))
         # 收盤價/進場價/停損價/漲跌幅/成交量/SAR值/SAR距離%——欄位整體+1，因為第0欄是
-        # 2026-08-04新增的勾選欄(見下面迴圈)；2026-08-09新增「警示」欄(索引5)插在
-        # 「訊號」欄之後，原本5之後的數值欄位索引再各自+1。
-        _NUMERIC_COLUMNS = {6, 7, 8, 9, 10, 11, 13}
+        # 2026-08-04新增的勾選欄(見下面迴圈)。
+        _NUMERIC_COLUMNS = {5, 6, 7, 8, 9, 10, 12}
         for row_idx, row in df.reset_index(drop=True).iterrows():
             pct_change = row["pct_change"]
             pct_text = f"{pct_change:+.2f}" if pd.notna(pct_change) else "-"
@@ -3335,24 +3332,22 @@ class MainWindow(QMainWindow):
             sar_value_text = f"{row['sar_value']:.2f}" if pd.notna(row["sar_value"]) else "-"
             sar_status_text = row["sar_status"] if pd.notna(row["sar_status"]) else "-"
             sar_distance_text = f"{row['sar_distance_pct']:+.2f}" if pd.notna(row["sar_distance_pct"]) else "-"
+            # 訊號(候選)跟警示(排除型，帶daily_screener.WARNING_SIGNAL_PREFIX前綴)
+            # 合併顯示在同一欄裡(2026-08-09一度拆成獨立欄位，使用者反映版面被撐開，
+            # 改回合併，欄位標頭改名「訊號(信心%)/警示」)，警示內容本身仍帶「⚠️排除：」
+            # 前綴，肉眼還是分得出來。
             signal_full = row["signal_name"] if pd.notna(row["signal_name"]) else None
-            candidate_full, warning_full = chart_data.split_candidate_and_warning_signal_text(signal_full)
-            signal_display = _truncate_signal_lines(candidate_full)
-            warning_display = _truncate_signal_lines(warning_full)
+            signal_display = _truncate_signal_lines(signal_full)
             values = [
-                row["stock_id"], row["name"], industry_text, signal_display, warning_display, close_text,
+                row["stock_id"], row["name"], industry_text, signal_display, close_text,
                 entry_price_text, stop_loss_text, pct_text, volume_text,
                 sar_value_text, sar_status_text, sar_distance_text,
             ]
-            # 訊號/警示欄位(index 3/4)的tooltip用完整規則清單，不是被截斷成CANDIDATE_
-            # SIGNAL_MAX_LINES行的顯示文字——排序依據(信心分數加總)吃的也是完整清單，
-            # 滑鼠移過去應該看得到被省略掉的規則實際是哪幾條，不是只看到跟儲存格一樣的
-            # 截斷內容。⚠️ 排序依據沿用原始signal_name(含候選+警示混合)的信心分數加總，
-            # 沒有拆開分別排序——分開兩欄只是「顯示」層面，不影響chart_data.py既有的
-            # 排序邏輯，這是刻意的最小改動範圍。
+            # 訊號欄位(index 3)的tooltip用完整規則清單，不是被截斷成CANDIDATE_SIGNAL_MAX_LINES
+            # 行的顯示文字——排序依據(信心分數加總)吃的也是完整清單，滑鼠移過去應該看得到
+            # 被省略掉的規則實際是哪幾條，不是只看到跟儲存格一樣的截斷內容。
             tooltips = list(values)
-            tooltips[3] = candidate_full or "-"
-            tooltips[4] = warning_full or "-"
+            tooltips[3] = signal_full or "-"
             # 第0欄：勾選欄，2026-08-04新增，供「加入庫存」/「加入觀察清單」批次動作用
             # (見_checked_candidate_stock_ids())，跟其餘欄位分開設定(不走下面共用的
             # item_cls/tooltip迴圈，checkbox不需要文字內容/tooltip)。

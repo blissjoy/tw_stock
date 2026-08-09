@@ -28,7 +28,6 @@ from src.presentation.chart_data import (
     load_sar_flip_flags_from_table,
     load_stock_universe_for_date,
     resolve_stock_id,
-    split_candidate_and_warning_signal_text,
 )
 from src.screener.indicator_precompute import compute_indicator_rows
 
@@ -635,33 +634,6 @@ def test_list_candidate_dates_returns_dates_descending():
     ])
 
     assert list_candidate_dates(conn) == ["2026-07-23", "2026-07-22", "2026-07-21"]
-
-
-def test_split_candidate_and_warning_signal_text_separates_by_prefix():
-    signal_name = "R-TREND-14多頭短線進場（92%）\n⚠️排除：R-SCREEN-06外資連續賣超（75%）"
-
-    candidate_text, warning_text = split_candidate_and_warning_signal_text(signal_name)
-
-    assert candidate_text == "R-TREND-14多頭短線進場（92%）"
-    assert warning_text == "⚠️排除：R-SCREEN-06外資連續賣超（75%）"
-
-
-def test_split_candidate_and_warning_signal_text_all_candidates_no_warning():
-    candidate_text, warning_text = split_candidate_and_warning_signal_text("R-TREND-14多頭短線進場（92%）")
-    assert candidate_text == "R-TREND-14多頭短線進場（92%）"
-    assert warning_text is None
-
-
-def test_split_candidate_and_warning_signal_text_all_warnings_no_candidate():
-    signal_name = "⚠️排除：R-SCREEN-06投信連續賣超（75%）\n⚠️排除：R-SCREEN-06外資連續賣超（75%）"
-    candidate_text, warning_text = split_candidate_and_warning_signal_text(signal_name)
-    assert candidate_text is None
-    assert warning_text == signal_name
-
-
-def test_split_candidate_and_warning_signal_text_none_input():
-    assert split_candidate_and_warning_signal_text(None) == (None, None)
-    assert split_candidate_and_warning_signal_text("") == (None, None)
 
 
 def test_load_price_history_returns_ascending_order_and_respects_limit():
