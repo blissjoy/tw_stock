@@ -4314,8 +4314,17 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         if (invest and invest.get("text")) or (foreign and foreign.get("text")):
             invest_html = f'投信：<span style="color:{invest["color"]};">{invest["text"]}</span>' if invest and invest.get("text") else "投信：-"
             foreign_html = f'外資：<span style="color:{foreign["color"]};">{foreign["text"]}</span>' if foreign and foreign.get("text") else "外資：-"
+            # 2026-08-09使用者反映：這裡看「連續同方向天數」，跟上面「買賣力道變化」看
+            # 「近N日加總後比較」是不同算法(見huang_chip_signals.classify_institutional_
+            # streak()的docstring：連續天數要滿3天才給確定方向，天天翻來覆去時即使加總
+            # 是正的也只會顯示「方向未定」)，同一個投資人分類可能同時出現看似矛盾的結論，
+            # 兩者都對，只是評估角度不同——加這句說明，避免使用者誤以為系統算錯。
             lines.append(
-                f'<p style="margin-top:10px;"><b>法人近期籌碼</b></p><p>{invest_html}　{foreign_html}</p>'
+                '<p style="margin-top:10px;"><b>法人近期籌碼</b></p>'
+                '<p style="color:#999999; font-size:11px;">⚠️ 這裡看「從今天起連續同方向天數」'
+                '(未連續滿3天顯示「方向未定」)，跟上面「買賣力道變化」的「近N日加總後比較」'
+                '是不同算法，兩者角度不同，可能同時出現看似矛盾的結論，都正確。</p>'
+                f'<p>{invest_html}　{foreign_html}</p>'
             )
 
         lines.append('<p style="margin-top:10px;"><b>大戶/散戶持股變化(週)</b></p>')
