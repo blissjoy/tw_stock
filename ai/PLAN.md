@@ -8381,3 +8381,39 @@ DB上實測確認結果不變，再考慮動共用函式)。
 
 真實驗證：`pytest tests/ -q`1066個測試全數通過；本機真實DB全市場掃描
 候選清單逐筆比對(改動前後byte-for-byte相同)+ 耗時量測(63.3秒→56.2秒)。
+
+---
+
+## 觀察清單黃豐凱籌碼分析法3組欄位搬進「個股明細」法人籌碼分析下方（2026-08-09）
+
+使用者要求把觀察清單既有的「法人近期籌碼(投信/外資)」「大戶/散戶持股變化(週)」
+「技術型態(均線狀態/週K型態)」3組欄位，加進「個股明細」的「📊 法人籌碼分析」
+下方顯示。「法人買賣超(40/20/10/5日張數)」那組刻意沒有搬過來——「個股明細」
+既有的「法人買賣總覽」表格已經涵蓋1日~1年多種天期的累計買賣超，兩者功能重複。
+
+**做法**：完全重用`src/presentation/huang_chip_data.py`的`load_huang_chip_row()`，
+不重新實作查詢/判讀邏輯——這個函式原本只給觀察清單的批次版本(`load_huang_chip_
+rows_batch()`)包一層，單股查詢版本本來就存在、只是還沒有其他呼叫端在用，這次
+直接重用，跟觀察清單顯示的是同一份計算結果。
+
+- **web版**(`dashboard/app.py`)：新增`_render_huang_chip_supplementary(conn,
+  stock_id)`，緊接在既有`_render_institutional_flow_analysis(flow, momentum)`
+  呼叫之後。
+- **桌面版**(`desktop/main_window.py`)：新增`_build_huang_chip_supplementary_
+  html(stock_id)`，串接在`_build_institutional_flow_analysis_html()`回傳的
+  HTML字串後面。
+
+兩邊各自依照自己平台既有的呈現方式實作(web用`st.markdown`，桌面版組HTML字串)，
+內容與配色(投信/外資連續買賣超的紅/綠/灰、大戶紅漲綠跌/散戶相反、均線上揚紅/
+下彎綠)跟觀察清單表格完全一致。大戶/散戶持股變化目前只有觀察清單裡的股票會
+自動更新(見`_maybe_fetch_missing_holder_shares()`)，非觀察清單股票查無資料時
+沿用同一句既有提醒文字「大戶/散戶持股變化目前只有觀察清單裡的股票會自動更新」，
+不是靜默留白。
+
+真實驗證：`pytest tests/ -q`1066個測試全數通過(沒有新增測試——這次只是重用既有
+已測試函式的UI組裝，跟`_build_institutional_flow_analysis_html()`等既有同類HTML
+組裝函式一樣，本專案對這層UI組裝一貫用真實截圖驗證取代單元測試)。web版本機啟動
+真實Streamlit、Playwright截圖確認2330台積電「個股明細」正確顯示3組新內容(法人
+近期籌碼：投信/外資皆「方向未定」；大戶/散戶持股變化：因2330當時不在觀察清單
+顯示提醒文字；技術型態：P(2370) MA20下彎 MA60上揚、大量高之上)。桌面版啟動真實
+PySide6 GUI、程式化捲動個股明細分頁後截圖，確認內容與web版逐字一致。

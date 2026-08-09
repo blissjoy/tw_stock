@@ -4152,7 +4152,11 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         table += self._build_institutional_cost_html(cost, periods)
         flow = stock_detail_data.load_institutional_flow_analysis(self.conn, stock_id)
         momentum = stock_detail_data.load_institutional_momentum_analysis(self.conn, stock_id)
-        return table + self._build_institutional_flow_analysis_html(flow, momentum)
+        return (
+            table
+            + self._build_institutional_flow_analysis_html(flow, momentum)
+            + self._build_huang_chip_supplementary_html(stock_id)
+        )
 
     @staticmethod
     def _build_institutional_cost_html(cost: dict | None, periods: list[str]) -> str:
@@ -4291,6 +4295,47 @@ iframe {{ width: 100%; height: 900px; border: none; }}
                         f"較前{label}（{prior_lots:+,.0f}張）{trend}"
                         f'——{"持續買進" if trend in ("買超力道增強", "由賣轉買") else ("持續賣出" if trend in ("賣壓加重", "由買轉賣") else "力道趨緩，方向未明確轉變")}。</p>'
                     )
+
+        return "".join(lines)
+
+    def _build_huang_chip_supplementary_html(self, stock_id: str) -> str:
+        """觀察清單黃豐凱籌碼分析法(見src/presentation/huang_chip_data.py)的「法人近期
+        籌碼(投信/外資)」「大戶/散戶持股變化(週)」「技術型態(均線狀態/週K型態)」3組，
+        2026-08-09使用者要求搬到「個股明細」的「📊 法人籌碼分析」下方顯示——重用
+        huang_chip_data.load_huang_chip_row()既有的查詢/判讀邏輯，跟觀察清單顯示的
+        是同一份計算結果，不重新實作一次。「法人買賣超(K~R，40/20/10/5日張數)」那組
+        刻意不搬過來：上面「法人買賣總覽」表格已經有涵蓋1日~1年多種天期的累計買賣超，
+        兩者功能重複。
+        """
+        chip = huang_chip_data.load_huang_chip_row(self.conn, stock_id)
+        lines: list[str] = []
+
+        invest, foreign = chip["invest_streak"], chip["foreign_streak"]
+        if (invest and invest.get("text")) or (foreign and foreign.get("text")):
+            invest_html = f'投信：<span style="color:{invest["color"]};">{invest["text"]}</span>' if invest and invest.get("text") else "投信：-"
+            foreign_html = f'外資：<span style="color:{foreign["color"]};">{foreign["text"]}</span>' if foreign and foreign.get("text") else "外資：-"
+            lines.append(
+                f'<p style="margin-top:10px;"><b>法人近期籌碼</b></p><p>{invest_html}　{foreign_html}</p>'
+            )
+
+        lines.append('<p style="margin-top:10px;"><b>大戶/散戶持股變化(週)</b></p>')
+        holder = chip["holder_change"]
+        if holder is None:
+            lines.append('<p style="color:#999999;">尚未有資料（大戶/散戶持股變化目前只有觀察清單裡的股票會自動更新）</p>')
+        else:
+            lines.append(
+                f'<p><span style="color:{holder["whale"]["color"]};">{holder["whale"]["text"]}</span>　'
+                f'<span style="color:{holder["retail"]["color"]};">{holder["retail"]["text"]}</span></p>'
+            )
+
+        ma, weekly = chip["ma_price_position"], chip["weekly_volume_pattern"]
+        if ma or weekly:
+            lines.append('<p style="margin-top:10px;"><b>技術型態</b></p>')
+            if ma:
+                ma_html = "　".join(f'<span style="color:{line["color"]};">{line["text"]}</span>' for line in ma["lines"])
+                lines.append(f"<p>{ma_html}</p>")
+            if weekly:
+                lines.append(f"<p>{weekly['pattern']}（{weekly['reference_week_start']}）</p>")
 
         return "".join(lines)
 

@@ -505,6 +505,44 @@ def main() -> None:
                         f"較前{label}（{prior_lots:+,.0f}張）{trend}——{verb}。</p>", unsafe_allow_html=True,
                     )
 
+    def _render_huang_chip_supplementary(conn, stock_id: str) -> None:
+        """觀察清單黃豐凱籌碼分析法(見src/presentation/huang_chip_data.py)的「法人近期
+        籌碼(投信/外資)」「大戶/散戶持股變化(週)」「技術型態(均線狀態/週K型態)」3組，
+        2026-08-09使用者要求搬到「個股明細」的「📊 法人籌碼分析」下方顯示——重用
+        huang_chip_data.load_huang_chip_row()既有的查詢/判讀邏輯，跟觀察清單顯示的
+        是同一份計算結果，不重新實作一次。「法人買賣超(K~R，40/20/10/5日張數)」那組
+        刻意不搬過來：上面「法人買賣總覽」表格已經有涵蓋1日~1年多種天期的累計買賣超，
+        兩者功能重複。
+        """
+        chip = huang_chip_data.load_huang_chip_row(conn, stock_id)
+
+        invest, foreign = chip["invest_streak"], chip["foreign_streak"]
+        if (invest and invest.get("text")) or (foreign and foreign.get("text")):
+            st.markdown("**法人近期籌碼**")
+            c1, c2 = st.columns(2)
+            invest_html = f'投信：<span style="color:{invest["color"]};">{invest["text"]}</span>' if invest and invest.get("text") else "投信：-"
+            foreign_html = f'外資：<span style="color:{foreign["color"]};">{foreign["text"]}</span>' if foreign and foreign.get("text") else "外資：-"
+            c1.markdown(invest_html, unsafe_allow_html=True)
+            c2.markdown(foreign_html, unsafe_allow_html=True)
+
+        st.markdown("**大戶/散戶持股變化(週)**")
+        holder = chip["holder_change"]
+        if holder is None:
+            st.caption("尚未有資料（大戶/散戶持股變化目前只有觀察清單裡的股票會自動更新）")
+        else:
+            c1, c2 = st.columns(2)
+            c1.markdown(f'<span style="color:{holder["whale"]["color"]};">{holder["whale"]["text"]}</span>', unsafe_allow_html=True)
+            c2.markdown(f'<span style="color:{holder["retail"]["color"]};">{holder["retail"]["text"]}</span>', unsafe_allow_html=True)
+
+        ma, weekly = chip["ma_price_position"], chip["weekly_volume_pattern"]
+        if ma or weekly:
+            st.markdown("**技術型態**")
+            if ma:
+                for line in ma["lines"]:
+                    st.markdown(f'<span style="color:{line["color"]};">{line["text"]}</span>　', unsafe_allow_html=True)
+            if weekly:
+                st.write(f"{weekly['pattern']}（{weekly['reference_week_start']}）")
+
     def _render_margin_maintenance_analysis(maintenance: dict | None) -> None:
         """融資維持率分析文字，照抄desktop/main_window.py的
         _build_margin_maintenance_analysis_html()，理論依據見該函式docstring。"""
@@ -612,6 +650,7 @@ def main() -> None:
                 flow = stock_detail_data.load_institutional_flow_analysis(conn, stock_id)
                 momentum = stock_detail_data.load_institutional_momentum_analysis(conn, stock_id)
                 _render_institutional_flow_analysis(flow, momentum)
+                _render_huang_chip_supplementary(conn, stock_id)
 
         with st.expander("主力進出", expanded=True):
             st.caption("⚠️ 尚未串接資料來源（需要券商分點籌碼資料，schema已預留broker_chips表，待FinMind付費方案開通後才能接上）。")
