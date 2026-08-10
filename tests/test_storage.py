@@ -149,7 +149,12 @@ def test_ensure_schema_adds_ma200_column_to_pre_existing_daily_indicators_table(
     這組「多頭排列」慣例分開，見schema.sql說明)是在daily_indicators表已經有真實使用者
     資料後才新增的欄位——CREATE TABLE IF NOT EXISTS對已存在的表不會自動補上新欄位，
     這裡模擬「舊版DB(還沒有ma200欄位)」的情境，驗證ensure_schema()會用ALTER TABLE
-    補上，不會讓既有的daily_indicators資料/使用者踩到「no such column: ma200」。"""
+    補上，不會讓既有的daily_indicators資料/使用者踩到「no such column: ma200」。
+
+    2026-08-10一併驗證trend_is_at_high/trend_is_at_low/trend_swing_pct(「外資/投信
+    累計買超」篩選的底部/追價快取，見schema.sql說明)的遷移邏輯——這3個欄位是在同一個
+    `_migrate_schema()`裡新增的，用同一個模擬「舊版DB」的測試一併驗證，不用另外重複
+    建一個測試案例。"""
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -166,14 +171,19 @@ def test_ensure_schema_adds_ma200_column_to_pre_existing_daily_indicators_table(
 
     columns = {row[1] for row in conn.execute("PRAGMA table_info(daily_indicators)").fetchall()}
     assert "ma200" in columns
+    assert {"trend_is_at_high", "trend_is_at_low", "trend_swing_pct"} <= columns
 
     upsert_daily_indicators(conn, [
         {"stock_id": "2330", "date": "2026-08-03", "ma5": 1.0, "ma10": 1.0, "ma20": 1.0,
          "ma60": 1.0, "ma120": 1.0, "ma200": 12.0, "ma240": 1.0, "sar_value": 1.0,
-         "sar_is_bull": True, "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
+         "sar_is_bull": True, "sar_flip_days_ago": 1,
+         "trend_is_at_high": 0, "trend_is_at_low": 1, "trend_swing_pct": 0.15,
+         "updated_at": "2026-08-03T17:03:00"},
     ])
-    row = conn.execute("SELECT ma200 FROM daily_indicators WHERE stock_id = '2330'").fetchone()
-    assert row[0] == 12.0
+    row = conn.execute(
+        "SELECT ma200, trend_is_at_low, trend_swing_pct FROM daily_indicators WHERE stock_id = '2330'"
+    ).fetchone()
+    assert row == (12.0, 1, 0.15)
 
 
 def test_ensure_schema_adds_listing_type_column_to_pre_existing_stocks_table():

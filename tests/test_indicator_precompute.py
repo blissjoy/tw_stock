@@ -138,3 +138,36 @@ def test_sar_flip_days_ago_series_matches_official_function_at_every_position():
         if official is None:
             continue  # 官方函式在截斷序列裡找不到翻轉點時回傳None，這裡改成累加計數，語意上的差異已在docstring說明
         assert fast_result[i] == official, f"mismatch at position {i}"
+
+
+def test_compute_indicator_rows_trend_columns_match_compute_trend_position():
+    """驗證這裡沒有重新定義趨勢位置算法，trend_is_at_high/trend_is_at_low/trend_
+    swing_pct的值要跟直接呼叫compute_trend_position()一致——借用tests/test_trend_
+    position.py同款的「跌深後打平在低點」價格曲線(60天)當ground truth。"""
+    from src.indicators.trend_position import compute_trend_position
+
+    n = 60
+    dates = pd.date_range("2026-01-01", periods=n, freq="B")
+    close = []
+    for i in range(n):
+        if i < 20:
+            close.append(100 + i * 1.0)
+        elif i < 50:
+            close.append(120 - (i - 20) * 0.8)
+        else:
+            close.append(96.0)
+    close_series = pd.Series(close, index=dates)
+    df = pd.DataFrame(
+        {"open": close, "high": close_series + 0.5, "low": close_series - 0.5, "close": close_series, "volume": [1000] * n},
+        index=dates,
+    )
+    expected = compute_trend_position(df["high"], df["low"], df["close"])
+    target_date = dates[-1].strftime("%Y-%m-%d")
+
+    rows = compute_indicator_rows("2330", df, {target_date})
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["trend_is_at_high"] == int(bool(expected["is_at_high"].iloc[-1]))
+    assert row["trend_is_at_low"] == int(bool(expected["is_at_low"].iloc[-1])) == 1
+    assert row["trend_swing_pct"] == float(expected["swing_pct"].iloc[-1])

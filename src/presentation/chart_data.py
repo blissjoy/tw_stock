@@ -20,7 +20,6 @@ from src.indicators.kd import compute_kd
 from src.indicators.macd import compute_macd
 from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned, sma
 from src.indicators.parabolic_sar import compute_sar, sar_flipped_within
-from src.indicators.trend_position import compute_trend_position
 from src.patterns import chart_overlays
 
 _CONFIDENCE_PATTERN = re.compile(r"（(\d+)%）")
@@ -238,9 +237,76 @@ INSTITUTIONAL_ACCUMULATION_WINDOW_DAYS_DEFAULT = 20  # 約1個月交易日，跟
 # data._MOMENTUM_PERIODS的20天天期同一個量級，不是書中規則，工程估計值
 INSTITUTIONAL_ACCUMULATION_MIN_RATIO_PCT_DEFAULT = 5.0  # 工程估計起始值，非回測驗證
 # 過的數字，UI上開放使用者自行調整
-# is_at_low(底部)判斷需要的OHLC回看天數，跟SAR_FLIP_LOOKBACK_DAYS同一個量級/理由
-# (trend_position.compute_trend_position()是路徑相關的狀態機，需要足夠暖身期)
-INSTITUTIONAL_ACCUMULATION_TREND_LOOKBACK_DAYS = 250
+
+
+def _institutional_accumulation_cutoff_date(conn, window_days: int, as_of_date: str | None) -> str | None:
+    """回傳『以as_of_date為準(None代表資料庫目前最新)，往回數第window_days個實際有
+    股價資料的交易日』的日期字串，供`load_institutional_accumulation_flags()`把SQL
+    window function的排序範圍限定在這個日期之後——理由跟`daily_screener.py`的`_
+    trading_day_cutoff()`完全相同(那裡是「以現在為準」，這裡額外支援`as_of_date`
+    可以是候選清單正在瀏覽的歷史日期)：window function若沒有下界，會對每檔股票的
+    完整歷史排序一次才篩出最近N天，2026-08-10在正式DB上實測要9.8秒+7.5秒，是trend_
+    position查表優化後剩下的主要瓶頸。用`stock_prices`的實際交易日清單(不是往回推算
+    N個日曆天)，理由跟`_trading_day_cutoff()`一樣：週末/國定假日不是交易日。查無資料
+    回傳None(呼叫端會退回不設下界，正確性不受影響，只是拿不到這層效能優化)。
+    """
+    date_clause = "WHERE date <= ?" if as_of_date is not None else ""
+    params: list = [as_of_date] if as_of_date is not None else []
+    params.append(window_days)
+    row = conn.execute(
+        f"SELECT date FROM (SELECT DISTINCT date FROM stock_prices {date_clause} ORDER BY date DESC LIMIT ?) ORDER BY date LIMIT 1",
+        params,
+    ).fetchone()
+    return row[0] if row else None
+def load_trend_position_flags_from_table(
+    conn, stock_ids: list[str], as_of_date: str | None,
+) -> dict[str, dict]:
+    """回傳{stock_id: {"is_at_high": bool, "is_at_low": bool, "swing_pct": float}}，
+    查`daily_indicators`快取表(見`src/data/schema.sql`的trend_is_at_high/trend_is_
+    at_low/trend_swing_pct說明，`src/screener/indicator_precompute.py`負責寫入)。
+
+    2026-08-10新增：這是`load_institutional_accumulation_flags()`原本即時呼叫
+    `compute_trend_position()`的查表版本，理由跟`load_sar_flip_flags_from_table()`
+    完全相同——`compute_trend_position()`是逐股票Python迴圈、路徑相關、無法簡單向量化
+    的指標，2026-08-09實測對全市場~2500檔即時運算要約27秒，改成查表後只是單一次索引
+    查詢。`compute_indicator_rows()`本身不變、不刪除(precompute管線的真正計算來源，
+    也保留給既有測試使用)。
+
+    as_of_date為None時取每檔股票資料裡最新一筆(不限制日期)；有指定時精確取該日期那
+    一列，跟其他`load_*_flags_from_table()`系列函式的既有慣例一致(候選清單正在瀏覽
+    的那一天為準，不是DB目前實際累積到哪一天)。查無紀錄(還沒執行過`scripts/backfill_
+    daily_indicators.py`、或資料不足算不出來)的股票不會出現在回傳dict裡。
+    """
+    if not stock_ids:
+        return {}
+    placeholders = ",".join("?" * len(stock_ids))
+    if as_of_date is not None:
+        cur = conn.execute(
+            f"""
+            SELECT stock_id, trend_is_at_high, trend_is_at_low, trend_swing_pct
+            FROM daily_indicators WHERE stock_id IN ({placeholders}) AND date = ?
+            """,
+            [*stock_ids, as_of_date],
+        )
+    else:
+        cur = conn.execute(
+            f"""
+            SELECT stock_id, trend_is_at_high, trend_is_at_low, trend_swing_pct FROM (
+                SELECT stock_id, trend_is_at_high, trend_is_at_low, trend_swing_pct,
+                       ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC) AS rn
+                FROM daily_indicators
+                WHERE stock_id IN ({placeholders})
+            )
+            WHERE rn = 1
+            """,
+            stock_ids,
+        )
+    result: dict[str, dict] = {}
+    for stock_id, is_at_high, is_at_low, swing_pct in cur.fetchall():
+        if is_at_high is None or is_at_low is None:
+            continue
+        result[stock_id] = {"is_at_high": bool(is_at_high), "is_at_low": bool(is_at_low), "swing_pct": swing_pct}
+    return result
 
 
 def load_institutional_accumulation_flags(
@@ -254,21 +320,42 @@ def load_institutional_accumulation_flags(
     `apply_candidate_filters()`裡`institutional_accumulation_option`的處理方式。
 
     投信/外資最近`window_days`個交易日(截至`as_of_date`)的買賣超股數加總，除以同期間
-    股票總成交量加總，得到「累計買超佔均量%」；`require_at_low=True`時只保留`trend_
-    position.compute_trend_position()`判定「目前處於本波段低檔」(is_at_low)的股票，
+    股票總成交量加總，得到「累計買超佔均量%」；`require_at_low=True`時只保留`load_
+    trend_position_flags_from_table()`查出「目前處於本波段低檔」(is_at_low)的股票，
     `False`時底部/追價都保留，但標籤文字仍會註明是哪一種，供使用者自行判斷。
+
+    2026-08-10改版：「底部/追價」判斷改成查`daily_indicators`快取表(見`load_trend_
+    position_flags_from_table()`)，不再即時呼叫`compute_trend_position()`——比照
+    SAR翻轉的效能優化模式，全市場~2500檔即時運算約27秒，改成查表後大幅縮短。**部署
+    這個改動後需要手動執行一次`scripts/backfill_daily_indicators.py`**(理由跟該
+    腳本docstring說明的SAR/均線欄位一樣，見schema.sql的trend_is_at_high/trend_is_
+    at_low/trend_swing_pct欄位說明)，沒回補過的股票在這裡會被當成查無資料，`is_at_
+    low`預設為False(視為「追價」而非「底部」，保守起見不誤判成底部)。
     """
     if not stock_ids:
         return {}
     underlying_types = INSTITUTIONAL_ACCUMULATION_INVESTOR_TYPES[investor_type]
 
+    # ⚠️ 2026-08-10效能修正：改成查daily_indicators表解決trend_position這一段的瓶頸後
+    # 才發現，下面這兩段SQL window function本身也有效能問題——ROW_NUMBER() OVER
+    # (PARTITION BY stock_id ORDER BY date DESC)會對「符合WHERE條件的全部列」先排序
+    # 編號、才篩rn<=window_days，如果WHERE只有`date <= as_of_date`(沒有下界)，等於要
+    # 對每檔股票的完整歷史排序一次，不是只排序最近window_days天——對正式DB(institutional_
+    # investors/stock_prices都已累積上百萬筆)實測要9.8秒(法人)+7.5秒(成交量)，是trend_
+    # position查表優化後剩下的主要瓶頸。加上`_institutional_accumulation_cutoff_date()`
+    # 算出的下界日期，讓資料庫只需要排序這個窗口內的列，不用排序全部歷史。
+    cutoff_date = _institutional_accumulation_cutoff_date(conn, window_days, as_of_date)
+
     placeholders = ",".join("?" * len(stock_ids))
     type_placeholders = ",".join("?" * len(underlying_types))
     date_clause = "AND date <= ?" if as_of_date is not None else ""
+    date_clause += " AND date >= ?" if cutoff_date is not None else ""
 
     net_params: list = [*stock_ids, *underlying_types]
     if as_of_date is not None:
         net_params.append(as_of_date)
+    if cutoff_date is not None:
+        net_params.append(cutoff_date)
     net_params.append(window_days)
     net_rows = conn.execute(
         f"""
@@ -293,6 +380,8 @@ def load_institutional_accumulation_flags(
     volume_params: list = [*stock_ids]
     if as_of_date is not None:
         volume_params.append(as_of_date)
+    if cutoff_date is not None:
+        volume_params.append(cutoff_date)
     volume_params.append(window_days)
     volume_rows = conn.execute(
         f"""
@@ -316,21 +405,12 @@ def load_institutional_accumulation_flags(
     if not passing_ids:
         return {}
 
-    ohlc = _fetch_recent_columns_batched(
-        conn, passing_ids, ["high", "low", "close"],
-        INSTITUTIONAL_ACCUMULATION_TREND_LOOKBACK_DAYS, as_of_date=as_of_date,
-    )
+    trend_flags = load_trend_position_flags_from_table(conn, passing_ids, as_of_date)
 
     labels: dict[str, str] = {}
     for stock_id in passing_ids:
         ratio_pct = cumulative_net[stock_id] / cumulative_volume[stock_id] * 100
-        rows = ohlc.get(stock_id, {})
-        is_at_low = False
-        if len(rows.get("close", [])) >= 2:
-            position = compute_trend_position(
-                pd.Series(rows["high"]), pd.Series(rows["low"]), pd.Series(rows["close"]),
-            )
-            is_at_low = bool(position["is_at_low"].iloc[-1])
+        is_at_low = trend_flags.get(stock_id, {}).get("is_at_low", False)
         if require_at_low and not is_at_low:
             continue
         zone = "底部" if is_at_low else "追價"

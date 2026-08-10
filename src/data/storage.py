@@ -35,6 +35,10 @@ def _migrate_schema(conn) -> None:
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(daily_indicators)").fetchall()}
     if "ma200" not in existing_columns:
         conn.execute("ALTER TABLE daily_indicators ADD COLUMN ma200 REAL")
+    if "trend_is_at_high" not in existing_columns:
+        conn.execute("ALTER TABLE daily_indicators ADD COLUMN trend_is_at_high INTEGER")
+        conn.execute("ALTER TABLE daily_indicators ADD COLUMN trend_is_at_low INTEGER")
+        conn.execute("ALTER TABLE daily_indicators ADD COLUMN trend_swing_pct REAL")
 
     stocks_columns = {row[1] for row in conn.execute("PRAGMA table_info(stocks)").fetchall()}
     if "listing_type" not in stocks_columns:
@@ -247,19 +251,24 @@ def upsert_daily_data_status(conn: sqlite3.Connection, iso_date: str, is_intrada
 
 def upsert_daily_indicators(conn: sqlite3.Connection, rows: list[dict]) -> None:
     """rows的每個dict需含 stock_id/date/ma5/ma10/ma20/ma60/ma120/ma200/ma240/sar_value/
-    sar_is_bull/sar_flip_days_ago/updated_at，見schema.sql的daily_indicators說明。
-    來源見src/screener/indicator_precompute.py。"""
+    sar_is_bull/sar_flip_days_ago/trend_is_at_high/trend_is_at_low/trend_swing_pct/
+    updated_at，見schema.sql的daily_indicators說明。來源見
+    src/screener/indicator_precompute.py。"""
     conn.executemany(
         """
         INSERT INTO daily_indicators
-            (stock_id, date, ma5, ma10, ma20, ma60, ma120, ma200, ma240, sar_value, sar_is_bull, sar_flip_days_ago, updated_at)
+            (stock_id, date, ma5, ma10, ma20, ma60, ma120, ma200, ma240, sar_value, sar_is_bull,
+             sar_flip_days_ago, trend_is_at_high, trend_is_at_low, trend_swing_pct, updated_at)
         VALUES
-            (:stock_id, :date, :ma5, :ma10, :ma20, :ma60, :ma120, :ma200, :ma240, :sar_value, :sar_is_bull, :sar_flip_days_ago, :updated_at)
+            (:stock_id, :date, :ma5, :ma10, :ma20, :ma60, :ma120, :ma200, :ma240, :sar_value, :sar_is_bull,
+             :sar_flip_days_ago, :trend_is_at_high, :trend_is_at_low, :trend_swing_pct, :updated_at)
         ON CONFLICT(stock_id, date) DO UPDATE SET
             ma5 = excluded.ma5, ma10 = excluded.ma10, ma20 = excluded.ma20,
             ma60 = excluded.ma60, ma120 = excluded.ma120, ma200 = excluded.ma200, ma240 = excluded.ma240,
             sar_value = excluded.sar_value, sar_is_bull = excluded.sar_is_bull,
-            sar_flip_days_ago = excluded.sar_flip_days_ago, updated_at = excluded.updated_at
+            sar_flip_days_ago = excluded.sar_flip_days_ago,
+            trend_is_at_high = excluded.trend_is_at_high, trend_is_at_low = excluded.trend_is_at_low,
+            trend_swing_pct = excluded.trend_swing_pct, updated_at = excluded.updated_at
         """,
         rows,
     )

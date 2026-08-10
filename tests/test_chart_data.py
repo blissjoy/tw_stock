@@ -29,6 +29,7 @@ from src.presentation.chart_data import (
     load_price_history,
     load_sar_flip_flags_from_table,
     load_stock_universe_for_date,
+    load_trend_position_flags_from_table,
     resolve_stock_id,
 )
 from src.screener.indicator_precompute import compute_indicator_rows
@@ -395,9 +396,11 @@ def test_load_stock_universe_for_date_breaks_confidence_ties_by_sar_distance_pct
     upsert_daily_indicators(conn, [
         {"stock_id": "1101", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": 52.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
          "updated_at": "2026-07-23T18:00:00"},  # (52-50)/50*100 = +4%
         {"stock_id": "3008", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": 1900.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
          "updated_at": "2026-07-23T18:00:00"},  # (1900-2000)/2000*100 = -5%
     ])
 
@@ -429,9 +432,11 @@ def test_load_stock_universe_for_date_breaks_remaining_ties_by_volume():
     upsert_daily_indicators(conn, [
         {"stock_id": "1101", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": 52.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
          "updated_at": "2026-07-23T18:00:00"},  # (52-50)/50*100 = +4%
         {"stock_id": "3008", "date": "2026-07-23", "ma5": None, "ma10": None, "ma20": None, "ma60": None,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": 2080.0, "sar_is_bull": True, "sar_flip_days_ago": 3,
+         "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
          "updated_at": "2026-07-23T18:00:00"},  # (2080-2000)/2000*100 = +4%，跟1101同分
     ])
 
@@ -899,7 +904,8 @@ def test_load_sar_flip_flags_from_table_false_when_bullish_but_below_ma200():
     upsert_daily_indicators(conn, [
         {"stock_id": "3085", "date": "2026-08-03", "ma5": 9.6, "ma10": 9.4, "ma20": 9.2,
          "ma60": 9.0, "ma120": 9.8, "ma200": 12.0, "ma240": 8.0, "sar_value": 9.0, "sar_is_bull": True,
-         "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
+         "sar_flip_days_ago": 1, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
+         "updated_at": "2026-08-03T17:03:00"},
     ])
 
     flags = load_sar_flip_flags_from_table(conn, ["3085"], direction="多頭", within_days=1, as_of_date="2026-08-03")
@@ -918,7 +924,8 @@ def test_load_sar_flip_flags_from_table_true_when_bullish_and_above_ma200():
     upsert_daily_indicators(conn, [
         {"stock_id": "1742", "date": "2026-08-03", "ma5": 16.8, "ma10": 16.5, "ma20": 16.0,
          "ma60": 15.5, "ma120": 15.0, "ma200": 14.0, "ma240": 20.0, "sar_value": 15.85, "sar_is_bull": True,
-         "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
+         "sar_flip_days_ago": 1, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
+         "updated_at": "2026-08-03T17:03:00"},
     ])
 
     flags = load_sar_flip_flags_from_table(conn, ["1742"], direction="多頭", within_days=1, as_of_date="2026-08-03")
@@ -938,7 +945,8 @@ def test_load_sar_flip_flags_from_table_false_when_ma200_missing():
     upsert_daily_indicators(conn, [
         {"stock_id": "6666", "date": "2026-08-03", "ma5": 9.6, "ma10": 9.4, "ma20": 9.2,
          "ma60": 9.0, "ma120": None, "ma200": None, "ma240": None, "sar_value": 9.0, "sar_is_bull": True,
-         "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
+         "sar_flip_days_ago": 1, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
+         "updated_at": "2026-08-03T17:03:00"},
     ])
 
     flags = load_sar_flip_flags_from_table(conn, ["6666"], direction="多頭", within_days=1, as_of_date="2026-08-03")
@@ -958,7 +966,8 @@ def test_load_sar_flip_flags_from_table_false_when_bearish_but_above_ma200():
     upsert_daily_indicators(conn, [
         {"stock_id": "5555", "date": "2026-08-03", "ma5": 14.6, "ma10": 14.8, "ma20": 15.0,
          "ma60": 13.0, "ma120": 12.0, "ma200": 12.0, "ma240": 20.0, "sar_value": 15.5, "sar_is_bull": False,
-         "sar_flip_days_ago": 1, "updated_at": "2026-08-03T17:03:00"},
+         "sar_flip_days_ago": 1, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
+         "updated_at": "2026-08-03T17:03:00"},
     ])
 
     flags = load_sar_flip_flags_from_table(conn, ["5555"], direction="空頭", within_days=1, as_of_date="2026-08-03")
@@ -2001,6 +2010,50 @@ def _trend_position_price_rows(stock_id: str, dates: list[str], at_low: bool) ->
     ]
 
 
+def test_load_trend_position_flags_from_table_matches_live_computed_result():
+    """跟均線/SAR查表函式同理：查表結果要跟直接呼叫compute_trend_position()一致。"""
+    from src.indicators.trend_position import compute_trend_position
+
+    conn = _fresh_conn()
+    dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-01", periods=60)]
+    upsert_stocks(conn, [{"stock_id": "1111", "name": "底部股", "market": "TWSE", "industry": None, "updated_at": dates[-1]}])
+    rows = _trend_position_price_rows("1111", dates, at_low=True)
+    upsert_stock_prices(conn, rows)
+    _populate_indicators(conn, "1111", rows)
+
+    table_result = load_trend_position_flags_from_table(conn, ["1111"], as_of_date=dates[-1])
+
+    df = pd.DataFrame(rows)
+    df.index = pd.to_datetime(df["date"])
+    live_expected = compute_trend_position(df["high"], df["low"], df["close"])
+
+    assert table_result["1111"]["is_at_low"] == bool(live_expected["is_at_low"].iloc[-1]) is True
+    assert table_result["1111"]["is_at_high"] == bool(live_expected["is_at_high"].iloc[-1]) is False
+
+
+def test_load_trend_position_flags_from_table_none_as_of_date_takes_latest_row():
+    conn = _fresh_conn()
+    dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-01", periods=60)]
+    upsert_stocks(conn, [{"stock_id": "1111", "name": "底部股", "market": "TWSE", "industry": None, "updated_at": dates[-1]}])
+    rows = _trend_position_price_rows("1111", dates, at_low=True)
+    upsert_stock_prices(conn, rows)
+    _populate_indicators(conn, "1111", rows)
+
+    result = load_trend_position_flags_from_table(conn, ["1111"], as_of_date=None)
+
+    assert result["1111"]["is_at_low"] is True
+
+
+def test_load_trend_position_flags_from_table_missing_stock_not_in_result():
+    conn = _fresh_conn()
+    assert load_trend_position_flags_from_table(conn, ["9999"], as_of_date="2026-01-01") == {}
+
+
+def test_load_trend_position_flags_from_table_empty_stock_ids_returns_empty_dict():
+    conn = _fresh_conn()
+    assert load_trend_position_flags_from_table(conn, [], as_of_date="2026-01-01") == {}
+
+
 def test_load_institutional_accumulation_flags_labels_bottom_vs_chase():
     """兩檔股票外資近20天累計買超佔均量比例都達門檻，差別只在股價位置：A打平在波段
     低點(底部)、B打平在波段高點(追價)，兩者都應該通過篩選但標籤文字不同。"""
@@ -2010,8 +2063,14 @@ def test_load_institutional_accumulation_flags_labels_bottom_vs_chase():
         {"stock_id": "1111", "name": "底部股", "market": "TWSE", "industry": None, "updated_at": dates[-1]},
         {"stock_id": "2222", "name": "追價股", "market": "TWSE", "industry": None, "updated_at": dates[-1]},
     ])
-    upsert_stock_prices(conn, _trend_position_price_rows("1111", dates, at_low=True))
-    upsert_stock_prices(conn, _trend_position_price_rows("2222", dates, at_low=False))
+    rows_1111 = _trend_position_price_rows("1111", dates, at_low=True)
+    rows_2222 = _trend_position_price_rows("2222", dates, at_low=False)
+    upsert_stock_prices(conn, rows_1111)
+    upsert_stock_prices(conn, rows_2222)
+    # 2026-08-10改版：底部/追價判斷改查daily_indicators快取表(見load_trend_position_
+    # flags_from_table())，測試需要先模擬backfill_daily_indicators.py寫入這張表。
+    _populate_indicators(conn, "1111", rows_1111)
+    _populate_indicators(conn, "2222", rows_2222)
     # 近20天(window_days=20)：volume=5000/天，累計成交量=100,000；外資買超1000/天，
     # 累計淨買超=20,000，比例=20%，遠高於5%門檻。
     _seed_institutional_net(conn, "1111", dates[-20:], "Foreign_Investor", 1000)
@@ -2031,7 +2090,9 @@ def test_load_institutional_accumulation_flags_require_at_low_excludes_chasers()
     conn = _fresh_conn()
     dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-01", periods=60)]
     upsert_stocks(conn, [{"stock_id": "2222", "name": "追價股", "market": "TWSE", "industry": None, "updated_at": dates[-1]}])
-    upsert_stock_prices(conn, _trend_position_price_rows("2222", dates, at_low=False))
+    rows_2222 = _trend_position_price_rows("2222", dates, at_low=False)
+    upsert_stock_prices(conn, rows_2222)
+    _populate_indicators(conn, "2222", rows_2222)
     _seed_institutional_net(conn, "2222", dates[-20:], "Foreign_Investor", 1000)
 
     result = load_institutional_accumulation_flags(

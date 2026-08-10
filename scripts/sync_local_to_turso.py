@@ -48,7 +48,9 @@ MARGIN_COLUMNS = [
 ]
 INDICATOR_COLUMNS = [
     "stock_id", "date", "ma5", "ma10", "ma20", "ma60", "ma120", "ma200", "ma240",
-    "sar_value", "sar_is_bull", "sar_flip_days_ago", "updated_at",
+    "sar_value", "sar_is_bull", "sar_flip_days_ago",
+    "trend_is_at_high", "trend_is_at_low", "trend_swing_pct",  # 2026-08-10新增，見schema.sql說明
+    "updated_at",
 ]
 CANDIDATE_COLUMNS = ["date", "stock_id", "signal_name", "entry_price", "stop_loss", "note", "created_at"]
 

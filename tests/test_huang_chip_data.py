@@ -101,10 +101,10 @@ def test_load_ma_price_position_compares_today_vs_previous_trading_day():
     upsert_daily_indicators(conn, [
         {"stock_id": "2330", "date": "2026-07-31", "ma5": 10.0, "ma10": 10.0, "ma20": 10.0, "ma60": 20.0,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": None, "sar_is_bull": None,
-         "sar_flip_days_ago": None, "updated_at": "2026-07-31T17:00:00"},
+         "sar_flip_days_ago": None, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None, "updated_at": "2026-07-31T17:00:00"},
         {"stock_id": "2330", "date": "2026-08-01", "ma5": 11.0, "ma10": 11.0, "ma20": 11.0, "ma60": 19.0,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": None, "sar_is_bull": None,
-         "sar_flip_days_ago": None, "updated_at": "2026-08-01T17:00:00"},
+         "sar_flip_days_ago": None, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None, "updated_at": "2026-08-01T17:00:00"},
     ])
 
     result = huang_chip_data.load_ma_price_position(conn, "2330", as_of_date="2026-08-01")
@@ -125,7 +125,7 @@ def test_load_ma_price_position_none_when_fewer_than_2_days_of_indicators():
     upsert_daily_indicators(conn, [
         {"stock_id": "2330", "date": "2026-08-01", "ma5": 11.0, "ma10": 11.0, "ma20": 11.0, "ma60": 19.0,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": None, "sar_is_bull": None,
-         "sar_flip_days_ago": None, "updated_at": "2026-08-01T17:00:00"},
+         "sar_flip_days_ago": None, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None, "updated_at": "2026-08-01T17:00:00"},
     ])
 
     assert huang_chip_data.load_ma_price_position(conn, "2330", as_of_date="2026-08-01") is None
@@ -263,13 +263,13 @@ def test_load_huang_chip_rows_batch_matches_individual_calls_for_multiple_stocks
     upsert_daily_indicators(conn, [
         {"stock_id": "2330", "date": "2026-07-31", "ma5": 10.0, "ma10": 10.0, "ma20": 10.0, "ma60": 20.0,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": None, "sar_is_bull": None,
-         "sar_flip_days_ago": None, "updated_at": "2026-07-31T17:00:00"},
+         "sar_flip_days_ago": None, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None, "updated_at": "2026-07-31T17:00:00"},
         {"stock_id": "2330", "date": "2026-08-01", "ma5": 11.0, "ma10": 11.0, "ma20": 11.0, "ma60": 19.0,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": None, "sar_is_bull": None,
-         "sar_flip_days_ago": None, "updated_at": "2026-08-01T17:00:00"},
+         "sar_flip_days_ago": None, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None, "updated_at": "2026-08-01T17:00:00"},
         {"stock_id": "2454", "date": "2026-08-01", "ma5": 900.0, "ma10": 900.0, "ma20": 900.0, "ma60": 800.0,
          "ma120": None, "ma200": None, "ma240": None, "sar_value": None, "sar_is_bull": None,
-         "sar_flip_days_ago": None, "updated_at": "2026-08-01T17:00:00"},
+         "sar_flip_days_ago": None, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None, "updated_at": "2026-08-01T17:00:00"},
     ])
     upsert_institutional_investors(conn, [
         _institutional_row("2330", "2026-08-01", "Investment_Trust", buy=2_000_000, sell=1_000_000),

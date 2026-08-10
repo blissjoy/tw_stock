@@ -29,6 +29,7 @@ import pandas as pd
 
 from src.indicators.moving_average import FULL_PERIODS, compute_ma_set, sma
 from src.indicators.parabolic_sar import compute_sar
+from src.indicators.trend_position import compute_trend_position
 
 # 見上方模組docstring的效能陷阱說明：日常增量更新(不是backfill)呼叫compute_indicator_
 # rows()前，應該先把df裁切成只留最近這麼多天，成本才不會隨DB歷史持續累積而越來越慢。
@@ -85,6 +86,10 @@ def compute_indicator_rows(stock_id: str, df: pd.DataFrame, target_dates: set[st
     sar_bull, sar_values = compute_sar(df["high"], df["low"], df["close"])
     flip_days_ago_list = _sar_flip_days_ago_series(sar_bull)
     sar_len = len(sar_bull)
+    # 2026-08-10新增：src.indicators.trend_position.compute_trend_position()對整個df
+    # 只算一次(跟SAR/均線同一個效能原則)，供「外資/投信累計買超」篩選(chart_data.
+    # load_institutional_accumulation_flags())判斷「底部」/「追價」快取用。
+    trend_position = compute_trend_position(df["high"], df["low"], df["close"])
 
     date_strs = df.index.strftime("%Y-%m-%d")
     updated_at = datetime.now().isoformat()
@@ -106,6 +111,9 @@ def compute_indicator_rows(stock_id: str, df: pd.DataFrame, target_dates: set[st
             "sar_value": _safe_float(sar_values.iloc[i]) if has_sar else None,
             "sar_is_bull": int(bool(sar_bull.iloc[i])) if has_sar else None,
             "sar_flip_days_ago": flip_days_ago_list[i] if has_sar else None,
+            "trend_is_at_high": int(bool(trend_position["is_at_high"].iloc[i])),
+            "trend_is_at_low": int(bool(trend_position["is_at_low"].iloc[i])),
+            "trend_swing_pct": _safe_float(trend_position["swing_pct"].iloc[i]),
             "updated_at": updated_at,
         })
     return rows

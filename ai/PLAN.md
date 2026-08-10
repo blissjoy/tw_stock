@@ -8896,3 +8896,43 @@ position.compute_trend_position()`是逐股票Python迴圈(路徑相關、無法
 賣超」跟「外資累計買超6.1%（底部）」——短期有賣超雜訊，但20天整體仍是買超，
 正是使用者要找的型態。`pytest tests/ -q`1126個測試全過(新增
 `tests/test_chart_data.py`7個)。截圖/驗證腳本已從scratchpad清除。
+
+---
+
+## 「外資/投信累計買超」比照SAR加快取表，效能27秒→0.43秒（2026-08-10）
+
+使用者要求「比照SAR加一層快取表」解決上一節記錄的效能問題。
+
+**做法**：比照SAR翻轉當初的優化路徑——`src/data/schema.sql`的`daily_indicators`
+表新增`trend_is_at_high`/`trend_is_at_low`/`trend_swing_pct`三欄，快取`src/
+indicators/trend_position.py`的`compute_trend_position()`結果；`storage.py`的
+`_migrate_schema()`／`upsert_daily_indicators()`同步更新(沿用既有ALTER TABLE
+補欄位的既定模式，比照`ma200`當初的做法)；`src/screener/indicator_precompute.py`
+的`compute_indicator_rows()`整合這段計算(對整個df只算一次，跟均線/SAR同一個效能
+原則)；`chart_data.py`新增`load_trend_position_flags_from_table()`查表版本，
+`load_institutional_accumulation_flags()`改成呼叫這個而不是即時算。
+
+**部署後對正式`data/tw_stock.db`跑了一次`scripts/backfill_daily_indicators.py`**
+(全市場2437檔，共1,843,467筆，耗時548秒≈9.1分鐘)，也修正`scripts/sync_local_to_
+turso.py`的`INDICATOR_COLUMNS`漏掉新欄位的問題(不修的話網頁版讀的Turso永遠拿不到
+這3個新欄位，桌面版讀本機DB正常、網頁版會一直「查無資料」，是這次過程中主動抓到
+的潛在bug，不是使用者回報的)。
+
+**⚠️驗證時意外發現的第二個瓶頸，額外修正**：trend_position查表優化後，27秒只降到
+17.9秒，追查發現「累計買超佔均量%」那兩段SQL window function本身也有效能問題——
+`ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC)`沒有下界日期時，
+會對每檔股票的完整歷史排序一次才篩出最近N天，不是只排序N天份，正式DB上實測要
+9.8秒(法人)+7.5秒(成交量)。新增`_institutional_accumulation_cutoff_date()`(比照
+`daily_screener.py`既有的`_trading_day_cutoff()`手法)算出下界日期，讓window
+function只需要排序視窗內的資料。使用者確認要一併修，不是原本要求的範圍，是驗證
+過程中主動發現並回報後才動手。
+
+**最終效能**：27秒 → 0.43秒(約63倍)。
+
+真實驗證：對正式`data/tw_stock.db`直接查詢，前後對照結果集合一致(股票清單、底部/
+追價標籤不變，只是速度不同)；`pytest tests/ -q`1131個測試全過(新增`tests/test_
+chart_data.py`4個`load_trend_position_flags_from_table()`測試、`tests/test_
+indicator_precompute.py`1個ground-truth比對測試、更新`tests/test_storage.py`的
+schema遷移測試一併驗證新欄位、修正5個測試檔案裡因為`upsert_daily_indicators()`
+新增必要欄位而失敗的手動dict測試)。桌面版重新截圖確認：套用篩選後畫面幾乎即時
+更新(<2秒)，候選股票清單/底部標籤內容跟優化前一致。

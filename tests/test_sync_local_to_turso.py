@@ -35,7 +35,8 @@ def _seed_local(conn, dates: list[str]) -> None:
         storage.upsert_daily_indicators(conn, [
             {"stock_id": "2330", "date": d, "ma5": 100.0, "ma10": 99.0, "ma20": 98.0, "ma60": None,
              "ma120": None, "ma200": None, "ma240": None, "sar_value": 95.0, "sar_is_bull": 1,
-             "sar_flip_days_ago": 3, "updated_at": now},
+             "sar_flip_days_ago": 3, "trend_is_at_high": None, "trend_is_at_low": None, "trend_swing_pct": None,
+             "updated_at": now},
         ])
         storage.upsert_daily_candidates(conn, [
             {"date": d, "stock_id": "2330", "signal_name": "R-TREND-14", "entry_price": 103.0,

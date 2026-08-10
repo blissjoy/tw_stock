@@ -174,6 +174,14 @@ CREATE TABLE IF NOT EXISTS daily_indicators (
     sar_value           REAL,
     sar_is_bull         INTEGER,  -- 0/1，NULL代表資料不足(<3天)算不出SAR
     sar_flip_days_ago   INTEGER,  -- 目前方向是第幾天前翻轉進來的；NULL代表算不出SAR
+    -- 2026-08-10新增，快取src/indicators/trend_position.py的compute_trend_position()
+    -- 結果——供「外資/投信累計買超」篩選(chart_data.load_institutional_accumulation_
+    -- flags())判斷「底部」/「追價」用。這是逐股票Python迴圈、路徑相關、無法簡單向量化
+    -- 的指標(跟SAR同一種效能特徵)，全市場~2500檔即時運算要約27秒，比照SAR翻轉的做法
+    -- 改成查表，理由跟sar_value/sar_is_bull完全相同(見上方SAR欄位說明)。
+    trend_is_at_high    INTEGER,  -- 0/1，本波段是否處於高檔，NULL代表資料不足算不出來
+    trend_is_at_low     INTEGER,  -- 0/1，本波段是否處於低檔，NULL代表資料不足算不出來
+    trend_swing_pct     REAL,     -- 目前這段走勢從波段起點算起的漲跌幅(絕對值)
     updated_at          TEXT NOT NULL,
     PRIMARY KEY (stock_id, date)
 );
