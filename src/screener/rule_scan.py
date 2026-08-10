@@ -291,11 +291,21 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
     else:
         trend_high, trend_low, trend_close = high, low, close
     trend_horizons = classify_trend_states_multi_horizon(trend_high, trend_low, trend_close)
-    for label, (timeframe, trend, reason, *_freshness) in trend_horizons.items():
+    for label, (timeframe, trend, reason, *freshness_rest) in trend_horizons.items():
+        # ⚠️ 2026-08-10修正：這裡原本用`*_freshness`把freshness欄位吸收掉卻完全不用，
+        # 導致「個股分析」分頁(這裡)看不到轉折點確認滯後的警示，但「圖表」分頁(dashboard/
+        # app.py／desktop/main_window.py的_rerender_chart())都已經在顯示——同一份
+        # trend_horizons資料，兩條顯示路徑一個有接、一個沒接，使用者才會覺得「明明已經
+        # 噴出突破，個股分析怎麼還說空頭成立」。跟另外兩處一致，只在freshness內容包含
+        # ⚠️時才附加(平常「最近一次確認的轉折點：...」這種基礎陳述不需要每次都顯示，
+        # 避免大部分正常情況下的多餘文字)。
+        freshness_suffix = ""
+        if freshness_rest and "⚠️" in freshness_rest[0]:
+            freshness_suffix = f"\n{freshness_rest[0]}"
         if trend == TREND_BULL:
-            add("R-TREND-03", f"{label}({timeframe}轉折波)：頭頭高且底底高，多頭趨勢成立（依據：{reason}）")
+            add("R-TREND-03", f"{label}({timeframe}轉折波)：頭頭高且底底高，多頭趨勢成立（依據：{reason}）{freshness_suffix}")
         elif trend == TREND_BEAR:
-            add("R-TREND-04", f"{label}({timeframe}轉折波)：頭頭低且底底低，空頭趨勢成立（依據：{reason}）")
+            add("R-TREND-04", f"{label}({timeframe}轉折波)：頭頭低且底底低，空頭趨勢成立（依據：{reason}）{freshness_suffix}")
 
     # 下面幾條依賴trend的規則(R-MA-15/KD依趨勢判讀/布林通道訊號①②)書中沒有另外要求區分
     # 短中長天期，沿用短期(日線)天期即可，跟本專案其他規則(R-TREND-14等)慣用的短線框架一致；

@@ -149,6 +149,30 @@ def test_scan_golden_tier_reports_each_horizon_independently_when_they_disagree(
     assert sum(1 for item in results if item["rule_id"] == "R-TREND-04") == 1
 
 
+def test_scan_golden_tier_appends_freshness_warning_when_present(monkeypatch):
+    """2026-08-10修正：之前這裡用`*_freshness`把trend_state.py算好的滯後警示吸收掉卻
+    完全不用，導致「個股分析」分頁看不到「轉折點可能已經跟不上盤面」的提醒，但「圖表」
+    分頁(dashboard/app.py／desktop/main_window.py)都已經在顯示同一份資料——使用者
+    以5351為例回報「明明已經噴出突破新高，個股分析卻還說空頭趨勢成立」，追查發現正是
+    這個沒接上的warning。這裡驗證note文字裡確實附上了⚠️那一行。"""
+    df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "classify_trend_states_multi_horizon", lambda h, l, c: {
+        "短期": ("日線", "空頭", "測試依據", "⚠️ 最近一次確認的轉折點：94.80@2026-07-22，但目前股價正處於一段還沒回頭確認的上漲走勢中"),
+        "中期": ("週線", "盤整", "測試依據", "最近一次確認的轉折點：94.80@2026-07-22"),
+        "長期": ("月線", "多頭", "測試依據", "最近一次確認的轉折點：94.80@2026-07-22"),
+    })
+
+    results = scan_golden_tier(df)
+    trend_notes = {item["rule_id"]: item["note"] for item in results if item["rule_id"] in ("R-TREND-03", "R-TREND-04")}
+
+    assert "⚠️" in trend_notes["R-TREND-04"]
+    assert "還沒回頭確認的上漲走勢中" in trend_notes["R-TREND-04"]
+    # 長期是多頭，freshness沒有⚠️(基礎陳述)，不該被附加到note裡(避免每次都多一行沒有
+    # 警示意義的文字)
+    assert "⚠️" not in trend_notes["R-TREND-03"]
+    assert "最近一次確認的轉折點" not in trend_notes["R-TREND-03"]
+
+
 def test_scan_golden_tier_skips_ma15_when_trend_is_range(monkeypatch):
     """盤整趨勢下即使發生黃金/死亡交叉，interpret_cross()回傳「無明確訊號」，
     R-MA-15不應該被列入(這是interpret_cross()本身的語意，不是額外過濾邏輯)。"""
