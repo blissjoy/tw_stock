@@ -1,0 +1,11 @@
+{
+  "total_rules": 50,
+  "by_category": {
+    "量價矩陣(含方法論)": 20,
+    "主力型態": 30
+  },
+  "gap_count": 20,
+  "no_direct_correspondence_count": 5,
+  "source": "Antigravity投資管理儀表板（外部工具，非本專案已用書籍），見各檔「外部工具來源」欄",
+  "note": "此目錄的Rule ID(R-Q3M-*/R-Q3P-*)尚未接進src/rule_docs.py的RULE_DOC_DIRS，純文件階段，等文件確認後再決定是否/如何接進系統與現有UI。"
+}

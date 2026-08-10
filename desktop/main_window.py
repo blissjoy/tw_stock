@@ -73,7 +73,7 @@ from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src import rule_docs
-from src.presentation import chart_data, data_fetch_log, huang_chip_data, pipeline_status, portfolio_data, stock_detail_data
+from src.presentation import chart_data, data_fetch_log, huang_chip_data, pipeline_status, portfolio_data, q3_analysis, stock_detail_data
 from src.presentation.chart_render import render_chart_html
 from src.screener.daily_screener import (
     analyze_stock_signals,
@@ -1595,6 +1595,16 @@ class MainWindow(QMainWindow):
         self.report_view.page().pdfPrintingFinished.connect(self._on_report_pdf_finished)
         report_tab_layout.addWidget(self.report_view, stretch=1)
         self.detail_inner_tabs.addTab(report_tab, "產出報表")
+
+        # 2026-08-10新增：「三維過濾法」分頁，複製外部工具Antigravity儀表板的個股健檢
+        # 面板(見ai/q3-rules/)——AI判定(規則版)＋12種量價矩陣＋30種主力型態＋技術指標
+        # 總覽，跟其餘inner tab同一套「切到這個tab才重新整理」模式(見_on_detail_inner_
+        # tab_changed())。
+        q3_tab = QWidget()
+        q3_tab_layout = QVBoxLayout(q3_tab)
+        self.q3_analysis_view = self._build_analysis_text_view()
+        q3_tab_layout.addWidget(self.q3_analysis_view)
+        self.detail_inner_tabs.addTab(q3_tab, "三維過濾法")
 
         self.detail_inner_tabs.currentChanged.connect(self._on_detail_inner_tab_changed)
         _FloatingTopButton(detail_scroll)
@@ -3710,6 +3720,8 @@ class MainWindow(QMainWindow):
             self._refresh_stock_overview_view()
         elif index == 3:
             self._refresh_report_view()
+        elif index == 4:
+            self._refresh_q3_analysis_view()
 
     @staticmethod
     def _build_analysis_text_view() -> QTextBrowser:
@@ -3885,6 +3897,81 @@ class MainWindow(QMainWindow):
             "chip": section_html("籌碼面", chip_matches, "chip"),
         }
 
+    def _build_q3_analysis_html(self, stock_id: str, header_label: str) -> str:
+        """組出「三維過濾法」分頁的HTML內容：AI判定(規則版)＋12種量價矩陣＋30種主力
+        型態＋技術指標總覽，資料來自`src.presentation.q3_analysis.load_q3_analysis()`
+        (見`ai/q3-rules/`)。2026-08-10新增。
+        """
+        price_df = chart_data.load_price_history(self.conn, stock_id)
+        if price_df.empty:
+            return f"<p>查無股票代號 {html.escape(stock_id)} 的價格資料。</p>"
+        trend_df = chart_data.load_price_history(self.conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        result = q3_analysis.load_q3_analysis(price_df, trend_df=trend_df)
+        if result is None:
+            return "<p>資料天數不足，無法計算三維過濾法。</p>"
+
+        ind = result["indicators"]
+        verdict = result["verdict"]
+
+        def fmt(value, digits: int = 2) -> str:
+            return f"{value:.{digits}f}" if value is not None else "-"
+
+        bullets_html = "".join(f"<li>{html.escape(b)}</li>" for b in verdict["bullets"])
+        verdict_html = (
+            f"<p><b>🤖 AI判定(規則版)：{html.escape(verdict['text'])}</b>　"
+            f"防守支撐價：${fmt(verdict['support_price'])}　(綜合評分 {verdict['score']:+d})</p>"
+            f"<ul>{bullets_html}</ul>"
+        )
+
+        matrix = result["matrix"]
+        matrix_html = (
+            f"<p><b>矩陣：{html.escape(matrix['label'])}</b><br>{html.escape(matrix['interpretation'])}"
+            f"（{html.escape(matrix['rule_id'])}）</p>"
+            if matrix is not None
+            else "<p>今天沒有落在任何已定義的矩陣格。</p>"
+        )
+
+        patterns = result["patterns"]
+        if patterns:
+            pattern_items = "".join(
+                f"<li><b>{html.escape(p['name'])}</b>（{html.escape(p['rule_id'])}）：{html.escape(p['note'])}</li>"
+                for p in patterns
+            )
+            patterns_html = f"<ul>{pattern_items}</ul>"
+        else:
+            patterns_html = "<p>今天沒有觸發任何已定義的型態。</p>"
+
+        indicator_rows = [
+            ("8日均線(8MA)", fmt(ind["ma8"])),
+            ("月線(20MA)", fmt(ind["ma20"])),
+            ("季線(60MA)", fmt(ind["ma60"])),
+            ("KD指標", f"K:{fmt(ind['k'])} D:{fmt(ind['d'])}"),
+            ("RSI", fmt(ind["rsi"])),
+            ("MACD柱狀", fmt(ind["macd_osc"])),
+            ("OBV(能量潮)", fmt(ind["obv"], 0)),
+            ("ATR(真實波幅)", fmt(ind["atr"])),
+            ("乖離率(BIAS)", f"{fmt(ind['bias_pct'])}%"),
+            ("連續站上布林上軌", f"{ind['bollinger_streak_days']} 天"),
+            ("均線交叉", html.escape(ind["ma_cross"])),
+            ("爆量訊號", "有" if ind["big_volume_today"] else "無"),
+            ("今日量價關係", f"{html.escape(ind['q1_price'])}／{html.escape(ind['q2_volume'])}／{html.escape(ind['q3_position'])}"),
+        ]
+        indicator_table = "".join(f"<tr><td>{label}</td><td>{value}</td></tr>" for label, value in indicator_rows)
+
+        return (
+            f"<p><b>{html.escape(header_label)}</b></p>"
+            f"{verdict_html}"
+            "<p><b>12種量價矩陣</b></p>"
+            f"{matrix_html}"
+            "<p><b>30種主力型態</b></p>"
+            f"{patterns_html}"
+            "<p><b>技術指標總覽</b></p>"
+            f"<table cellpadding='4'>{indicator_table}</table>"
+            "<p style='color:#888;font-size:90%;'>「三維過濾法」複製外部工具Antigravity"
+            "儀表板的分析框架(見ai/q3-rules/)，AI判定為規則版加權評分，非LLM生成文字，"
+            "僅供參考，不是投資建議。</p>"
+        )
+
     @staticmethod
     def _format_reference_html(reference: str) -> str:
         """把「原文與頁碼」文字裡引用的.md檔名轉成可點擊連結，點擊後開新視窗直接
@@ -4005,6 +4092,17 @@ class MainWindow(QMainWindow):
         self._set_autoheight_html(self.analysis_summary_view, sections["summary"])
         self._set_autoheight_html(self.analysis_tech_view, sections["tech"])
         self._set_autoheight_html(self.analysis_chip_view, sections["chip"])
+
+    def _refresh_q3_analysis_view(self) -> None:
+        """填入「三維過濾法」分頁內容，見_build_q3_analysis_html()。跟_refresh_
+        analysis_view()同一套「切到這個tab才重新查一次」模式。"""
+        if self.conn is None or not self._current_stock_id:
+            self._set_autoheight_html(self.q3_analysis_view, "<p>請先從候選清單點選或查詢一檔股票。</p>")
+            return
+        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
+        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        content_html = self._build_q3_analysis_html(self._current_stock_id, f"三維過濾法：{stock_label}")
+        self._set_autoheight_html(self.q3_analysis_view, content_html)
 
     @staticmethod
     def _build_report_reference_appendix(matches: list[dict]) -> tuple[str, dict[str, str]]:

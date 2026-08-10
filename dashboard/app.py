@@ -30,7 +30,7 @@ from src import rule_docs  # noqa: E402
 from src.data.yfinance_client import TAIEX_STOCK_ID  # noqa: E402
 from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
-from src.presentation import chart_data, portfolio_data, stock_detail_data  # noqa: E402
+from src.presentation import chart_data, portfolio_data, q3_analysis, stock_detail_data  # noqa: E402
 from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_FILTER_DEFAULTS,
     CANDIDATE_FILTERS,
@@ -577,6 +577,77 @@ def main() -> None:
                 "反彈」訊號條件——僅適合手腳靈活、能嚴設停利的短線操作，不是長線買進"
                 "依據。</p>", unsafe_allow_html=True,
             )
+
+    def render_q3_analysis_section(stock_id: str) -> None:
+        """「三維過濾法」分頁：複製外部工具Antigravity儀表板的個股健檢面板(見
+        ai/q3-rules/)——AI判定(規則版)＋12種量價矩陣＋30種主力型態＋技術指標總覽。
+        照抄桌面版desktop/main_window.py的_build_q3_analysis_html()同一份資料來源
+        (q3_analysis.load_q3_analysis())，只是渲染成streamlit元件而非HTML字串。
+        2026-08-10新增。
+        """
+        price_df = chart_data.load_price_history(conn, stock_id)
+        if price_df.empty:
+            st.info(f"查無股票代號 {stock_id} 的價格資料。")
+            return
+        trend_df = chart_data.load_price_history(conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        result = q3_analysis.load_q3_analysis(price_df, trend_df=trend_df)
+        if result is None:
+            st.info("資料天數不足，無法計算三維過濾法。")
+            return
+
+        ind = result["indicators"]
+        verdict = result["verdict"]
+
+        def fmt(value, digits: int = 2) -> str:
+            return f"{value:.{digits}f}" if value is not None else "-"
+
+        st.markdown(f"#### 🤖 AI判定(規則版)：{verdict['text']}")
+        col_support, col_score = st.columns(2)
+        col_support.metric("防守支撐價", f"${fmt(verdict['support_price'])}")
+        col_score.metric("綜合評分", f"{verdict['score']:+d}")
+        for b in verdict["bullets"]:
+            st.markdown(f"- {b}")
+
+        st.markdown("#### 12種量價矩陣")
+        matrix = result["matrix"]
+        if matrix is not None:
+            st.markdown(f"**{matrix['label']}**（{matrix['rule_id']}）")
+            st.caption(matrix["interpretation"])
+        else:
+            st.caption("今天沒有落在任何已定義的矩陣格。")
+
+        st.markdown("#### 30種主力型態")
+        patterns = result["patterns"]
+        if patterns:
+            for p in patterns:
+                st.markdown(f"- **{p['name']}**（{p['rule_id']}）：{p['note']}")
+        else:
+            st.caption("今天沒有觸發任何已定義的型態。")
+
+        st.markdown("#### 技術指標總覽")
+        indicator_rows = [
+            ("8日均線(8MA)", fmt(ind["ma8"])),
+            ("月線(20MA)", fmt(ind["ma20"])),
+            ("季線(60MA)", fmt(ind["ma60"])),
+            ("KD指標", f"K:{fmt(ind['k'])} D:{fmt(ind['d'])}"),
+            ("RSI", fmt(ind["rsi"])),
+            ("MACD柱狀", fmt(ind["macd_osc"])),
+            ("OBV(能量潮)", fmt(ind["obv"], 0)),
+            ("ATR(真實波幅)", fmt(ind["atr"])),
+            ("乖離率(BIAS)", f"{fmt(ind['bias_pct'])}%"),
+            ("連續站上布林上軌", f"{ind['bollinger_streak_days']} 天"),
+            ("均線交叉", ind["ma_cross"]),
+            ("爆量訊號", "有" if ind["big_volume_today"] else "無"),
+            ("今日量價關係", f"{ind['q1_price']}／{ind['q2_volume']}／{ind['q3_position']}"),
+        ]
+        st.dataframe(
+            pd.DataFrame(indicator_rows, columns=["指標", "數值"]),
+            hide_index=True, use_container_width=True,
+        )
+        st.caption(
+            "「三維過濾法」複製外部工具Antigravity儀表板的分析框架(見ai/q3-rules/)，"
+            "AI判定為規則版加權評分，非LLM生成文字，僅供參考，不是投資建議。"
+        )
 
     def render_stock_overview_section(stock_id: str) -> None:
         """「個股明細」6個區塊：交易資訊/法人買賣總覽/主力進出/資券變化總覽/大戶籌碼/
@@ -2539,8 +2610,8 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     # 4個橫向分頁(st.tabs())，取代原本圖表+分析+明細+報表全部往下疊的單頁
                     # 版面，比照桌面版desktop/main_window.py的self.detail_inner_tabs
                     # (QTabWidget)結構。
-                    chart_tab, analysis_tab, detail_tab, report_tab = st.tabs(
-                        ["圖表", "個股分析", "個股明細", "產出報表"],
+                    chart_tab, analysis_tab, detail_tab, report_tab, q3_tab = st.tabs(
+                        ["圖表", "個股分析", "個股明細", "產出報表", "三維過濾法"],
                     )
                     with chart_tab:
                         render_chart_fn()
@@ -2550,6 +2621,8 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                         render_stock_overview_section(detail_stock_id)
                     with report_tab:
                         render_stock_report_section(detail_stock_id)
+                    with q3_tab:
+                        render_q3_analysis_section(detail_stock_id)
             else:
                 st.info("請輸入股票代號或名稱查詢，或到「選股」分頁點選候選股票。")
 
