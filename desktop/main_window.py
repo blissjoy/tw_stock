@@ -1227,6 +1227,78 @@ class MainWindow(QMainWindow):
         method_bar.addStretch()
         root_layout.addLayout(method_bar)
 
+        # 「外資/投信累計買超」篩選：2026-08-10新增，使用者自訂的分析工具(不是書中規則，
+        # 見chart_data.py的INSTITUTIONAL_ACCUMULATION_*常數說明)，跟SAR翻轉同一種「勾選
+        # 框+多個參數」綁在一起的UI模式，獨立成一列、獨立傳給apply_candidate_filters()的
+        # institutional_accumulation_option參數。核心用途：找出「即使中間偶爾賣超，但N天
+        # 累計買超佔均量比例仍達門檻」的緩步建倉股票——這跟「連續買超天數」(投信連續買超
+        # 觀察等既有CANDIDATE_FILTERS/篩選規則)不同，那個指標只要中間出現一天賣超就會歸零，
+        # 抓不到這種型態。
+        institutional_bar = QHBoxLayout()
+        institutional_bar.addWidget(QLabel("外資/投信累計買超："))
+        self.institutional_accumulation_checkbox = QCheckBox("啟用")
+        self.institutional_accumulation_checkbox.setChecked(
+            self._app_settings().value("screener/institutional_accumulation_enabled", False, type=bool)
+        )
+        self.institutional_accumulation_checkbox.toggled.connect(
+            lambda checked: self._app_settings().setValue("screener/institutional_accumulation_enabled", checked)
+        )
+        institutional_bar.addWidget(self.institutional_accumulation_checkbox)
+
+        self.institutional_accumulation_type_combo = QComboBox()
+        self.institutional_accumulation_type_combo.addItems(["外資", "投信"])
+        self.institutional_accumulation_type_combo.setCurrentText(
+            self._app_settings().value("screener/institutional_accumulation_type", "外資")
+        )
+        self.institutional_accumulation_type_combo.currentTextChanged.connect(
+            lambda text: self._app_settings().setValue("screener/institutional_accumulation_type", text)
+        )
+        institutional_bar.addWidget(self.institutional_accumulation_type_combo)
+
+        self.institutional_accumulation_window_spin = QSpinBox()
+        self.institutional_accumulation_window_spin.setRange(5, 120)
+        self.institutional_accumulation_window_spin.setValue(
+            self._app_settings().value(
+                "screener/institutional_accumulation_window_days",
+                chart_data.INSTITUTIONAL_ACCUMULATION_WINDOW_DAYS_DEFAULT, type=int,
+            )
+        )
+        self.institutional_accumulation_window_spin.setSuffix(" 天內累計")
+        self.institutional_accumulation_window_spin.valueChanged.connect(
+            lambda value: self._app_settings().setValue("screener/institutional_accumulation_window_days", value)
+        )
+        institutional_bar.addWidget(self.institutional_accumulation_window_spin)
+
+        self.institutional_accumulation_ratio_spin = QDoubleSpinBox()
+        self.institutional_accumulation_ratio_spin.setRange(0.1, 100.0)
+        self.institutional_accumulation_ratio_spin.setSingleStep(0.5)
+        self.institutional_accumulation_ratio_spin.setValue(
+            self._app_settings().value(
+                "screener/institutional_accumulation_min_ratio_pct",
+                chart_data.INSTITUTIONAL_ACCUMULATION_MIN_RATIO_PCT_DEFAULT, type=float,
+            )
+        )
+        self.institutional_accumulation_ratio_spin.setSuffix(" %（佔期間總成交量門檻）")
+        self.institutional_accumulation_ratio_spin.valueChanged.connect(
+            lambda value: self._app_settings().setValue("screener/institutional_accumulation_min_ratio_pct", value)
+        )
+        institutional_bar.addWidget(self.institutional_accumulation_ratio_spin)
+
+        # 「只看底部建倉」：不勾時，底部建倉/追價買超都會被篩出來(用途更彈性)，但訊號欄位
+        # 一律會註明是「底部」還是「追價」(見load_institutional_accumulation_flags())，
+        # 使用者可以自行判斷；勾選時只保留判定為「底部」(trend_position.is_at_low)的股票。
+        self.institutional_accumulation_at_low_checkbox = QCheckBox("只看底部建倉")
+        self.institutional_accumulation_at_low_checkbox.setChecked(
+            self._app_settings().value("screener/institutional_accumulation_require_at_low", False, type=bool)
+        )
+        self.institutional_accumulation_at_low_checkbox.toggled.connect(
+            lambda checked: self._app_settings().setValue("screener/institutional_accumulation_require_at_low", checked)
+        )
+        institutional_bar.addWidget(self.institutional_accumulation_at_low_checkbox)
+
+        institutional_bar.addStretch()
+        root_layout.addLayout(institutional_bar)
+
         top_bar = QHBoxLayout()
         self.refresh_btn = QPushButton("🔄 立即重新篩選")
         self.refresh_btn.setToolTip("只用資料庫裡目前已有的資料重算候選清單，不重新抓取資料，通常幾秒內完成")
@@ -3292,9 +3364,18 @@ class MainWindow(QMainWindow):
                 "direction": self.sar_flip_direction_combo.currentText(),
                 "within_days": self.sar_flip_days_spin.value(),
             }
+        institutional_accumulation_option = None
+        if self.institutional_accumulation_checkbox.isChecked():
+            institutional_accumulation_option = {
+                "investor_type": self.institutional_accumulation_type_combo.currentText(),
+                "window_days": self.institutional_accumulation_window_spin.value(),
+                "min_ratio_pct": self.institutional_accumulation_ratio_spin.value(),
+                "require_at_low": self.institutional_accumulation_at_low_checkbox.isChecked(),
+            }
         df = chart_data.apply_candidate_filters(
             self.conn, df, active_filters, sar_flip_option=sar_flip_option,
             zhu_rule_only=self.zhu_rule_checkbox.isChecked(), as_of_date=latest_date,
+            institutional_accumulation_option=institutional_accumulation_option,
         )
         self.candidates_table.setRowCount(0)
         # 重新整理表格後，勾選欄全部重置成未勾選，表頭的「全選」checkbox要跟著重置，

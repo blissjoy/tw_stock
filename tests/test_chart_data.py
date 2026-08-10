@@ -7,6 +7,7 @@ from src.data.storage import (
     upsert_daily_candidates,
     upsert_daily_indicators,
     upsert_delisted_stocks,
+    upsert_institutional_investors,
     upsert_stock_prices,
     upsert_stocks,
 )
@@ -23,6 +24,7 @@ from src.presentation.chart_data import (
     load_holidays_for_chart,
     load_industry_rotation,
     load_industry_rotation_stocks,
+    load_institutional_accumulation_flags,
     load_ma_bullish_flags_from_table,
     load_price_history,
     load_sar_flip_flags_from_table,
@@ -1956,3 +1958,153 @@ def test_apply_candidate_filters_returns_unfiltered_when_sar_flip_option_is_none
     df = pd.DataFrame({"stock_id": ["2330", "1101"]})
     result = apply_candidate_filters(conn=None, candidates_df=df, active_filter_labels=[], sar_flip_option=None)
     assert list(result["stock_id"]) == ["2330", "1101"]
+
+
+def _seed_institutional_net(conn, stock_id: str, dates: list[str], investor_type: str, daily_net: int) -> None:
+    """daily_net為正時seed成當天淨買超daily_net(buy=daily_net,sell=0)，為負時淨賣超。"""
+    buy = daily_net if daily_net >= 0 else 0
+    sell = 0 if daily_net >= 0 else -daily_net
+    upsert_institutional_investors(conn, [
+        {"stock_id": stock_id, "date": d, "investor_type": investor_type, "buy": buy, "sell": sell}
+        for d in dates
+    ])
+
+
+def _trend_position_price_rows(stock_id: str, dates: list[str], at_low: bool) -> list[dict]:
+    """借用tests/test_trend_position.py同款的價格曲線(60天，前20天+後30天打平)，
+    確保compute_trend_position()對最後一天判定is_at_low/is_at_high的行為跟該模組
+    自己的測試一致，不用另外重新推導狀態機。at_low=True時最後打平在低點(96)，
+    False時打平在高點(104)。"""
+    n = len(dates)
+    close = []
+    for i in range(n):
+        if at_low:
+            if i < 20:
+                close.append(100 + i * 1.0)
+            elif i < 50:
+                close.append(120 - (i - 20) * 0.8)
+            else:
+                close.append(96.0)
+        else:
+            if i < 20:
+                close.append(100 - i * 1.0)
+            elif i < 50:
+                close.append(80 + (i - 20) * 0.8)
+            else:
+                close.append(104.0)
+    return [
+        {
+            "stock_id": stock_id, "date": d, "open": c, "high": c + 0.5, "low": c - 0.5, "close": c,
+            "volume": 5000, "trading_money": None, "trading_turnover": None, "spread": None,
+        }
+        for d, c in zip(dates, close)
+    ]
+
+
+def test_load_institutional_accumulation_flags_labels_bottom_vs_chase():
+    """兩檔股票外資近20天累計買超佔均量比例都達門檻，差別只在股價位置：A打平在波段
+    低點(底部)、B打平在波段高點(追價)，兩者都應該通過篩選但標籤文字不同。"""
+    conn = _fresh_conn()
+    dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-01", periods=60)]
+    upsert_stocks(conn, [
+        {"stock_id": "1111", "name": "底部股", "market": "TWSE", "industry": None, "updated_at": dates[-1]},
+        {"stock_id": "2222", "name": "追價股", "market": "TWSE", "industry": None, "updated_at": dates[-1]},
+    ])
+    upsert_stock_prices(conn, _trend_position_price_rows("1111", dates, at_low=True))
+    upsert_stock_prices(conn, _trend_position_price_rows("2222", dates, at_low=False))
+    # 近20天(window_days=20)：volume=5000/天，累計成交量=100,000；外資買超1000/天，
+    # 累計淨買超=20,000，比例=20%，遠高於5%門檻。
+    _seed_institutional_net(conn, "1111", dates[-20:], "Foreign_Investor", 1000)
+    _seed_institutional_net(conn, "2222", dates[-20:], "Foreign_Investor", 1000)
+
+    result = load_institutional_accumulation_flags(
+        conn, ["1111", "2222"], investor_type="外資", window_days=20, min_ratio_pct=5.0,
+        require_at_low=False, as_of_date=dates[-1],
+    )
+
+    assert "底部" in result["1111"]
+    assert "20.0%" in result["1111"]
+    assert "追價" in result["2222"]
+
+
+def test_load_institutional_accumulation_flags_require_at_low_excludes_chasers():
+    conn = _fresh_conn()
+    dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-01", periods=60)]
+    upsert_stocks(conn, [{"stock_id": "2222", "name": "追價股", "market": "TWSE", "industry": None, "updated_at": dates[-1]}])
+    upsert_stock_prices(conn, _trend_position_price_rows("2222", dates, at_low=False))
+    _seed_institutional_net(conn, "2222", dates[-20:], "Foreign_Investor", 1000)
+
+    result = load_institutional_accumulation_flags(
+        conn, ["2222"], investor_type="外資", window_days=20, min_ratio_pct=5.0,
+        require_at_low=True, as_of_date=dates[-1],
+    )
+
+    assert result == {}
+
+
+def test_load_institutional_accumulation_flags_excludes_below_ratio_threshold():
+    conn = _fresh_conn()
+    dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-01", periods=60)]
+    upsert_stocks(conn, [{"stock_id": "1111", "name": "底部股", "market": "TWSE", "industry": None, "updated_at": dates[-1]}])
+    upsert_stock_prices(conn, _trend_position_price_rows("1111", dates, at_low=True))
+    # 累計買超比例僅1%(1000/100000*100%=1%)，低於5%門檻。
+    _seed_institutional_net(conn, "1111", dates[-20:], "Foreign_Investor", 50)
+
+    result = load_institutional_accumulation_flags(
+        conn, ["1111"], investor_type="外資", window_days=20, min_ratio_pct=5.0,
+        require_at_low=False, as_of_date=dates[-1],
+    )
+
+    assert result == {}
+
+
+def test_load_institutional_accumulation_flags_investor_type_mapping_excludes_other_type():
+    """投信類型只計入Investment_Trust，外資的買超不應該被算進「投信」篩選的分子。"""
+    conn = _fresh_conn()
+    dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-01", periods=60)]
+    upsert_stocks(conn, [{"stock_id": "1111", "name": "底部股", "market": "TWSE", "industry": None, "updated_at": dates[-1]}])
+    upsert_stock_prices(conn, _trend_position_price_rows("1111", dates, at_low=True))
+    _seed_institutional_net(conn, "1111", dates[-20:], "Foreign_Investor", 1000)  # 外資買超，不算投信
+
+    result = load_institutional_accumulation_flags(
+        conn, ["1111"], investor_type="投信", window_days=20, min_ratio_pct=5.0,
+        require_at_low=False, as_of_date=dates[-1],
+    )
+
+    assert result == {}
+
+
+def test_load_institutional_accumulation_flags_empty_stock_ids_returns_empty_dict():
+    conn = _fresh_conn()
+    assert load_institutional_accumulation_flags(
+        conn, [], investor_type="外資", window_days=20, min_ratio_pct=5.0,
+        require_at_low=False, as_of_date="2026-01-01",
+    ) == {}
+
+
+def test_apply_candidate_filters_institutional_accumulation_option_applies_per_stock_labels(monkeypatch):
+    df = pd.DataFrame({"stock_id": ["1111", "2222", "3333"], "signal_name": [None, "R-TREND-14多頭短線進場（92%）", None]})
+    monkeypatch.setattr(
+        chart_data, "load_institutional_accumulation_flags",
+        lambda conn, stock_ids, investor_type, window_days, min_ratio_pct, require_at_low, as_of_date: {
+            "1111": "外資累計買超20.0%（底部）", "2222": "外資累計買超12.0%（追價）",
+        },
+    )
+
+    result = apply_candidate_filters(
+        conn=None, candidates_df=df, active_filter_labels=[],
+        institutional_accumulation_option={"investor_type": "外資", "window_days": 20, "min_ratio_pct": 5.0, "require_at_low": False},
+    )
+
+    assert list(result["stock_id"]) == ["1111", "2222"]
+    by_id = dict(zip(result["stock_id"], result["signal_name"]))
+    assert by_id["1111"] == "外資累計買超20.0%（底部）"
+    assert by_id["2222"] == "R-TREND-14多頭短線進場（92%）\n外資累計買超12.0%（追價）"
+
+
+def test_apply_candidate_filters_returns_unfiltered_when_institutional_accumulation_option_is_none():
+    df = pd.DataFrame({"stock_id": ["1111", "2222"]})
+    result = apply_candidate_filters(
+        conn=None, candidates_df=df, active_filter_labels=[], institutional_accumulation_option=None,
+    )
+    assert list(result["stock_id"]) == ["1111", "2222"]

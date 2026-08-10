@@ -37,6 +37,8 @@ from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_SAR_FLIP_ENABLED_DEFAULT,
     CANDIDATE_SAR_FLIP_OPTION_DEFAULT,
     CANDIDATE_ZHU_RULE_ONLY_DEFAULT,
+    INSTITUTIONAL_ACCUMULATION_MIN_RATIO_PCT_DEFAULT,
+    INSTITUTIONAL_ACCUMULATION_WINDOW_DAYS_DEFAULT,
     apply_candidate_filters,
     build_candlestick_figure,
     get_latest_candidate_update_time,
@@ -2167,6 +2169,60 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 help="勾選時只保留當天有觸發朱家泓規則的股票；取消勾選則不限制，均線/SAR等條件會對全市場掃描",
             )
 
+            # 「外資/投信累計買超」篩選：2026-08-10新增，使用者自訂的分析工具(不是書中
+            # 規則，見chart_data.py的INSTITUTIONAL_ACCUMULATION_*常數說明)，跟SAR翻轉
+            # 同一種「勾選框+多個參數」綁在一起的UI模式，獨立傳給apply_candidate_
+            # filters()的institutional_accumulation_option參數。核心用途：找出「即使
+            # 中間偶爾賣超，但N天累計買超佔均量比例仍達門檻」的緩步建倉股票，跟「連續
+            # 買超天數」(CANDIDATE_FILTERS既有規則)不同，那個指標中間出現一天賣超就會
+            # 歸零，抓不到這種型態。
+            st.caption("外資/投信累計買超（使用者自訂分析工具，非書中規則）：")
+            inst_col1, inst_col2, inst_col3, inst_col4, inst_col5 = st.columns([0.8, 1.1, 1.4, 1.8, 1.3])
+            institutional_accumulation_enabled = inst_col1.checkbox(
+                "啟用", value=False, key="filter_institutional_accumulation_enabled"
+            )
+            institutional_accumulation_type = _inline_field(
+                inst_col2, "法人別",
+                lambda: st.selectbox(
+                    "法人別", ["外資", "投信"], key="filter_institutional_accumulation_type",
+                    label_visibility="collapsed", width=80,
+                ),
+                label_width=0.7, widget_width=1.3,
+            )
+            institutional_accumulation_window_days = _inline_field(
+                inst_col3, "天內累計",
+                lambda: st.number_input(
+                    "天內累計", min_value=5, max_value=120,
+                    value=INSTITUTIONAL_ACCUMULATION_WINDOW_DAYS_DEFAULT, step=1,
+                    key="filter_institutional_accumulation_window_days", label_visibility="collapsed", width=70,
+                ),
+                label_width=1.2, widget_width=1,
+            )
+            institutional_accumulation_min_ratio_pct = _inline_field(
+                inst_col4, "%門檻(佔均量)",
+                lambda: st.number_input(
+                    "%門檻(佔均量)", min_value=0.1, max_value=100.0,
+                    value=INSTITUTIONAL_ACCUMULATION_MIN_RATIO_PCT_DEFAULT, step=0.5,
+                    key="filter_institutional_accumulation_min_ratio_pct", label_visibility="collapsed", width=80,
+                ),
+                label_width=1.6, widget_width=1,
+            )
+            # 不勾時，底部建倉/追價買超都會被篩出來(用途更彈性)，但訊號欄位一律會註明是
+            # 「底部」還是「追價」(見load_institutional_accumulation_flags())，使用者
+            # 可自行判斷；勾選時只保留判定為「底部」(trend_position.is_at_low)的股票。
+            institutional_accumulation_require_at_low = inst_col5.checkbox(
+                "只看底部建倉", value=False, key="filter_institutional_accumulation_require_at_low",
+            )
+            institutional_accumulation_option = (
+                {
+                    "investor_type": institutional_accumulation_type,
+                    "window_days": int(institutional_accumulation_window_days),
+                    "min_ratio_pct": float(institutional_accumulation_min_ratio_pct),
+                    "require_at_low": institutional_accumulation_require_at_low,
+                }
+                if institutional_accumulation_enabled else None
+            )
+
             # ⚠️ 2026-08-06修正真實bug：這裡先前是獨立寫死一組"active_filters: []、
             # sar_flip_option: None、market: None"等等，跟上面checkbox/下拉實際顯示的
             # 預設值(CANDIDATE_FILTER_DEFAULTS/CANDIDATE_SAR_FLIP_ENABLED_DEFAULT等)完全
@@ -2182,6 +2238,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     "zhu_rule_only": zhu_rule_only,
                     "market": _MARKET_FILTER_VALUES.get(market_label),
                     "industries": selected_industries, "min_volume_lots": int(min_volume_lots_input),
+                    "institutional_accumulation_option": institutional_accumulation_option,
                 }
             with apply_col:
                 st.markdown("&nbsp;")  # 對齊上面其他欄位的label高度，讓按鈕跟輸入框大致同一條水平線
@@ -2191,6 +2248,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                         "zhu_rule_only": zhu_rule_only,
                         "market": _MARKET_FILTER_VALUES.get(market_label),
                         "industries": selected_industries, "min_volume_lots": int(min_volume_lots_input),
+                        "institutional_accumulation_option": institutional_accumulation_option,
                     }
 
             # 按鈕列：🔄立即重新篩選/▶手動抓取今日資料/候選清單內搜尋框/狀態文字都在同一列，
@@ -2316,6 +2374,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             candidates_df = apply_candidate_filters(
                 conn, candidates_df, applied["active_filters"], sar_flip_option=applied["sar_flip_option"],
                 zhu_rule_only=applied.get("zhu_rule_only", True), as_of_date=latest_date,
+                institutional_accumulation_option=applied.get("institutional_accumulation_option"),
             )
 
             if latest_date is None:

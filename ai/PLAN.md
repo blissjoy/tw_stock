@@ -8842,3 +8842,57 @@ SCREEN-06外資連續賣超（75%）」正確出現在獨立的「警示」欄�
 真實驗證：`pytest tests/ -q`1119個測試全過(移除4個)。桌面版重新截圖確認：
 表格恢復13欄、標頭正確顯示「訊號(信心%)/警示」、詩肯(6195)的警示文字正確
 跟其他候選訊號一起顯示在同一欄裡(用⚠️前綴區分)，版面寬度恢復正常。
+
+---
+
+## 新增「外資/投信累計買超」選股篩選條件（2026-08-10）
+
+使用者釐清真正的需求：不是要把外資/投信買賣超「顯示」在候選清單裡（上一節已做），
+而是要像「SAR翻轉」「朱家泓技術分析」那樣，做成一個可勾選、可調參數的**篩選條件**，
+用來找「即使中間偶爾賣超，但整體持股仍持續往上墊」的緩步建倉股票。
+
+**先討論釐清兩個設計問題**：
+1. 「連續買超天數」(既有`classify_flow_streak()`)其實抓不到這個型態——中間只要出現
+   一天賣超streak就會歸零，反而更適合抓「兇猛連續無間斷買超」，跟使用者要的「中間
+   可以有賣、但整體是買」正好相反。改用「N天累計買超股數」(加總不是連續性判斷)。
+2. 累計張數用固定門檻不同股票沒法比，改成「佔N天總成交量的%」正規化——大型股/小型股
+   都能公平比較，不需要股本/市值資料(本專案還沒有)。
+3. 使用者接著提議：不要單純排除追價型，而是都篩出來但在訊號裡標明「底部」或「追價」，
+   額外加一個「只看底部建倉」勾選框讓使用者自己決定要不要收斂到只看底部。
+
+**實作**：`src/presentation/chart_data.py`新增：
+- `INSTITUTIONAL_ACCUMULATION_INVESTOR_TYPES`(外資=Foreign_Investor+Foreign_
+  Dealer_Self、投信=Investment_Trust，沿用`stock_detail_data._INVESTOR_GROUP_
+  MAP`同一套分類)、預設窗口20天、預設門檻5%(工程估計值，非書中規則、非回測驗證)。
+- `load_institutional_accumulation_flags(conn, stock_ids, investor_type,
+  window_days, min_ratio_pct, require_at_low, as_of_date)`：批次SQL(window
+  function，兩段CTE分別算累計淨買超/累計成交量)算出比例達門檻的股票，再用既有但
+  之前完全沒被呼叫過的`trend_position.compute_trend_position()`判斷是否為波段
+  低檔(is_at_low)，回傳{stock_id: "外資累計買超20.0%（底部）"}這種**每檔股票
+  文字不同**的標籤(底部/追價)。
+- `apply_candidate_filters()`新增`institutional_accumulation_option`參數(跟
+  `sar_flip_option`同一種「勾選框+多參數」bespoke模式)；因為這條篩選的標籤文字
+  是per-stock而非全部統一一句，原本「matched_condition_labels單一全域字串」的
+  合併邏輯改造成同時支援`per_stock_labels`。⚠️過程中修正一個pandas/pyarrow
+  bug：向量化的Series字串相加在某一側剛好是空集合時會拋
+  `ArrowNotImplementedError('radd' not supported)`，改用純Python迴圈組字串
+  繞過，不影響效能(候選清單通常只有幾千列)。
+
+**兩個前端UI**都新增一列「外資/投信累計買超」：啟用勾選框+法人別下拉(外資/投信)+
+天數輸入+%門檻輸入+「只看底部建倉」勾選框，桌面版用QSettings記住狀態(比照SAR
+翻轉同一套模式)，網頁版存進`st.session_state["applied_filters"]`。
+
+**⚠️效能觀察，記錄供之後參考**：對正式`data/tw_stock.db`全市場~2500檔跑一次
+(截至2026-08-07)要約27秒——比對的候選股票數多(607檔通過比例門檻)時，`trend_
+position.compute_trend_position()`是逐股票Python迴圈(路徑相關、無法簡單向量化)，
+跟SAR翻轉當初需要靠`daily_indicators`快取表解決效能問題是同一種瓶頸。這次沒有
+做快取層(範圍已經夠大)，先維持即時運算，之後如果使用者覺得太慢再仿SAR的模式加
+快取表。
+
+真實驗證：對正式`data/tw_stock.db`直接查詢(不寫入，純read)驗證——全市場607檔
+外資累計買超≥5%，其中僅28檔同時符合「底部」；`require_at_low=True`正確只回傳
+這28檔。桌面版跟網頁版都截圖驗證UI正確運作，且兩邊算出的候選股票一致；截圖裡
+剛好抓到一個很好的示範案例(1519華城)：同時顯示「⚠️排除：R-SCREEN-06外資連續
+賣超」跟「外資累計買超6.1%（底部）」——短期有賣超雜訊，但20天整體仍是買超，
+正是使用者要找的型態。`pytest tests/ -q`1126個測試全過(新增
+`tests/test_chart_data.py`7個)。截圖/驗證腳本已從scratchpad清除。

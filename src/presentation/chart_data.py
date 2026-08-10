@@ -20,6 +20,7 @@ from src.indicators.kd import compute_kd
 from src.indicators.macd import compute_macd
 from src.indicators.moving_average import DEFAULT_BULLISH_PERIODS, FULL_PERIODS, compute_ma_set, is_bullish_aligned, sma
 from src.indicators.parabolic_sar import compute_sar, sar_flipped_within
+from src.indicators.trend_position import compute_trend_position
 from src.patterns import chart_overlays
 
 _CONFIDENCE_PATTERN = re.compile(r"（(\d+)%）")
@@ -219,6 +220,124 @@ CANDIDATE_SAR_FLIP_OPTION_DEFAULT: dict = {"direction": "多頭", "within_days":
 CANDIDATE_ZHU_RULE_ONLY_DEFAULT = False
 
 
+# 「外資/投信累計買超」篩選(勾選框+法人別下拉+N天窗口+累計買超佔均量%門檻+底部建倉
+# 勾選框)：2026-08-09新增，使用者自訂的分析工具，不是書中規則，所以不套用R-CHIP-*
+# 這種書籍規則命名慣例。核心概念：即使中間偶爾出現賣超，只要「N天累計買超股數」相對
+# 「N天總成交量」的比例夠高，就代表法人整體持股仍在往上墊(緩步建倉)——跟連續買超天數
+# (見institutional_flow.classify_flow_streak())不同，那個指標只要中間出現一天賣超
+# 就會整個歸零，抓不到「偶爾賣、整體仍在買」這種型態，是使用者明確指出的問題。
+#
+# 「累計買超股數」用「佔N天總成交量的%」正規化，不是用固定股數/張數門檻——避免大型股
+# (成交量大，同樣買超股數占比很小)跟小型股(占比可能很大)不公平比較，跟股本無關(本專案
+# 目前沒有股本/市值資料，這是唯一容易取得、能跨股票比較的正規化基準)。
+INSTITUTIONAL_ACCUMULATION_INVESTOR_TYPES = {
+    "外資": ("Foreign_Investor", "Foreign_Dealer_Self"),
+    "投信": ("Investment_Trust",),
+}
+INSTITUTIONAL_ACCUMULATION_WINDOW_DAYS_DEFAULT = 20  # 約1個月交易日，跟stock_detail_
+# data._MOMENTUM_PERIODS的20天天期同一個量級，不是書中規則，工程估計值
+INSTITUTIONAL_ACCUMULATION_MIN_RATIO_PCT_DEFAULT = 5.0  # 工程估計起始值，非回測驗證
+# 過的數字，UI上開放使用者自行調整
+# is_at_low(底部)判斷需要的OHLC回看天數，跟SAR_FLIP_LOOKBACK_DAYS同一個量級/理由
+# (trend_position.compute_trend_position()是路徑相關的狀態機，需要足夠暖身期)
+INSTITUTIONAL_ACCUMULATION_TREND_LOOKBACK_DAYS = 250
+
+
+def load_institutional_accumulation_flags(
+    conn, stock_ids: list[str], investor_type: str, window_days: int, min_ratio_pct: float,
+    require_at_low: bool, as_of_date: str | None,
+) -> dict[str, str]:
+    """回傳{stock_id: 標籤文字}，只包含通過篩選的股票——跟`load_sar_flip_flags_from_
+    table()`等其他篩選函式不同，這裡的回傳值不是單純bool，而是每檔股票各自的標籤文字
+    (`"外資累計買超4.2%(底部)"`或`"...(追價)"`)，因為同一個篩選條件下不同股票的「底部/
+    追價」判定結果不同，不能像均線/SAR篩選那樣套用同一句敘述文字給所有符合的股票——見
+    `apply_candidate_filters()`裡`institutional_accumulation_option`的處理方式。
+
+    投信/外資最近`window_days`個交易日(截至`as_of_date`)的買賣超股數加總，除以同期間
+    股票總成交量加總，得到「累計買超佔均量%」；`require_at_low=True`時只保留`trend_
+    position.compute_trend_position()`判定「目前處於本波段低檔」(is_at_low)的股票，
+    `False`時底部/追價都保留，但標籤文字仍會註明是哪一種，供使用者自行判斷。
+    """
+    if not stock_ids:
+        return {}
+    underlying_types = INSTITUTIONAL_ACCUMULATION_INVESTOR_TYPES[investor_type]
+
+    placeholders = ",".join("?" * len(stock_ids))
+    type_placeholders = ",".join("?" * len(underlying_types))
+    date_clause = "AND date <= ?" if as_of_date is not None else ""
+
+    net_params: list = [*stock_ids, *underlying_types]
+    if as_of_date is not None:
+        net_params.append(as_of_date)
+    net_params.append(window_days)
+    net_rows = conn.execute(
+        f"""
+        WITH daily_net AS (
+            SELECT stock_id, date, SUM(buy - sell) AS net
+            FROM institutional_investors
+            WHERE stock_id IN ({placeholders}) AND investor_type IN ({type_placeholders})
+            GROUP BY stock_id, date
+        ),
+        ranked_net AS (
+            SELECT stock_id, net,
+                   ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC) AS rn
+            FROM daily_net
+            WHERE 1=1 {date_clause}
+        )
+        SELECT stock_id, SUM(net) FROM ranked_net WHERE rn <= ? GROUP BY stock_id
+        """,
+        net_params,
+    ).fetchall()
+    cumulative_net = {stock_id: net for stock_id, net in net_rows}
+
+    volume_params: list = [*stock_ids]
+    if as_of_date is not None:
+        volume_params.append(as_of_date)
+    volume_params.append(window_days)
+    volume_rows = conn.execute(
+        f"""
+        WITH ranked_price AS (
+            SELECT stock_id, volume,
+                   ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC) AS rn
+            FROM stock_prices
+            WHERE stock_id IN ({placeholders}) {date_clause}
+        )
+        SELECT stock_id, SUM(volume) FROM ranked_price WHERE rn <= ? GROUP BY stock_id
+        """,
+        volume_params,
+    ).fetchall()
+    cumulative_volume = {stock_id: volume for stock_id, volume in volume_rows}
+
+    passing_ids = [
+        stock_id for stock_id in stock_ids
+        if cumulative_volume.get(stock_id, 0) > 0
+        and (cumulative_net.get(stock_id, 0) / cumulative_volume[stock_id] * 100) >= min_ratio_pct
+    ]
+    if not passing_ids:
+        return {}
+
+    ohlc = _fetch_recent_columns_batched(
+        conn, passing_ids, ["high", "low", "close"],
+        INSTITUTIONAL_ACCUMULATION_TREND_LOOKBACK_DAYS, as_of_date=as_of_date,
+    )
+
+    labels: dict[str, str] = {}
+    for stock_id in passing_ids:
+        ratio_pct = cumulative_net[stock_id] / cumulative_volume[stock_id] * 100
+        rows = ohlc.get(stock_id, {})
+        is_at_low = False
+        if len(rows.get("close", [])) >= 2:
+            position = compute_trend_position(
+                pd.Series(rows["high"]), pd.Series(rows["low"]), pd.Series(rows["close"]),
+            )
+            is_at_low = bool(position["is_at_low"].iloc[-1])
+        if require_at_low and not is_at_low:
+            continue
+        zone = "底部" if is_at_low else "追價"
+        labels[stock_id] = f"{investor_type}累計買超{ratio_pct:.1f}%（{zone}）"
+    return labels
+
+
 def compute_sar_flip_flags(
     conn, stock_ids: list[str], direction: str = "多頭", within_days: int = 1,
     lookback_days: int = SAR_FLIP_LOOKBACK_DAYS, as_of_date: str | None = None,
@@ -361,6 +480,7 @@ def load_sar_flip_flags_from_table(
 def apply_candidate_filters(
     conn, candidates_df: pd.DataFrame, active_filter_labels: list[str],
     sar_flip_option: dict | None = None, zhu_rule_only: bool = False, as_of_date: str | None = None,
+    institutional_accumulation_option: dict | None = None,
 ) -> pd.DataFrame:
     """依勾選的篩選標籤(CANDIDATE_FILTERS的key)逐一AND套用，回傳過濾後的候選清單。
     未勾選任何篩選(active_filter_labels為空、sar_flip_option為None、zhu_rule_only為False)時
@@ -399,13 +519,25 @@ def apply_candidate_filters(
     改成不管signal_name原本是不是空的，一律把符合的篩選條件描述文字接在後面(用換行
     分隔)，讓使用者清楚看到「這檔股票為什麼會出現在清單裡」不會因為它剛好也觸發了
     別的規則就被蓋掉。
+
+    institutional_accumulation_option：2026-08-09新增的「外資/投信累計買超」篩選
+    參數，格式{"investor_type": "外資"|"投信", "window_days": int, "min_ratio_pct":
+    float, "require_at_low": bool}，傳None代表沒有勾選。跟sar_flip_option一樣是
+    「勾選框+多個參數」綁在一起的UI，用獨立參數傳入。⚠️ 這個篩選條件的描述文字**不是**
+    全部符合的股票共用同一句(跟均線/SAR不同)，而是每檔股票各自不同(「底部」或「追價」，
+    見`load_institutional_accumulation_flags()`)，所以底下的標籤合併邏輯額外處理
+    per-stock標籤，不能直接沿用`matched_condition_labels`那種全域共用單一字串的做法。
     """
     if candidates_df.empty:
         return candidates_df
-    if not active_filter_labels and sar_flip_option is None and not zhu_rule_only:
+    if (
+        not active_filter_labels and sar_flip_option is None and not zhu_rule_only
+        and institutional_accumulation_option is None
+    ):
         return candidates_df
     mask = pd.Series(True, index=candidates_df.index)
     matched_condition_labels: list[str] = []
+    per_stock_labels: dict[str, str] = {}
 
     # ⚠️ 2026-08-02效能修正(第一版)：候選清單基礎池改成全市場(~2000+檔)後，均線/SAR
     # 這類條件如果無條件對candidates_df裡「當下的全部stock_id」算一次，即使最後
@@ -437,13 +569,39 @@ def apply_candidate_filters(
         )
         mask &= candidates_df["stock_id"].map(flags).fillna(False)
         matched_condition_labels.append(f"SAR翻轉（{direction}，{within_days}天內）")
+    if institutional_accumulation_option is not None:
+        investor_type = institutional_accumulation_option.get("investor_type", "外資")
+        window_days = institutional_accumulation_option.get(
+            "window_days", INSTITUTIONAL_ACCUMULATION_WINDOW_DAYS_DEFAULT,
+        )
+        min_ratio_pct = institutional_accumulation_option.get(
+            "min_ratio_pct", INSTITUTIONAL_ACCUMULATION_MIN_RATIO_PCT_DEFAULT,
+        )
+        require_at_low = institutional_accumulation_option.get("require_at_low", False)
+        per_stock_labels = load_institutional_accumulation_flags(
+            conn, stock_ids, investor_type=investor_type, window_days=window_days,
+            min_ratio_pct=min_ratio_pct, require_at_low=require_at_low, as_of_date=as_of_date,
+        )
+        mask &= candidates_df["stock_id"].isin(per_stock_labels.keys())
 
     result = candidates_df[mask].reset_index(drop=True)
-    if matched_condition_labels and "signal_name" in result.columns:
-        condition_text = "\n".join(matched_condition_labels)
-        blank_signal = result["signal_name"].isna()
-        result.loc[blank_signal, "signal_name"] = condition_text
-        result.loc[~blank_signal, "signal_name"] = result.loc[~blank_signal, "signal_name"] + "\n" + condition_text
+    if (matched_condition_labels or per_stock_labels) and "signal_name" in result.columns:
+        def _build_condition_text(stock_id: str) -> str:
+            parts = list(matched_condition_labels)
+            if stock_id in per_stock_labels:
+                parts.append(per_stock_labels[stock_id])
+            return "\n".join(parts)
+
+        # ⚠️ 刻意用純Python迴圈組字串，不用pandas向量化的Series相加——實測pandas
+        # 較新版本的Arrow後端"str"欄位dtype，在其中一側(~blank_signal篩選出的子
+        # 集合)剛好是空集合時，會在型別推斷上出錯(ArrowNotImplementedError: 'radd'
+        # not supported)，是pandas/pyarrow的已知邊界案例，跟這裡的邏輯本身無關，
+        # 用純Python字串串接完全繞過這個問題，效能上候選清單通常只有幾千列，可忽略。
+        new_signal_names = []
+        for stock_id, existing in zip(result["stock_id"], result["signal_name"]):
+            condition_text = _build_condition_text(stock_id)
+            new_signal_names.append(condition_text if pd.isna(existing) else f"{existing}\n{condition_text}")
+        result["signal_name"] = new_signal_names
     return result
 
 
