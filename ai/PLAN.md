@@ -8936,3 +8936,42 @@ indicator_precompute.py`1個ground-truth比對測試、更新`tests/test_storage
 schema遷移測試一併驗證新欄位、修正5個測試檔案裡因為`upsert_daily_indicators()`
 新增必要欄位而失敗的手動dict測試)。桌面版重新截圖確認：套用篩選後畫面幾乎即時
 更新(<2秒)，候選股票清單/底部標籤內容跟優化前一致。
+
+---
+
+## 修正QSettings被驗證腳本污染的bug＋候選清單新增交錯列底色（2026-08-10）
+
+使用者回報嚴重bug：選股篩選條件預設值跑掉(SAR翻轉沒打勾、外資/投信累計買超變成
+預設打勾)，且手動只勾SAR時選出來的結果也不對。
+
+**根因排查**：不是選股邏輯的bug，是這次工作階段的驗證腳本造成的——桌面版篩選
+勾選狀態存在Windows登錄檔(`QSettings("tw_stock", "desktop")`，`desktop/main_
+window.py`的`_app_settings()`)，這是**跨執行期持久化的真實設定**，不是測試用
+的隔離環境。之前驗證新功能時寫的腳本(`verify_accumulation.py`／`verify_cache.py`
+等)是直接開啟真正的`MainWindow`、程式化勾選/取消勾選checkbox來截圖驗證，每次
+勾選都會觸發`.toggled`訊號寫回登錄檔，把驗證用的暫時狀態覆蓋了使用者平常在用的
+真實偏好設定。確認被寫壞的4個值：`sar_flip_enabled`(被寫成false，應為預設true)、
+`institutional_accumulation_enabled`(被寫成true，應為預設false)、
+`institutional_accumulation_require_at_low`(被寫成true，應為false)、
+`screener/filter/均線多頭排列（MA5>MA10>MA20）`(被寫成false，應為預設true)。
+第二個問題(只勾SAR結果卻不對)是同一根因的連鎖效應：`institutional_accumulation_
+enabled`卡在true，即使畫面上只手動勾SAR，背景其實還是「SAR AND 外資累計買超底部
+建倉」兩個條件一起套用。
+
+**修法**：直接用PowerShell改登錄檔4個值改回程式碼定義的正確預設值，重新開真正的
+桌面版驗證，確認畫面顯示均線多頭排列+SAR翻轉都正確打勾、新功能正確關閉，選出來
+的候選清單也跟這次工作開始前的原始結果完全一致(時碩工業/達麗/漢來美食/成信實業/
+詩肯5檔)。**之後的教訓**：驗證UI互動類新功能時，若需要操作真實視窗的checkbox，
+之後要嘛驗證完手動改回原狀，要嘛改用不寫入真實QSettings的方式驗證(例如直接呼叫
+底層函式而非操作真實視窗控制項)。
+
+**候選清單新增交錯列底色**：使用者接著反映候選清單每列間隔沒有底色差異、多行內容
+(尤其「訊號(信心%)/警示」欄常好幾行)很難分辨哪些內容屬於同一列。`desktop/main_
+window.py`的`candidates_table`新增`setAlternatingRowColors(True)`，跟`industry_
+tree`／`log_tree`同款既有做法一致(靠Qt Fusion風格內建的交錯列底色，不用自己定義
+顏色)。
+
+真實驗證：`pytest tests/ -q`1131個測試全過(這是純視覺樣式調整，不需要新測試)。
+桌面版重新截圖確認交錯底色正確顯示，且截圖當下剛好是使用者自己啟用「外資/投信
+累計買超」的真實使用狀態(不是bug，是使用者自己後來調整的設定)，多行密集內容的
+可讀性明顯改善。

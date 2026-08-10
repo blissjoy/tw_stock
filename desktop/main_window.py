@@ -1362,6 +1362,11 @@ class MainWindow(QMainWindow):
         # 數值欄位靠右對齊(見下面_reload_candidates()裡的setTextAlignment)時，文字會
         # 緊貼著儲存格右側格線，加一點padding-right留出呼吸空間，不要看起來擠在線上。
         self.candidates_table.setStyleSheet("QTableWidget::item { padding-right: 10px; }")
+        # 2026-08-10新增：使用者反映每列間隔沒有底色差異、多行內容(尤其「訊號(信心%)/
+        # 警示」欄常常好幾行)很難分辨哪些內容屬於同一列。跟industry_tree/log_tree同款
+        # 做法，靠Qt「Fusion」style內建的交錯列底色(見desktop/main.py的app.setStyle
+        # ("Fusion"))，不用自己刻意定義顏色。
+        self.candidates_table.setAlternatingRowColors(True)
         # ⚠️ 之前對整個header統一套用Stretch，會讓8欄一律平分寬度——「訊號」欄內容通常
         # 遠比其他欄位長，平分寬度下wrap出來的行數暴增、視覺上看起來像沒有斷行。改成除了
         # 「訊號」欄以外都用ResizeToContents(依內容自動給剛好的寬度)，多出來的空間全部
