@@ -34,9 +34,11 @@ from src.indicators.volume_price import basic_volume, is_big_volume_vs_ma5
 from src.indicators.volume_price_matrix import (
     MatrixRow,
     classify_matrix_row,
+    classify_price_direction_basic,
     classify_q1_price,
     classify_q2_volume,
     classify_q3_position,
+    format_volume_price_relation,
 )
 from src.patterns.trend_state import classify_trend_states_multi_horizon
 from src.screener.q3_patterns import scan_q3_patterns
@@ -145,6 +147,12 @@ def load_q3_analysis(price_df: pd.DataFrame, trend_df: pd.DataFrame | None = Non
         "q1_price": q1.iloc[-1],
         "q2_volume": q2.iloc[-1],
         "q3_position": q3.iloc[-1],
+        # 用classify_price_direction_basic()(單純漲跌，不管是否同時觸及關鍵價位)，
+        # 不是上面矩陣用的q1(可能被判成「關鍵點突破」而蓋掉單純的漲跌)——見
+        # classify_q1_price()的說明，這是2026-08-10合晶(6182)實測發現的落差。
+        "volume_price_relation": format_volume_price_relation(
+            classify_price_direction_basic(close).iloc[-1], q2.iloc[-1],
+        ),
     }
 
     matrix_result = (

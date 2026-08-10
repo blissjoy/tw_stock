@@ -3973,7 +3973,8 @@ class MainWindow(QMainWindow):
             ("連續站上布林上軌", f"{ind['bollinger_streak_days']} 天"),
             ("均線交叉", html.escape(ind["ma_cross"])),
             ("爆量訊號", "有" if ind["big_volume_today"] else "無"),
-            ("今日量價關係", f"{html.escape(ind['q1_price'])}／{html.escape(ind['q2_volume'])}／{html.escape(ind['q3_position'])}"),
+            ("今日量價關係", html.escape(ind["volume_price_relation"]) if ind["volume_price_relation"] else "-"),
+            ("今日Q1/Q2/Q3", f"{html.escape(ind['q1_price'])}／{html.escape(ind['q2_volume'])}／{html.escape(ind['q3_position'])}"),
         ]
         indicator_table = "".join(f"<tr><td>{label}</td><td>{value}</td></tr>" for label, value in indicator_rows)
 

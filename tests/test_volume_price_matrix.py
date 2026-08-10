@@ -13,9 +13,12 @@ from src.indicators.volume_price_matrix import (
     Q3_LOW,
     Q3_MID,
     classify_matrix_row,
+    classify_price_direction_basic,
     classify_q1_price,
     classify_q2_volume,
     classify_q3_position,
+    format_volume_price_relation,
+    is_volume_price_divergence,
 )
 
 
@@ -106,6 +109,40 @@ def test_classify_matrix_row_breakout_ignores_q3():
 
     assert row_high.rule_id == "R-Q3M-11"
     assert row_low.rule_id == "R-Q3M-11"
+
+
+def test_classify_price_direction_basic_ignores_breakout_unlike_classify_q1_price():
+    """使用者2026-08-10拿合晶(6182)實測發現：當天股價下跌又剛好觸發盤整跌破，
+    classify_q1_price()回傳「關鍵點向下跌破」，但「今日量價關係」這句話需要的是
+    單純的漲跌(classify_price_direction_basic())，不受同時發生的突破事件影響。"""
+    dates = _dates(2)
+    close = pd.Series([10.0, 9.0], index=dates)
+    breakout_down = pd.Series([False, True], index=dates)
+
+    q1_for_matrix = classify_q1_price(close, breakout_down=breakout_down)
+    q1_basic = classify_price_direction_basic(close)
+
+    assert q1_for_matrix.iloc[1] == Q1_BREAKOUT_DOWN
+    assert q1_basic.iloc[1] == Q1_DOWN
+
+
+def test_is_volume_price_divergence_flags_price_up_volume_down_and_price_down_volume_up():
+    """使用者2026-08-10拿合晶(6182)「價跌量增(背離)」的實例反映：這種背離標記
+    我們系統本來就算得出Q1/Q2，只是沒有組成這句話顯示。"""
+    assert is_volume_price_divergence(Q1_UP, Q2_DOWN) is True  # 價漲量縮
+    assert is_volume_price_divergence(Q1_DOWN, Q2_UP) is True  # 價跌量增
+    assert is_volume_price_divergence(Q1_UP, Q2_UP) is False  # 價漲量增，量價配合
+    assert is_volume_price_divergence(Q1_DOWN, Q2_DOWN) is False  # 價跌量縮，量價配合
+    assert is_volume_price_divergence(Q1_RANGE, Q2_UP) is False
+
+
+def test_format_volume_price_relation_matches_pdf_wording():
+    assert format_volume_price_relation(Q1_UP, Q2_DOWN) == "價漲量縮(背離)"
+    assert format_volume_price_relation(Q1_DOWN, Q2_UP) == "價跌量增(背離)"
+    assert format_volume_price_relation(Q1_UP, Q2_UP) == "價漲量增"
+    assert format_volume_price_relation(Q1_DOWN, Q2_FLAT) == "價跌量平"
+    assert format_volume_price_relation(Q1_RANGE, Q2_UP) is None
+    assert format_volume_price_relation(Q1_BREAKOUT_UP, Q2_UP) is None
 
 
 def test_classify_matrix_row_no_match_for_undefined_combo():

@@ -1,5 +1,6 @@
 import pandas as pd
 
+from src.indicators.volume_price_matrix import format_volume_price_relation
 from src.presentation.q3_analysis import load_q3_analysis
 
 
@@ -53,3 +54,31 @@ def test_load_q3_analysis_bullish_ma_alignment_pushes_verdict_score_positive():
     # 穩定上漲、均線多頭排列，KD/MACD在暖身後也應偏多，分數應該是正的
     assert result["verdict"]["score"] > 0
     assert any("多頭排列" in b for b in result["verdict"]["bullets"])
+
+
+def test_load_q3_analysis_volume_price_relation_matches_pdf_style_and_is_consistent_with_q1_q2():
+    """使用者2026-08-10拿合晶(6182)的「價跌量增(背離)」實例反映：這個PDF風格的
+    「今日量價關係」欄位要能直接顯示，不能只算出Q1/Q2卻沒有組成這句話。"""
+    df = _uptrend_price_df(120)
+
+    result = load_q3_analysis(df)
+    ind = result["indicators"]
+
+    assert ind["volume_price_relation"] == format_volume_price_relation(ind["q1_price"], ind["q2_volume"])
+
+
+def test_load_q3_analysis_flags_divergence_when_price_falls_on_rising_volume():
+    n = 60
+    dates = _dates(n)
+    close = [100.0] * (n - 1) + [95.0]  # 今天大跌
+    volume = [1000.0] * (n - 1) + [5000.0]  # 今天爆量
+    df = pd.DataFrame(
+        {"open": close, "high": [c + 1 for c in close], "low": [c - 1 for c in close], "close": close, "volume": volume},
+        index=dates,
+    )
+    for period in (5, 10, 20, 60, 120, 240):
+        df[f"MA{period}"] = pd.Series(close, index=dates).rolling(period, min_periods=period).mean()
+
+    result = load_q3_analysis(df)
+
+    assert result["indicators"]["volume_price_relation"] == "價跌量增(背離)"

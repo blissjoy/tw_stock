@@ -9167,3 +9167,32 @@ checkbox，不會污染QSettings)確認`toPlainText()`/`toHtml()`內容正確產
 price_matrix.py`新增caveat測試)，`pytest tests/ -q`1154個測試全過。對正式
 `data/tw_stock.db`重跑2330/5351確認basis/caveat欄位資料正確(R-Q3M-05這種
 沒有侷限的矩陣格caveat正確是None，R-Q3P-11正確標示existing_rule)。
+
+## 補上「今日量價關係」的背離標記，並修正跟矩陣Q1混用的bug（2026-08-10）
+
+使用者拿合晶(6182)實測發現PDF原文顯示「量價關係：價跌量增(背離)」，問我們
+系統判斷不出來這個嗎。查證：不是判斷不出來，是①`format_volume_price_
+relation()`原本沒寫、「今日量價關係」欄位只顯示Q1/Q2/Q3原始值沒有組成PDF
+同樣格式的句子；②接上後對6182實測發現真正的bug——當天股價下跌，同時又
+剛好觸發`R-CANDLE-04`的盤整跌破，`classify_q1_price()`把這天分類成「關鍵點
+向下跌破」而不是「下跌」(這是矩陣11-15格「關鍵點+量增/量縮/量平」需要的
+分類方式，突破優先於單純漲跌)，導致「今日量價關係」用同一份Q1也判斷不出
+「價跌」，回傳None——PDF的「今日基礎量價關係」看起來是獨立於「12矩陣」
+計算的，不受當天是否同時發生突破事件影響，這裡不該共用矩陣用的Q1。
+
+**修正**：
+- `src/indicators/volume_price_matrix.py`：新增`is_volume_price_divergence()`
+  (價漲量縮或價跌量增即為背離)、`format_volume_price_relation()`(組成PDF
+  同樣格式的句子，例如「價跌量增(背離)」)、`classify_price_direction_
+  basic()`(單純漲跌平三態，不管是否同時觸及關鍵價位，供「今日量價關係」
+  專用，不跟矩陣用的`classify_q1_price()`混用)。
+- `src/presentation/q3_analysis.py`：「今日量價關係」改用`classify_price_
+  direction_basic()`的結果，不是矩陣的q1。
+- 兩邊前端：「今日量價關係」顯示PDF風格的句子(例如「價跌量增(背離)」)，
+  原本的Q1/Q2/Q3原始值移到新的一列「今日Q1/Q2/Q3」，兩者都保留(前者對照
+  PDF，後者方便理解矩陣分類依據)。
+
+新增/更新6個測試，`pytest tests/ -q`1159個測試全過。對正式`data/tw_stock.db`
+重新驗證2330/5351/6182：6182(合晶)修正前顯示None，修正後正確顯示「價跌量增
+(背離)」，跟PDF原文一致；收盤價93.0也跟PDF截圖的$93.00一致，確認不是資料
+過期，純粹是Q1分類用途混用的邏輯bug。

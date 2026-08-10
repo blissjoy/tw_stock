@@ -36,20 +36,37 @@ Q3_MID = "全基期"
 def classify_q1_price(
     close: pd.Series, breakout_up: pd.Series | None = None, breakout_down: pd.Series | None = None,
 ) -> pd.Series:
-    """Q1：價格方向。breakout_up/breakout_down是「今天是否觸及一個明確技術關鍵價位」的
-    既有旗標(例如R-CANDLE-04的detect_consolidation_breakout()、R-SR-01/02突破轉折
-    高低點、R-LINE-11/12/14/15切線軌道突破)，呼叫端依情境自行傳入；不傳時只用漲跌/盤整
-    三態(等同PDF「關鍵點」這條軸沒有輸入資料可判斷時的降級行為)。"""
+    """Q1：價格方向，供12種矩陣分類用。breakout_up/breakout_down是「今天是否觸及一個
+    明確技術關鍵價位」的既有旗標(例如R-CANDLE-04的detect_consolidation_breakout()、
+    R-SR-01/02突破轉折高低點、R-LINE-11/12/14/15切線軌道突破)，呼叫端依情境自行傳入；
+    傳入時「今天同時上漲又剛好突破關鍵價位」會被歸類成「關鍵點突破」而不是「上漲」，
+    這是矩陣11-15格(「關鍵點+量增/量縮/量平」)需要的分類方式。
+
+    ⚠️這個「突破優先於漲跌」的分類方式不適合拿來組「今日量價關係」這句話(見
+    format_volume_price_relation())——2026-08-10使用者拿合晶(6182)實測發現：
+    當天股價確實下跌，但同時觸發了盤整跌破，這裡回傳「關鍵點向下跌破」而不是
+    「下跌」，導致format_volume_price_relation()因為Q1不是純粹的上漲/下跌而回傳
+    None，跟PDF原文「價跌量增(背離)」的顯示對不上——PDF的「今日基礎量價關係」
+    看起來是獨立於「12矩陣」計算的，不受是否同時發生突破事件影響。「今日量價
+    關係」要用classify_price_direction_basic()，不要沿用這裡的結果。"""
     prev_close = close.shift(1)
-    result = pd.Series(Q1_RANGE, index=close.index)
-    up_mask = close > prev_close
-    down_mask = close < prev_close
-    result[up_mask] = Q1_UP
-    result[down_mask] = Q1_DOWN
+    result = classify_price_direction_basic(close, prev_close)
     if breakout_up is not None:
         result[breakout_up.fillna(False)] = Q1_BREAKOUT_UP
     if breakout_down is not None:
         result[breakout_down.fillna(False)] = Q1_BREAKOUT_DOWN
+    return result
+
+
+def classify_price_direction_basic(close: pd.Series, prev_close: pd.Series | None = None) -> pd.Series:
+    """單純的漲/跌/平三態，不考慮是否同時觸及關鍵價位——供「今日量價關係」
+    (format_volume_price_relation())使用，跟classify_q1_price()是兩種不同用途的
+    分類，不要混用(見classify_q1_price()的說明)。"""
+    if prev_close is None:
+        prev_close = close.shift(1)
+    result = pd.Series(Q1_RANGE, index=close.index)
+    result[close > prev_close] = Q1_UP
+    result[close < prev_close] = Q1_DOWN
     return result
 
 
@@ -61,6 +78,34 @@ def classify_q2_volume(volume: pd.Series, ma5_volume: pd.Series) -> pd.Series:
     result[ratio <= 0.5] = Q2_DOWN
     result[ma5_volume.isna()] = None
     return result
+
+
+def is_volume_price_divergence(q1: str | None, q2: str | None) -> bool:
+    """今日量價背離：價格方向跟成交量方向「不一致」——價漲量縮或價跌量增。這是PDF
+    原文「今日基礎量價關係」欄位的標記依據(例如「價漲量縮(背離)」)，2026-08-10
+    使用者拿合晶(6182)的「價跌量增(背離)」實例發現我們系統雖然已經算出Q1/Q2(見
+    classify_q1_price()/classify_q2_volume())，但顯示的「今日量價關係」欄位沒有
+    附上這個「(背離)」標記，容易讓人誤以為系統判斷不出來——其實只是沒有把已經
+    算好的Q1/Q2組合成這句話而已。價漲量增/價跌量縮視為「量價配合」，不標記；
+    Q1是盤整/關鍵點突破或Q2是量平時，不適用「背離」這個二元對照，一律不標記。
+    """
+    return (q1 == Q1_UP and q2 == Q2_DOWN) or (q1 == Q1_DOWN and q2 == Q2_UP)
+
+
+def format_volume_price_relation(q1: str | None, q2: str | None) -> str | None:
+    """把Q1/Q2組成PDF原文「今日基礎量價關係」欄位同樣格式的一句話(例如「價漲量縮
+    (背離)」)。Q1是盤整/關鍵點突破，或Q1/Q2任一為None(資料不足)時回傳None，
+    這種情況PDF原文的「價漲/價跌」措辭本身就不適用。"""
+    if q1 not in (Q1_UP, Q1_DOWN) or q2 is None:
+        return None
+    price_word = "價漲" if q1 == Q1_UP else "價跌"
+    volume_word = {Q2_UP: "量增", Q2_DOWN: "量縮", Q2_FLAT: "量平"}.get(q2)
+    if volume_word is None:
+        return None
+    label = f"{price_word}{volume_word}"
+    if is_volume_price_divergence(q1, q2):
+        label += "(背離)"
+    return label
 
 
 def classify_q3_position(is_at_high: pd.Series, is_at_low: pd.Series) -> pd.Series:
