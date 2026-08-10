@@ -9140,3 +9140,30 @@ checkbox，不會污染QSettings)確認`toPlainText()`/`toHtml()`內容正確產
 導致`_set_autoheight_html()`量到`document().size().height()`為0(這正是
 `_on_detail_inner_tab_changed()`docstring本來就記載過的既有陷阱)，調整腳本
 呼叫順序(先show()再切tab)後高度正確(594px)，確認不是系統程式碼的bug。
+
+## 「三維過濾法」簡化版標示直接搬進畫面（2026-08-10）
+
+使用者反映：上一版收工時我提醒「30型態裡約一半是簡化版，跟外部工具原本定義
+不會100%一致」，但這件事只寫在`ai/q3-rules/`文件的「可程式化」/「對應既有
+規則庫」欄位裡，使用者不可能每次都回頭翻文件才知道某條型態是不是簡化版，
+要求直接在畫面上標示清楚。
+
+**修正**：
+- `src/screener/q3_patterns.py`：`scan_q3_patterns()`回傳的每筆型態新增
+  `basis`欄位(`BASIS_EXISTING_RULE`重用既有已接線規則／`BASIS_SIMPLIFIED`
+  本檔自建簡化版)，30條逐一分類——15條`existing_rule`(01/02/04/05/09/11/
+  15/16/17/19/20/22/27/28/30)、15條`simplified`(其餘)。
+- `src/indicators/volume_price_matrix.py`：`MatrixRow`新增`caveat`欄位，
+  給有子階段侷限的矩陣格(01/02/03/04/06/07/08/09，PDF原文用「初升/主升/
+  末升/末跌/初跌段」這種比「高檔/低檔」更細的描述，本專案只能判斷到
+  「高檔/低檔」)、以及R-Q3M-04(解讀方向可能跟既有R-VOLPRICE-04相反)附上
+  警語文字；沒有侷限的格子(如R-Q3M-05)caveat維持None。
+- 兩邊前端(`desktop/main_window.py`的`_build_q3_analysis_html()`／
+  `dashboard/app.py`的`render_q3_analysis_section()`)直接讀這兩個欄位，
+  型態清單每一條前面標「⚠️簡化版」或「沿用既有規則」，矩陣格有caveat時
+  額外顯示一行警語，不再需要使用者自己回頭查文件。
+
+新增/更新4個測試(`test_q3_patterns.py`新增basis區分測試、`test_volume_
+price_matrix.py`新增caveat測試)，`pytest tests/ -q`1154個測試全過。對正式
+`data/tw_stock.db`重跑2330/5351確認basis/caveat欄位資料正確(R-Q3M-05這種
+沒有侷限的矩陣格caveat正確是None，R-Q3P-11正確標示existing_rule)。

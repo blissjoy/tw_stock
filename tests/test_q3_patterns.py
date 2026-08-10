@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.screener.q3_patterns import scan_q3_patterns
+from src.screener.q3_patterns import BASIS_EXISTING_RULE, BASIS_SIMPLIFIED, scan_q3_patterns
 
 
 def _dates(n: int) -> pd.DatetimeIndex:
@@ -35,6 +35,31 @@ def test_scan_q3_patterns_reuses_wired_rule_for_pattern_01():
     rule_ids = {r["rule_id"] for r in results}
     assert "R-Q3P-01" in rule_ids
     assert "R-Q3P-22" in rule_ids  # 01跟22共用同一個既有規則觸發結果
+
+
+def test_scan_q3_patterns_basis_marks_existing_rule_vs_simplified():
+    """使用者2026-08-10反映：「簡化版」不能只寫在文件裡，要能直接從資料標示出來，
+    這裡驗證basis欄位確實區分了兩種型態的來源。"""
+    df = _flat_df(65)
+    golden_tier_results = [{"rule_id": "R-CLASSIC-30", "note": "均線糾結後帶量長紅突破"}]
+
+    results = scan_q3_patterns(df, golden_tier_results)
+    by_rule_id = {r["rule_id"]: r for r in results}
+
+    assert by_rule_id["R-Q3P-01"]["basis"] == BASIS_EXISTING_RULE
+    # 12號(破底無量陰跌不止)是本專案規則庫缺口的簡化版偵測——用持續緩跌+量縮觸發它
+    n = 65
+    dates = _dates(n)
+    close = [100.0 - i * 0.3 for i in range(n)]
+    close[-1] = min(close) - 1
+    volume = [2000.0] * (n - 1) + [500.0]
+    down_df = pd.DataFrame(
+        {"open": close, "high": [c + 1 for c in close], "low": [c - 1 for c in close], "close": close, "volume": volume},
+        index=dates,
+    )
+    down_results = scan_q3_patterns(down_df, golden_tier_results=[])
+    by_rule_id_down = {r["rule_id"]: r for r in down_results}
+    assert by_rule_id_down["R-Q3P-12"]["basis"] == BASIS_SIMPLIFIED
 
 
 def test_scan_q3_patterns_pattern_04_only_triggers_on_breakout_up_direction():

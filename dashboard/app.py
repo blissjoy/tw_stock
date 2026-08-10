@@ -31,6 +31,7 @@ from src.data.yfinance_client import TAIEX_STOCK_ID  # noqa: E402
 from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
 from src.presentation import chart_data, portfolio_data, q3_analysis, stock_detail_data  # noqa: E402
+from src.screener import q3_patterns  # noqa: E402
 from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_FILTER_DEFAULTS,
     CANDIDATE_FILTERS,
@@ -613,14 +614,21 @@ def main() -> None:
         if matrix is not None:
             st.markdown(f"**{matrix['label']}**（{matrix['rule_id']}）")
             st.caption(matrix["interpretation"])
+            if matrix.get("caveat"):
+                st.warning(matrix["caveat"], icon="⚠️")
         else:
             st.caption("今天沒有落在任何已定義的矩陣格。")
 
         st.markdown("#### 30種主力型態")
         patterns = result["patterns"]
         if patterns:
+            st.caption(
+                "「⚠️簡化版」代表本專案沒有對應既有規則，由本功能自行實作核心條件，跟外部工具"
+                "原文定義不會100%一致；「沿用既有規則」代表判斷邏輯跟系統其他地方完全一致。"
+            )
             for p in patterns:
-                st.markdown(f"- **{p['name']}**（{p['rule_id']}）：{p['note']}")
+                basis_badge = "⚠️簡化版" if p["basis"] == q3_patterns.BASIS_SIMPLIFIED else "沿用既有規則"
+                st.markdown(f"- `{basis_badge}` **{p['name']}**（{p['rule_id']}）：{p['note']}")
         else:
             st.caption("今天沒有觸發任何已定義的型態。")
 

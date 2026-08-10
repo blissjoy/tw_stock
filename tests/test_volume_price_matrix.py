@@ -74,6 +74,22 @@ def test_classify_matrix_row_01_up_volume_up_at_low():
     assert row.rule_id == "R-Q3M-01"
 
 
+def test_classify_matrix_row_sub_stage_rows_carry_caveat_for_ui_display():
+    """使用者2026-08-10反映：子階段判斷的侷限不能只寫在文件裡，要能直接從資料
+    取得，供UI顯示。R-Q3M-01(低檔初升段)只能程式化到「低檔」，caveat要非空；
+    R-Q3M-05(價漲量平·全基期)沒有子階段侷限，caveat應該是None。"""
+    row_01 = classify_matrix_row(Q1_UP, Q2_UP, Q3_LOW)
+    row_05 = classify_matrix_row(Q1_UP, Q2_FLAT, Q3_MID)
+
+    assert row_01.caveat is not None and "子階段" in row_01.caveat
+    assert row_05.caveat is None
+
+
+def test_classify_matrix_row_pullback_rows_carry_caveat():
+    row_08 = classify_matrix_row(Q1_DOWN, Q2_DOWN, Q3_MID, trend_today="多頭")
+    assert row_08.caveat is not None
+
+
 def test_classify_matrix_row_pullback_needs_trend_today_to_disambiguate_08_vs_09():
     bull_row = classify_matrix_row(Q1_DOWN, Q2_DOWN, Q3_MID, trend_today="多頭")
     bear_row = classify_matrix_row(Q1_DOWN, Q2_DOWN, Q3_MID, trend_today="空頭")

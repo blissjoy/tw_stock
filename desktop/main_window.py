@@ -75,6 +75,7 @@ from src.patterns import chart_overlays, latest_day_summary
 from src import rule_docs
 from src.presentation import chart_data, data_fetch_log, huang_chip_data, pipeline_status, portfolio_data, q3_analysis, stock_detail_data
 from src.presentation.chart_render import render_chart_html
+from src.screener import q3_patterns
 from src.screener.daily_screener import (
     analyze_stock_signals,
     recompute_indicators_for_range,
@@ -3924,20 +3925,38 @@ class MainWindow(QMainWindow):
         )
 
         matrix = result["matrix"]
-        matrix_html = (
-            f"<p><b>矩陣：{html.escape(matrix['label'])}</b><br>{html.escape(matrix['interpretation'])}"
-            f"（{html.escape(matrix['rule_id'])}）</p>"
-            if matrix is not None
-            else "<p>今天沒有落在任何已定義的矩陣格。</p>"
-        )
+        if matrix is not None:
+            caveat_html = (
+                f"<br><span style='color:#b36b00;'>⚠️ {html.escape(matrix['caveat'])}</span>"
+                if matrix.get("caveat")
+                else ""
+            )
+            matrix_html = (
+                f"<p><b>矩陣：{html.escape(matrix['label'])}</b><br>{html.escape(matrix['interpretation'])}"
+                f"（{html.escape(matrix['rule_id'])}）{caveat_html}</p>"
+            )
+        else:
+            matrix_html = "<p>今天沒有落在任何已定義的矩陣格。</p>"
 
         patterns = result["patterns"]
         if patterns:
-            pattern_items = "".join(
-                f"<li><b>{html.escape(p['name'])}</b>（{html.escape(p['rule_id'])}）：{html.escape(p['note'])}</li>"
-                for p in patterns
+            pattern_items = []
+            for p in patterns:
+                basis_badge = (
+                    "<span style='color:#b36b00;'>⚠️簡化版</span>　"
+                    if p["basis"] == q3_patterns.BASIS_SIMPLIFIED
+                    else "<span style='color:#666;'>沿用既有規則</span>　"
+                )
+                pattern_items.append(
+                    f"<li>{basis_badge}<b>{html.escape(p['name'])}</b>（{html.escape(p['rule_id'])}）："
+                    f"{html.escape(p['note'])}</li>"
+                )
+            patterns_html = (
+                "<p style='color:#888;font-size:90%;'>「⚠️簡化版」代表本專案沒有對應既有規則，"
+                "由本功能自行實作核心條件，跟外部工具原文定義不會100%一致；「沿用既有規則」代表"
+                "判斷邏輯跟系統其他地方完全一致。</p>"
+                f"<ul>{''.join(pattern_items)}</ul>"
             )
-            patterns_html = f"<ul>{pattern_items}</ul>"
         else:
             patterns_html = "<p>今天沒有觸發任何已定義的型態。</p>"
 

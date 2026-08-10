@@ -148,7 +148,10 @@ def load_q3_analysis(price_df: pd.DataFrame, trend_df: pd.DataFrame | None = Non
     }
 
     matrix_result = (
-        {"rule_id": matrix_row.rule_id, "label": matrix_row.label, "interpretation": matrix_row.interpretation}
+        {
+            "rule_id": matrix_row.rule_id, "label": matrix_row.label,
+            "interpretation": matrix_row.interpretation, "caveat": matrix_row.caveat,
+        }
         if matrix_row is not None
         else None
     )

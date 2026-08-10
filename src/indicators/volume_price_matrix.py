@@ -77,19 +77,29 @@ class MatrixRow:
     rule_id: str
     label: str
     interpretation: str
+    # 2026-08-10新增：使用者反映「這格的判斷有簡化/侷限」不能只寫在ai/q3-rules/文件裡，
+    # 要能直接顯示在畫面上——大多數矩陣格是None(Q1/Q2/Q3三軸都能完整程式化，沒有
+    # 簡化問題)，只有PDF原文用到「初升/主升/末升/末跌/初跌段」等比「高檔/低檔」更細
+    # 的子階段描述的格子才有值，說明本專案目前只能判斷到「高檔/低檔」這一層。
+    caveat: str | None = None
 
+
+_SUB_STAGE_CAVEAT = "PDF原文描述的是更細的子階段，本專案目前只有「高檔/低檔」二元判斷，程式化到這一層為止。"
 
 # (Q1, Q2, Q3) -> 矩陣格；Q3為None代表該格不分高檔/低檔/全基期(關鍵點/量平系列)。
 # 08/09(價跌量縮·多頭回檔期/空頭主跌段)不是用Q3(高檔/低檔)區分、是用當下多空趨勢
 # 區分，另外用_resolve_pullback_rows()處理，不放進這個查表字典。
 _MATRIX_TABLE: dict[tuple[str, str, str | None], MatrixRow] = {
-    (Q1_UP, Q2_UP, Q3_LOW): MatrixRow("R-Q3M-01", "價漲量增·低檔初升段", "絕對續漲：主力進場吃貨，波段起漲訊號"),
-    (Q1_UP, Q2_UP, Q3_HIGH): MatrixRow("R-Q3M-02", "價漲量增·高檔噴出段", "極度危險：可能是集體瘋狂末行情或主力最後誘多"),
-    (Q1_UP, Q2_DOWN, Q3_LOW): MatrixRow("R-Q3M-03", "價漲量縮·低檔反彈段", "反彈無力：缺乏資金追價，隨時會再破底"),
-    (Q1_UP, Q2_DOWN, Q3_HIGH): MatrixRow("R-Q3M-04", "價漲量縮·高檔主升段", "主力鎖籌：籌碼在大戶手上，驚驚漲格局"),
+    (Q1_UP, Q2_UP, Q3_LOW): MatrixRow("R-Q3M-01", "價漲量增·低檔初升段", "絕對續漲：主力進場吃貨，波段起漲訊號", _SUB_STAGE_CAVEAT),
+    (Q1_UP, Q2_UP, Q3_HIGH): MatrixRow("R-Q3M-02", "價漲量增·高檔噴出段", "極度危險：可能是集體瘋狂末行情或主力最後誘多", _SUB_STAGE_CAVEAT),
+    (Q1_UP, Q2_DOWN, Q3_LOW): MatrixRow("R-Q3M-03", "價漲量縮·低檔反彈段", "反彈無力：缺乏資金追價，隨時會再破底", _SUB_STAGE_CAVEAT),
+    (Q1_UP, Q2_DOWN, Q3_HIGH): MatrixRow(
+        "R-Q3M-04", "價漲量縮·高檔主升段", "主力鎖籌：籌碼在大戶手上，驚驚漲格局",
+        _SUB_STAGE_CAVEAT + "⚠️另外這個解讀方向跟R-VOLPRICE-04(多頭上漲量價背離三型態)的警訊解讀可能相反，不能只看這一格就直接視為多頭訊號。",
+    ),
     (Q1_UP, Q2_FLAT, Q3_MID): MatrixRow("R-Q3M-05", "價漲量平·全基期", "常態推進：多頭依循慣性緩步墊高"),
-    (Q1_DOWN, Q2_UP, Q3_LOW): MatrixRow("R-Q3M-06", "價跌量增·低檔末跌段", "趕底止跌：恐慌盤爆發，大資金進場接盤"),
-    (Q1_DOWN, Q2_UP, Q3_HIGH): MatrixRow("R-Q3M-07", "價跌量增·高檔初跌段", "轉空崩跌：主力不計成本帶頭逃跑"),
+    (Q1_DOWN, Q2_UP, Q3_LOW): MatrixRow("R-Q3M-06", "價跌量增·低檔末跌段", "趕底止跌：恐慌盤爆發，大資金進場接盤", _SUB_STAGE_CAVEAT),
+    (Q1_DOWN, Q2_UP, Q3_HIGH): MatrixRow("R-Q3M-07", "價跌量增·高檔初跌段", "轉空崩跌：主力不計成本帶頭逃跑", _SUB_STAGE_CAVEAT),
     (Q1_DOWN, Q2_FLAT, Q3_MID): MatrixRow("R-Q3M-10", "價跌量平·全基期", "慣性走弱：賣壓穩定大於買盤"),
     (Q1_BREAKOUT_UP, Q2_UP, Q3_MID): MatrixRow("R-Q3M-11", "關鍵點+量增·向上突破", "真突破：真金白銀突破壓力，後續大漲"),
     (Q1_BREAKOUT_DOWN, Q2_UP, Q3_MID): MatrixRow("R-Q3M-12", "關鍵點+量增·向下跌破", "真跌破：防線崩潰，後續大跌"),
@@ -103,8 +113,9 @@ _MATRIX_TABLE: dict[tuple[str, str, str | None], MatrixRow] = {
     (Q1_RANGE, Q2_FLAT, Q3_MID): MatrixRow("R-Q3M-19", "盤整量平·全基期", "冷門垃圾時間：缺乏催化劑，暫無操作價值"),
 }
 
-_MATRIX_08 = MatrixRow("R-Q3M-08", "價跌量縮·多頭回檔期", "良性修正：主力沒出貨只是洗盤，回測均線後通常再攻")
-_MATRIX_09 = MatrixRow("R-Q3M-09", "價跌量縮·空頭主跌段", "無量陰跌：市場失去人氣，股價將漫長探底")
+_PULLBACK_CAVEAT = "「多頭回檔期/空頭主跌段」不是「高檔/低檔」二元判斷，是靠當下的多空趨勢分類(短期日線)間接推定，不是精細的波段階段判斷。"
+_MATRIX_08 = MatrixRow("R-Q3M-08", "價跌量縮·多頭回檔期", "良性修正：主力沒出貨只是洗盤，回測均線後通常再攻", _PULLBACK_CAVEAT)
+_MATRIX_09 = MatrixRow("R-Q3M-09", "價跌量縮·空頭主跌段", "無量陰跌：市場失去人氣，股價將漫長探底", _PULLBACK_CAVEAT)
 
 
 def classify_matrix_row(q1: str | None, q2: str | None, q3: str | None, trend_today: str | None = None) -> MatrixRow | None:
