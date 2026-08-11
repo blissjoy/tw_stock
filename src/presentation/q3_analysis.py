@@ -147,6 +147,14 @@ def load_q3_analysis(price_df: pd.DataFrame, trend_df: pd.DataFrame | None = Non
         "q1_price": q1.iloc[-1],
         "q2_volume": q2.iloc[-1],
         "q3_position": q3.iloc[-1],
+        # 今日量/5日均量的實際比例——2026-08-10使用者拿中光電(5371)實測發現「量平」
+        # 判斷結果跟PDF原文「量縮」對不上，追查是外部工具用的量能判斷基準不明(黑盒子，
+        # 猜測可能是跟「昨日量」比而非跟「5日均量」比，門檻也可能更窄)，不是bug或資料
+        # 過期。使用者確認要把這個比例數字直接顯示出來，之後遇到類似落差可以直接看
+        # 數字自己判斷，不用每次都回頭問。
+        "volume_ratio_vs_ma5_pct": (
+            float(volume.iloc[-1] / ma5_vol.iloc[-1] * 100) if pd.notna(ma5_vol.iloc[-1]) and ma5_vol.iloc[-1] else None
+        ),
         # 用classify_price_direction_basic()(單純漲跌，不管是否同時觸及關鍵價位)，
         # 不是上面矩陣用的q1(可能被判成「關鍵點突破」而蓋掉單純的漲跌)——見
         # classify_q1_price()的說明，這是2026-08-10合晶(6182)實測發現的落差。

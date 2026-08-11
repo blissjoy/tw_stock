@@ -646,7 +646,15 @@ def main() -> None:
             ("連續站上布林上軌", f"{ind['bollinger_streak_days']} 天"),
             ("均線交叉", ind["ma_cross"]),
             ("爆量訊號", "有" if ind["big_volume_today"] else "無"),
-            ("今日量價關係", ind["volume_price_relation"] or "-"),
+            (
+                "今日量價關係",
+                (ind["volume_price_relation"] or "-")
+                + (
+                    f"　（今日量/5日均量={ind['volume_ratio_vs_ma5_pct']:.0f}%）"
+                    if ind["volume_ratio_vs_ma5_pct"] is not None
+                    else ""
+                ),
+            ),
             ("今日Q1/Q2/Q3", f"{ind['q1_price']}／{ind['q2_volume']}／{ind['q3_position']}"),
         ]
         st.dataframe(

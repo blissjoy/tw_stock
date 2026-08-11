@@ -67,6 +67,21 @@ def test_load_q3_analysis_volume_price_relation_matches_pdf_style_and_is_consist
     assert ind["volume_price_relation"] == format_volume_price_relation(ind["q1_price"], ind["q2_volume"])
 
 
+def test_load_q3_analysis_exposes_volume_ratio_vs_ma5_for_ui_transparency():
+    """使用者2026-08-10拿中光電(5371)實測發現「量平」判斷結果跟PDF原文「量縮」
+    對不上，追查是外部工具用的量能判斷基準不明(黑盒子)，不是bug。使用者要求
+    把「今日量/5日均量」實際比例數字顯示出來，方便之後自己判斷，這裡驗證這個
+    欄位確實跟volume/ma5_vol的實際比例一致。"""
+    df = _uptrend_price_df(120)
+
+    result = load_q3_analysis(df)
+    ind = result["indicators"]
+
+    ma5_vol = df["volume"].rolling(5, min_periods=5).mean()
+    expected_ratio = float(df["volume"].iloc[-1] / ma5_vol.iloc[-1] * 100)
+    assert ind["volume_ratio_vs_ma5_pct"] == expected_ratio
+
+
 def test_load_q3_analysis_flags_divergence_when_price_falls_on_rising_volume():
     n = 60
     dates = _dates(n)
