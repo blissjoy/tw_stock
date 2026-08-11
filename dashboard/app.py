@@ -323,6 +323,30 @@ def main() -> None:
             top_anchor, tech_anchor, chip_anchor = f"{widget_key}-analysis-top", f"{widget_key}-tech-section", f"{widget_key}-chip-section"
 
             st.markdown(f'<div id="{top_anchor}"></div>', unsafe_allow_html=True)
+
+            # 2026-08-11新增「逃命示警」：使用者反映一長串規則列表看不出哪些是該注意快逃
+            # 的訊號，要求把偏向「示警/賣出」性質的既有規則(見src.screener.escape_
+            # signals)提到最上方、用紅色粗體獨立標示，跟下面依信心分數排序的完整清單
+            # 分開——只挑技術面(tech_matches)的escape訊號，籌碼面訊號性質不同，這次
+            # 範圍不含在內。
+            escape_matches = [m for m in tech_matches if m.get("is_escape")]
+            if escape_matches:
+                # ⚠️ 這裡跟_render_rule_matches()不同(st.write/st.caption預設不解析HTML)，
+                # 用了unsafe_allow_html=True才能套用紅色粗體樣式，note文字裡常見的
+                # "MA5<MA10<MA20"這種"<"/">"符號沒有escape的話會被誤判成HTML標籤、內容
+                # 被吃掉一截(桌面版QTextBrowser.setHtml()踩過同樣的坑，這裡要一併escape)。
+                escape_lines = "".join(
+                    f"<li><b>{html.escape(m['rule_id'])} {html.escape(m['title'])}</b>："
+                    f"{html.escape((m.get('note') or '').split(chr(10))[0])}</li>"
+                    for m in escape_matches
+                )
+                st.markdown(
+                    f'<p style="color:#cc0000;font-weight:bold;font-size:110%;">'
+                    f"🚨 逃命示警（{len(escape_matches)}條）</p>"
+                    f'<ul style="color:#cc0000;font-weight:bold;">{escape_lines}</ul>',
+                    unsafe_allow_html=True,
+                )
+
             st.markdown("**📌 總結分析**")
             st.markdown(f"**1. 技術面**  \n{_section_teaser(tech_matches, 'tech')}")
             st.markdown(f'<a href="#{tech_anchor}">查看技術面 ↓</a>', unsafe_allow_html=True)

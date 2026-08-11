@@ -822,6 +822,7 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
     定位不同，不是bug。
     """
     from src.rule_docs import load_rule_doc, parse_confidence
+    from src.screener import escape_signals
     from src.screener.rule_scan import scan_golden_tier
 
     matches: list[dict] = []
@@ -891,6 +892,28 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
     result = [merged[rid] for rid in order]
     for m in result:
         m["note"] = "\n".join(m["note"]) if m["note"] else None
+
+    # 2026-08-11新增「逃命示警」標記：使用者反映一長串規則列表裡混著買賣訊號，看不出
+    # 哪些是該注意快逃的——`escape_signals.is_escape_signal()`從既有已接線規則裡挑出
+    # 偏向「示警/賣出」性質的一批，UI可以依`is_escape`把這些提到最上方另外標示，不用
+    # 新增規則、不影響原本的排序清單。
+    for m in result:
+        m["is_escape"] = escape_signals.is_escape_signal(m["rule_id"], m.get("note"))
+
+    # KD死亡交叉(不受趨勢限制)：書中R-INDICATOR-09要求死亡交叉要搭配趨勢才觸發，這裡
+    # 額外獨立判斷，見escape_signals.detect_kd_death_cross()的docstring。confidence
+    # 借用R-INDICATOR-09既有信心分數(同一個底層概念，只是拿掉趨勢前提)，查無分數時
+    # 給60分中等信心的保守預設值。
+    if escape_signals.detect_kd_death_cross(df):
+        result.append({
+            "rule_id": escape_signals.ESCAPE_KD_DEATH_CROSS_RULE_ID,
+            "title": "KD死亡交叉(不分趨勢)",
+            "confidence": parse_confidence("R-INDICATOR-09") or 60,
+            "note": "K值由上往下穿越D值，動能轉弱——不受R-INDICATOR-09「依趨勢判讀」的前提限制，只要死亡交叉發生就示警",
+            "description": "本專案「逃命示警」面板新增的補充判斷，不是ai/zhu-rules/裡有書籍頁碼佐證的正式規則，底層跟R-INDICATOR-09同樣是KD死亡交叉，差別只在這裡不要求搭配趨勢。",
+            "reference": None,
+            "is_escape": True,
+        })
 
     result.sort(key=lambda m: m["confidence"], reverse=True)
     return result

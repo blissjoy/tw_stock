@@ -9248,3 +9248,49 @@ smoke test，確認新session正常顯示今天日期、沒有破壞既有行為
 tests/ -q`1160個測試全過(這兩處都是Qt/Streamlit widget互動邏輯，跟`tests/
 test_main_window_helpers.py`既有慣例一致，不寫進pytest套件，用一次性
 腳本驗證後即刪除)。
+
+## 新增「逃命示警」：個股分析最上方紅字標示偏空/賣出訊號（2026-08-11）
+
+使用者提出：規則庫裡有一些「逃命」性質的規格(KD死亡交叉、MACD死亡交叉、
+長黑上引線等)，朱老師書中應該都有，能不能在「個股分析」用紅色粗體字在
+最上方示警，不用等使用者自己從一長串規則清單裡找。
+
+盤點`scan_golden_tier()`已接線的規則，確認多數已經有書籍依據並接線，純粹
+是「重新分類既有規則＋改顯示方式」，不是新規則。使用者確認的兩個設計
+決定：①KD死亡交叉本身沒有獨立規則(只包在R-INDICATOR-09「依趨勢判讀」
+規則裡，非趨勢符合時死亡交叉不會被列出來)，要求另外新增一條不受趨勢限制
+的獨立判斷；②觸發條件：清單裡任一條今天觸發就示警(不設「同時2條以上」
+的門檻)。
+
+**新增`src/screener/escape_signals.py`**：
+- `ESCAPE_RULE_IDS`：17條「只要觸發就一定是示警方向」的既有rule_id(各自
+  只有單一方向的add()呼叫)，例如R-MA-14(死亡交叉)、R-TREND-04(空頭趨勢
+  成立)、R-TREND-12(多頭高檔爆量停利)、R-CANDLE-05(高檔反轉K棒，含長黑
+  上引線等)、R-CLASSIC-01/02/07/09/13/15(高檔反轉/破底/跌破軌道等經典
+  型態)、R-INDICATOR-03/23、R-SR-02/16、R-LINE-11/15。
+- `ESCAPE_RULE_KEYWORD_FILTER`：3條rule_id同時被拿來標記兩個相反方向
+  (R-STRATEGY-07多轉空/空轉多共用同一個ID、R-INDICATOR-07趨勢級背離兩
+  方向共用、R-VOLPRICE-06突破高點/跌破低點共用)，改用note文字關鍵字
+  (「大跌」/「轉空」/「空方」)區分方向，不能只看rule_id。
+- `detect_kd_death_cross()`：不透過R-INDICATOR-09的`kd_cross_signal_by_
+  trend()`，直接用`is_death_cross(K, D)`判斷，不受趨勢前提限制——這是
+  唯一一條本次新增的補充判斷，不是`ai/zhu-rules/`裡有頁碼佐證的正式規則，
+  confidence欄位借用R-INDICATOR-09既有分數。
+
+**`daily_screener.analyze_stock_signals()`**：每筆match新增`is_escape`
+布林欄位；偵測到KD死亡交叉時額外附加一筆`rule_id="R-ESCAPE-KD-DEATH-
+CROSS"`的補充項目。
+
+**兩邊前端**：「個股分析」(桌面版`_build_analysis_sections_html()`／
+網頁版`_render_analysis_panel()`)在「📌總結分析」上方，`is_escape`訊號
+不為空時額外顯示「🚨逃命示警（N條）」紅色粗體區塊，列出每條規則名稱+
+今天的判斷依據；只涵蓋技術面(tech_matches)，籌碼面(三大法人/融資)訊號
+性質不同，這次範圍不含在內。網頁版渲染這段時因為用了`unsafe_allow_
+html=True`才能套用紅字樣式，note文字需要`html.escape()`，跟桌面版
+QTextBrowser同樣的escape坑，這次一開始就處理好，沒有事後才發現。
+
+新增1個模組+7個測試(`test_escape_signals.py`)、`analyze_stock_signals()`
+新增2個測試，`pytest tests/ -q`1169個測試全過。對正式`data/tw_stock.db`
+掃描300檔真實股票找到8檔有逃命示警觸發(含0055真的觸發了新增的KD死亡交叉
+判斷)，用Playwright(網頁版，0057)+offscreen腳本(桌面版，0057)驗證畫面
+正確顯示紅色粗體「🚨逃命示警（2條）」區塊在最上方。

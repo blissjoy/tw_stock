@@ -3898,8 +3898,28 @@ class MainWindow(QMainWindow):
                 + f"<br>{link}"
             )
 
+        # 2026-08-11新增「逃命示警」：使用者反映一長串規則列表看不出哪些是該注意快逃
+        # 的訊號，要求把偏向「示警/賣出」性質的既有規則(見src.screener.escape_signals)
+        # 提到最上方、用紅色粗體獨立標示，跟下面依信心分數排序的完整清單分開——這裡只
+        # 挑技術面(tech_matches)的escape訊號，籌碼面(三大法人/融資等)訊號性質不同，
+        # 這次範圍不含在內。
+        escape_matches = [m for m in tech_matches if m.get("is_escape")]
+        escape_html = ""
+        if escape_matches:
+            escape_items = "".join(
+                f"<li><b>{html.escape(m['rule_id'])} {html.escape(m['title'])}</b>："
+                f"{html.escape((m.get('note') or '').split(chr(10))[0])}</li>"
+                for m in escape_matches
+            )
+            escape_html = (
+                '<p style="color:#cc0000;font-weight:bold;font-size:110%;">'
+                f"🚨 逃命示警（{len(escape_matches)}條）</p>"
+                f'<ul style="color:#cc0000;font-weight:bold;">{escape_items}</ul>'
+            )
+
         summary_html = (
-            f"<p><b>{html.escape(header_label)}</b></p>"
+            escape_html
+            + f"<p><b>{html.escape(header_label)}</b></p>"
             '<p><b>📌 總結分析</b></p>'
             f"<p><b>1. 技術面</b><br>{section_teaser(tech_matches, 'tech')}</p>"
             f"<p><b>2. 籌碼面</b><br>{section_teaser(chip_matches, 'chip')}</p>"

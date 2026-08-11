@@ -257,6 +257,48 @@ def test_analyze_stock_signals_merges_duplicate_rule_id_notes(monkeypatch):
     )
 
 
+def test_analyze_stock_signals_marks_is_escape_for_curated_bearish_rules(monkeypatch):
+    """使用者2026-08-11要求：「個股分析」要能標出偏向「示警/賣出」性質的既有規則，
+    這裡驗證is_escape欄位正確區分逃命清單裡的規則(R-MA-14死亡交叉)跟一般規則
+    (R-MA-13黃金交叉)。"""
+    monkeypatch.setattr(daily_screener, "_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BULL_TREND_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BEAR_TREND_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr("src.screener.escape_signals.detect_kd_death_cross", lambda df: False)
+    import src.screener.rule_scan as rule_scan
+    monkeypatch.setattr(
+        rule_scan, "scan_golden_tier",
+        lambda df, trend_df=None: [
+            {"rule_id": "R-MA-14", "note": "MA5下穿MA10，死亡交叉"},
+            {"rule_id": "R-MA-13", "note": "MA5上穿MA10，黃金交叉"},
+        ],
+    )
+
+    matches = daily_screener.analyze_stock_signals(pd.DataFrame({"high": [1], "low": [1], "close": [1]}), min_days=0)
+
+    by_rule_id = {m["rule_id"]: m for m in matches}
+    assert by_rule_id["R-MA-14"]["is_escape"] is True
+    assert by_rule_id["R-MA-13"]["is_escape"] is False
+
+
+def test_analyze_stock_signals_appends_kd_death_cross_entry_when_detected(monkeypatch):
+    """KD死亡交叉不受R-INDICATOR-09「依趨勢判讀」限制，使用者要求獨立示警——這裡
+    驗證偵測到時會額外附加一筆is_escape=True的補充項目。"""
+    monkeypatch.setattr(daily_screener, "_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BULL_TREND_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BEAR_TREND_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr("src.screener.escape_signals.detect_kd_death_cross", lambda df: True)
+    import src.screener.rule_scan as rule_scan
+    monkeypatch.setattr(rule_scan, "scan_golden_tier", lambda df, trend_df=None: [])
+
+    matches = daily_screener.analyze_stock_signals(pd.DataFrame({"high": [1], "low": [1], "close": [1]}), min_days=0)
+
+    assert len(matches) == 1
+    assert matches[0]["rule_id"] == "R-ESCAPE-KD-DEATH-CROSS"
+    assert matches[0]["is_escape"] is True
+    assert matches[0]["confidence"] is not None
+
+
 def test_summarize_signal_matches_returns_zeros_when_empty():
     summary = daily_screener.summarize_signal_matches([])
     assert summary == {"total": 0, "bullish": 0, "bearish": 0, "other": 0, "top_match": None}
