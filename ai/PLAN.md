@@ -9213,3 +9213,38 @@ vs_ma5_pct"]`(今日量/5日均量的實際百分比)，兩邊前端「今日量
 附上「（今日量/5日均量=NN%）」。新增1個測試，`pytest tests/ -q`1160個測試
 全過。對正式`data/tw_stock.db`重新驗證5371，確認顯示「價漲量平　（今日量/
 5日均量=71%）」，數字對得上人工試算。
+
+## 修正「產業輪動」日期選單不會自動補上盤中新資料的bug（2026-08-11）
+
+使用者反映：即使還未收盤，盤中應該已經有intraday快照資料可以統計，為什麼
+「產業輪動」分頁沒有更新到今天。查證DB本身沒問題(`stock_prices`已經有
+2026-08-11的intraday資料，`is_intraday=1`)，是兩邊前端**日期選單**各自有
+一個小bug，導致選單卡在App/瀏覽器session啟動當下的日期清單，不會反映之後
+盤中新進來的資料：
+
+- **桌面版**：`self.industry_date_combo`的可選日期只在`_build_industry_
+  rotation_tab()`建構UI當下用`list_price_dates()`填過一次；之後不管切幾次
+  分頁，`_refresh_industry_rotation_tab()`都只重新整理表格內容，從沒重新
+  查過「現在有哪些日期可選」。App開著跨過盤中新資料進來的時間點，選單就會
+  一直卡住，除非重啟App。
+- **網頁版**：`st.selectbox`帶了固定`key`，Streamlit對有key的widget，只有
+  `session_state`裡還沒有這個key時才會採用`index=0`；同一個瀏覽器session
+  開著跨過盤中新資料進來的時間點，`session_state`早就存了「當時最新」的
+  那個日期，之後即使`price_dates`已經多了今天，selectbox還是沿用舊值。
+
+**修正**：桌面版`_refresh_industry_rotation_tab()`改成每次重新整理都重新
+查一次`list_price_dates()`，清單有變化才重建選單(`blockSignals`包起來避免
+訊號迴圈)，並用`findText()`還原使用者原本選取的日期(不強制跳去最新一天，
+使用者可能刻意在看歷史某一天)。網頁版額外記錄「上一次看到的最新日期」，
+只在使用者當時選的剛好就是「那時候的最新一天」(沒有刻意切去看某個歷史
+日期)時，才把`session_state`裡的值跟著推進到新的最新日期；使用者若刻意
+選了某個歷史日期，不會被打斷。
+
+驗證：桌面版用複製出來的DB(不動真正的`data/tw_stock.db`)，刪掉「今天」
+的資料模擬「App建構時今天資料還沒進來」，確認建構當下選單真的沒有今天、
+使用者手動選某個歷史日期後、模擬盤中資料補進DB、呼叫重新整理，選單正確
+補上今天且沒有打斷原本選取的歷史日期。網頁版用Playwright對正式DB做一輪
+smoke test，確認新session正常顯示今天日期、沒有破壞既有行為。`pytest
+tests/ -q`1160個測試全過(這兩處都是Qt/Streamlit widget互動邏輯，跟`tests/
+test_main_window_helpers.py`既有慣例一致，不寫進pytest套件，用一次性
+腳本驗證後即刪除)。

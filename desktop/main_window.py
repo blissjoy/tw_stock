@@ -1855,6 +1855,23 @@ class MainWindow(QMainWindow):
     def _refresh_industry_rotation_tab(self) -> None:
         if self.conn is None:
             return
+        # 2026-08-11修正：使用者反映「產業輪動」沒有更新到今天(盤中已經有intraday快照
+        # 資料，但選單裡看不到今天日期)——查證是`self.industry_date_combo`的可選日期
+        # 只在_build_industry_rotation_tab()建構UI當下用list_price_dates()填過一次，
+        # 之後不管切幾次分頁都只是重新整理表格內容(這個函式)，從沒重新查過「現在有哪些
+        # 日期可選」，App開著跨過盤中新資料進來的時間點就會一直卡在啟動當下的日期清單，
+        # 除非重啟App。改成每次重新整理都重新查一次可用日期、有新日期就補進選單，並保留
+        # 使用者目前選取的日期(不強制跳去最新一天，使用者可能刻意在看歷史某一天)。
+        current_text = self.industry_date_combo.currentText()
+        latest_dates = chart_data.list_price_dates(self.conn)
+        existing_dates = [self.industry_date_combo.itemText(i) for i in range(self.industry_date_combo.count())]
+        if latest_dates != existing_dates:
+            self.industry_date_combo.blockSignals(True)
+            self.industry_date_combo.clear()
+            self.industry_date_combo.addItems(latest_dates)
+            restore_index = self.industry_date_combo.findText(current_text) if current_text else -1
+            self.industry_date_combo.setCurrentIndex(restore_index if restore_index >= 0 else 0)
+            self.industry_date_combo.blockSignals(False)
         self.industry_update_label.setText(
             f"資料更新至：{self._format_update_timestamp(chart_data.get_latest_update_time(self.conn))}"
         )

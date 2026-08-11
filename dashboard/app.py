@@ -2658,6 +2658,26 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             # 重複顯示。
             date_col, update_col = st.columns([3, 1])
             price_dates = list_price_dates(conn)
+            # 2026-08-11修正：使用者反映「產業輪動」沒有更新到今天——查證是st.selectbox
+            # 帶了固定key="industry_rotation_date_select"，Streamlit對有key的widget，
+            # 只有session_state裡還沒有這個key時才會採用index=0；同一個瀏覽器session開著
+            # 跨過盤中新資料進來的時間點，session_state早就存了「當時最新」的那個日期，
+            # 之後即使price_dates已經多了今天，selectbox還是會沿用session_state裡的舊值，
+            # index=0形同虛設。這裡額外記錄「上一次看到的最新日期」，只在使用者當時選的
+            # 剛好就是「那時候的最新一天」(沒有刻意切去看某個歷史日期)時，才跟著往前推進
+            # 到新的最新日期；使用者若刻意選了某個歷史日期，不會被強制打斷。
+            _LATEST_SEEN_KEY = "industry_rotation_latest_seen_date"
+            _SELECT_KEY = "industry_rotation_date_select"
+            if price_dates:
+                current_latest = price_dates[0]
+                prev_latest = st.session_state.get(_LATEST_SEEN_KEY)
+                if (
+                    prev_latest is not None
+                    and prev_latest != current_latest
+                    and st.session_state.get(_SELECT_KEY) == prev_latest
+                ):
+                    st.session_state[_SELECT_KEY] = current_latest
+                st.session_state[_LATEST_SEEN_KEY] = current_latest
             with date_col:
                 # 2026-08-06改版：label跟下拉改成同一列的緊湊排法(見_inline_field()的
                 # 說明)，不要滿版拉寬。
@@ -2665,7 +2685,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     _inline_field(
                         st, "日期",
                         lambda: st.selectbox(
-                            "日期", price_dates, index=0, key="industry_rotation_date_select",
+                            "日期", price_dates, index=0, key=_SELECT_KEY,
                             label_visibility="collapsed", width=160,
                         ),
                         label_width=1, widget_width=5,
