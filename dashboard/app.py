@@ -335,8 +335,11 @@ def main() -> None:
                 # 用了unsafe_allow_html=True才能套用紅色粗體樣式，note文字裡常見的
                 # "MA5<MA10<MA20"這種"<"/">"符號沒有escape的話會被誤判成HTML標籤、內容
                 # 被吃掉一截(桌面版QTextBrowser.setHtml()踩過同樣的坑，這裡要一併escape)。
+                # 2026-08-12新增：每筆示警附上日期(見analyze_stock_signals()的date欄位
+                # 說明)，避免使用者誤以為清單裡的訊號都是今天才出現。
                 escape_lines = "".join(
-                    f"<li><b>{html.escape(m['rule_id'])} {html.escape(m['title'])}</b>："
+                    f"<li><b>{html.escape(m['rule_id'])} {html.escape(m['title'])}</b>"
+                    f"（{html.escape(m.get('date') or '-')}）："
                     f"{html.escape((m.get('note') or '').split(chr(10))[0])}</li>"
                     for m in escape_matches
                 )

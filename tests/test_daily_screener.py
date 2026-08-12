@@ -299,6 +299,29 @@ def test_analyze_stock_signals_appends_kd_death_cross_entry_when_detected(monkey
     assert matches[0]["confidence"] is not None
 
 
+def test_analyze_stock_signals_attaches_date_from_last_row_of_df(monkeypatch):
+    """使用者2026-08-12反映「逃命示警」列表看不出訊號是哪天出現的，容易誤以為都是
+    今天——這裡驗證每筆訊號都附上df最後一列(「今天」)的日期字串，不是呼叫當下的
+    系統日期，也不是寫死的今天。"""
+    monkeypatch.setattr(daily_screener, "_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BULL_TREND_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr(daily_screener, "_BEAR_TREND_SCREEN_FUNCTIONS", ())
+    monkeypatch.setattr("src.screener.escape_signals.detect_kd_death_cross", lambda df: False)
+    import src.screener.rule_scan as rule_scan
+    monkeypatch.setattr(
+        rule_scan, "scan_golden_tier",
+        lambda df, trend_df=None: [{"rule_id": "R-MA-14", "note": "MA5下穿MA10，死亡交叉"}],
+    )
+    dates = pd.date_range("2026-01-01", periods=5, freq="B")
+    df = pd.DataFrame({"high": [1] * 5, "low": [1] * 5, "close": [1] * 5}, index=dates)
+
+    matches = daily_screener.analyze_stock_signals(df, min_days=0)
+
+    assert len(matches) == 1
+    assert matches[0]["date"] == str(dates[-1].date())
+    assert matches[0]["date"] != "2026-01-01"  # 不是隨便取第一天，是最後一天(「今天」)
+
+
 def test_summarize_signal_matches_returns_zeros_when_empty():
     summary = daily_screener.summarize_signal_matches([])
     assert summary == {"total": 0, "bullish": 0, "bearish": 0, "other": 0, "top_match": None}

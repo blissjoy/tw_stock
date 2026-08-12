@@ -3998,8 +3998,13 @@ class MainWindow(QMainWindow):
         escape_matches = [m for m in tech_matches if m.get("is_escape")]
         escape_html = ""
         if escape_matches:
+            # 2026-08-12新增：每筆示警附上日期(見analyze_stock_signals()的date欄位
+            # 說明)，避免使用者誤以為清單裡的訊號都是今天才出現——多數規則是當天才會
+            # 觸發的單日事件，但少數「趨勢狀態」類規則只要條件持續成立就會每天重複
+            # 出現，日期代表「這筆訊號依據的資料日期」，不是「這個現象從哪天開始」。
             escape_items = "".join(
-                f"<li><b>{html.escape(m['rule_id'])} {html.escape(m['title'])}</b>："
+                f"<li><b>{html.escape(m['rule_id'])} {html.escape(m['title'])}</b>"
+                f"（{html.escape(m.get('date') or '-')}）："
                 f"{html.escape((m.get('note') or '').split(chr(10))[0])}</li>"
                 for m in escape_matches
             )

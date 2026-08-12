@@ -915,6 +915,26 @@ def analyze_stock_signals(df: pd.DataFrame, min_days: int = 60, trend_df: pd.Dat
             "is_escape": True,
         })
 
+    # 2026-08-12新增：每筆訊號附上「這是依據哪一天的資料判斷出來的」日期，用df最後一列
+    # (「今天」，見本函式docstring)的日期，不是呼叫當下的系統日期——如果這檔股票的資料
+    # 更新有延遲(例如停牌/資料抓取中斷)，df最後一列可能不是真正的今天，這裡如實反映
+    # 資料本身的日期，不假裝是最新的。使用者反映「逃命示警」列表看不出訊號是哪天出現的，
+    # 容易誤以為全部都是今天才發生——多數規則(死亡交叉等)確實是當天才會觸發的單日事件，
+    # 但R-TREND-04這類「趨勢狀態」規則只要條件持續成立就會每天重複出現在清單裡，不是
+    # 「今天才開始」，這裡只能如實提供「這筆訊號對應的資料日期」，不是「這個現象從
+    # 哪一天開始」(後者需要逐日回溯，不在這裡的能力範圍內，見ai/PLAN.md「探索多空綜合
+    # 摘要」那次判定不可行的記錄)。
+    if df.empty:
+        as_of_date = None
+    elif isinstance(df.index, pd.DatetimeIndex):
+        as_of_date = str(df.index[-1].date())
+    else:
+        # 測試用的合成資料常常直接給RangeIndex(0,1,2...)而非真正的日期索引，真實呼叫端
+        # (chart_data.load_price_history()的輸出)一律是DatetimeIndex，這裡防呆不crash。
+        as_of_date = str(df.index[-1])
+    for m in result:
+        m["date"] = as_of_date
+
     result.sort(key=lambda m: m["confidence"], reverse=True)
     return result
 
