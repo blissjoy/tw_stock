@@ -124,3 +124,65 @@ def test_sync_continues_other_tables_when_one_table_fails():
     assert "simulated Turso failure" in result["tables"]["margin_trading"]["error"]
     assert result["tables"]["stock_prices"]["status"] == "done"
     assert result["tables"]["daily_candidates"]["status"] == "done"
+
+
+def test_main_closes_both_connections_even_when_sync_raises(monkeypatch, tmp_path):
+    """2026-08-12修正：實際發生過的事故——`storage.ensure_schema(turso_conn)`(在`sync()`
+    裡任何逐表try/except之前呼叫)如果連線失敗(例如DNS暫時解析不到)，例外會一路往上炸穿
+    main()，原本沒有try/finally，導致turso_conn.close()執行不到。`turso_client.get_
+    connection()`底層用libsql_client開的背景thread不是daemon thread，沒close()整個
+    python.exe process就會卡住變殭屍行程，而排程工作的「多重執行個體原則」是IgnoreNew，
+    殭屍行程會讓之後每天的排程都被跳過、不會真的執行同步。這裡驗證main()不管sync()
+    成功或失敗，都保證呼叫兩邊連線的close()。"""
+    import sys
+
+    import scripts.sync_local_to_turso as sync_module
+    import src.data.turso_client as turso_client_module
+
+    local_db_path = tmp_path / "local.db"
+    local_conn_seed = init_db(str(local_db_path))
+    local_conn_seed.close()
+
+    closed = {"turso": False}
+
+    class _FakeTursoConn:
+        def close(self):
+            closed["turso"] = True
+
+    def _fake_sync(local_conn, turso_conn, days):
+        raise RuntimeError("simulated Turso DNS failure")
+
+    monkeypatch.setattr(sync_module, "sync", _fake_sync)
+    # main()裡是`from src.data import turso_client`的延遲import，不是模組層級屬性，
+    # 要patch真正的src.data.turso_client模組本身(Python import機制會重用sys.modules
+    # 裡同一個模組物件，延遲import拿到的就是這個已經被patch過的物件)。
+    monkeypatch.setattr(turso_client_module, "get_connection", lambda: _FakeTursoConn())
+    monkeypatch.setattr(sys, "argv", ["sync_local_to_turso.py", "--local-db", str(local_db_path)])
+
+    # sqlite3.Connection是C擴充型別，不能直接monkeypatch其close方法(immutable type)，
+    # 改成攔截sqlite3.connect()本身，記住main()內部實際建立的connection物件，事後用
+    # 「對已關閉的connection操作會丟ProgrammingError」這個行為驗證它真的被close()過。
+    import sqlite3
+    original_connect = sqlite3.connect
+    captured: dict = {}
+
+    def _tracking_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        captured["local_conn"] = conn
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", _tracking_connect)
+
+    try:
+        sync_module.main()
+        assert False, "main()應該要讓sync()的例外繼續往上拋，不能被吞掉"
+    except RuntimeError as exc:
+        assert "simulated Turso DNS failure" in str(exc)
+
+    assert closed["turso"] is True
+    with_closed_conn = captured["local_conn"]
+    try:
+        with_closed_conn.execute("SELECT 1")
+        assert False, "local_conn應該已經被close()過，不該還能執行查詢"
+    except sqlite3.ProgrammingError:
+        pass  # 預期行為：對已關閉的connection操作會丟這個例外，代表close()真的被呼叫過

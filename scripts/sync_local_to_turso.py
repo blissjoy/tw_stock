@@ -170,24 +170,36 @@ def main() -> None:
 
     from src.data import turso_client  # noqa: E402  （延遲import：--dry-run不需要連線相關依賴）
 
+    # ⚠️ 2026-08-12修正：原本沒有try/finally，`sync()`裡`storage.ensure_schema(turso_conn)`
+    # (每次執行都會呼叫、且不像下面逐表寫入有各自的try/except包住)如果連線失敗(例如DNS
+    # 暫時解析不到，實際發生過一次)，例外會一路往上炸穿main()，導致190行的`turso_conn.
+    # close()`永遠執行不到——`turso_client.get_connection()`底層用`libsql_client.create_
+    # client_sync()`，會另外開一個背景thread跑事件迴圈(非daemon thread)，沒呼叫close()
+    # 這個thread永遠不會結束，python.exe process就會變成殭屍行程卡住，不會真的退出。
+    # 排程工作(`tw_stock_sync_to_turso_2115`)的「多重執行個體原則」是IgnoreNew，一旦卡住
+    # 一個殭屍process，之後每天的排程都會被跳過、不會真的執行同步，而且不會有任何錯誤
+    # 提示——這是實際發生過的事故(2026-08-11晚上的DNS暫時失敗，process卡了超過24小時)。
+    # 改成不管`sync()`成功或失敗，都保證跑到close()，讓process能正常結束；例外還是照樣
+    # 往上拋(不吞掉)，讓排程本身的失敗紀錄/exit code維持原本的行為，只是不再洩漏連線。
     turso_conn = turso_client.get_connection()
-    print(f"開始從 {args.local_db} 同步最近 {args.days} 個交易日的資料到 Turso...")
-    result = sync(local_conn, turso_conn, args.days)
-    print(f"完成：{result}")
+    try:
+        print(f"開始從 {args.local_db} 同步最近 {args.days} 個交易日的資料到 Turso...")
+        result = sync(local_conn, turso_conn, args.days)
+        print(f"完成：{result}")
 
-    _append_log({
-        "timestamp": timestamp, "dry_run": False, "date_range": result["date_range"],
-        "counts": {table: info["count"] for table, info in result["tables"].items()},
-        "status": {table: info["status"] for table, info in result["tables"].items()},
-        "errors": {table: info["error"] for table, info in result["tables"].items() if info["error"]},
-    })
+        _append_log({
+            "timestamp": timestamp, "dry_run": False, "date_range": result["date_range"],
+            "counts": {table: info["count"] for table, info in result["tables"].items()},
+            "status": {table: info["status"] for table, info in result["tables"].items()},
+            "errors": {table: info["error"] for table, info in result["tables"].items() if info["error"]},
+        })
 
-    failed = [table for table, info in result["tables"].items() if info["status"] == "failed"]
-    if failed:
-        print(f"⚠️ 以下表同步失敗，請檢查上面的錯誤訊息：{failed}")
-
-    local_conn.close()
-    turso_conn.close()
+        failed = [table for table, info in result["tables"].items() if info["status"] == "failed"]
+        if failed:
+            print(f"⚠️ 以下表同步失敗，請檢查上面的錯誤訊息：{failed}")
+    finally:
+        local_conn.close()
+        turso_conn.close()
 
 
 if __name__ == "__main__":

@@ -9294,3 +9294,41 @@ QTextBrowser同樣的escape坑，這次一開始就處理好，沒有事後才�
 掃描300檔真實股票找到8檔有逃命示警觸發(含0055真的觸發了新增的KD死亡交叉
 判斷)，用Playwright(網頁版，0057)+offscreen腳本(桌面版，0057)驗證畫面
 正確顯示紅色粗體「🚨逃命示警（2條）」區塊在最上方。
+
+## 修正sync_local_to_turso.py連線洩漏導致排程被永久卡住的事故（2026-08-12）
+
+使用者回報`scripts/sync_local_to_turso.py`跑出`socket.gaierror: getaddrinfo
+failed`的DNS錯誤。查證：
+
+1. **DNS現在是通的**：`Resolve-DnsName`/`nslookup`當下都能正常解析
+   `twstock-joywang.aws-ap-northeast-1.turso.io`，是2026-08-11晚上21:15
+   排程執行當下的暫時性網路問題，不是持續性故障。
+2. **真正的事故**：Windows工作排程器(`tw_stock_sync_to_turso_2115`)顯示
+   從8/11 21:15開始就一直卡在「Running」狀態，對應的python.exe(PID
+   101592)開了超過24小時、CPU時間幾乎沒動(0.98秒)，代表process卡住沒有
+   真的結束，不是又跑了很久。追查`scripts/sync_local_to_turso.py`的
+   `main()`：`storage.ensure_schema(turso_conn)`在`sync()`裡任何逐表
+   try/except**之前**呼叫，DNS失敗時例外會一路往上炸穿`main()`，原本
+   沒有try/finally保護，導致190行的`turso_conn.close()`永遠執行不到。
+   `turso_client.get_connection()`底層用`libsql_client.create_client_
+   sync()`會另外開一個背景thread跑事件迴圈(非daemon thread)，沒
+   close()這個thread永遠不會結束，python.exe process變成殭屍行程。
+3. **連鎖影響**：這個排程工作的「多重執行個體原則」是`IgnoreNew`——
+   殭屍行程卡著沒結束，Windows工作排程器會直接跳過之後每一次的排程
+   執行、不會真的跑，而且不會有任何錯誤提示，使用者不會知道同步已經
+   停了。
+
+**修正**：`main()`的Turso連線生命週期(`get_connection()`到`sync()`)包進
+try/finally，不管`sync()`成功或失敗都保證呼叫`local_conn.close()`／
+`turso_conn.close()`；例外還是照樣往上拋(不吞掉)，排程本身的失敗紀錄/
+exit code維持原本行為，只是不再洩漏連線。新增1個測試(`test_main_closes_
+both_connections_even_when_sync_raises`)，用假的Turso連線物件+攔截
+`sqlite3.connect()`驗證兩邊連線在`sync()`拋例外時仍然都被close()。
+`pytest tests/ -q`1170個測試全過。
+
+另外發現目前還有多個從8/5～8/11起就沒結束過的python.exe process(對應
+`daily_pipeline.py`的多個排程時段)，不確定是否為同一類洩漏問題，先只
+處理這次回報的Turso同步事故，其餘留待之後有空再個別查證，不在這次
+擴大處理範圍。已卡住的殭屍process(PID 101592)本身不會因為程式碼修好
+而自己恢復，需要另外手動結束，跟使用者確認後才動手(操作真實在跑的
+process，不是單純改程式碼)。
