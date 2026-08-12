@@ -3347,7 +3347,7 @@ class MainWindow(QMainWindow):
             # 數字(見self.market_chart_view建構處的說明)。+20px緩衝對應瀏覽器預設
             # body margin，實際數字以截圖核對為準。
             self.market_chart_view.setFixedHeight(int(fig.layout.height) + 20)
-            html_content = render_chart_html(fig, price_df, stock_label=TAIEX_DISPLAY_NAME)
+            html_content = render_chart_html(fig, price_df, stock_label=TAIEX_DISPLAY_NAME, show_ma120=True)
             self._market_chart_html_path.write_text(html_content, encoding="utf-8")
             self.market_chart_view.load(QUrl.fromLocalFile(str(self._market_chart_html_path)))
         # 「大盤分析」內層tab還沒被切換過去顯示之前，QTextBrowser沒有正確的layout寬度，
@@ -3746,7 +3746,7 @@ class MainWindow(QMainWindow):
         # (見self.chart_view建構處的說明)。+20px緩衝對應瀏覽器預設body margin，實際
         # 數字以截圖核對為準。
         self.chart_view.setFixedHeight(int(fig.layout.height) + 20)
-        html = render_chart_html(fig, price_df, stock_label=stock_label)
+        html = render_chart_html(fig, price_df, stock_label=stock_label, show_ma120=120 in selected_periods)
         self._chart_html_path.write_text(html, encoding="utf-8")
         self.chart_view.load(QUrl.fromLocalFile(str(self._chart_html_path)))
 

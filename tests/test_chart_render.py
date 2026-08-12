@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from src.presentation import chart_data
 from src.presentation.chart_render import render_chart_html
@@ -102,3 +103,44 @@ def test_render_chart_html_customdata_json_is_valid_and_matches_row_count():
     end = html.index(";", start)
     embedded = json.loads(html[start:end])
     assert len(embedded) == 4
+
+
+def test_render_chart_html_customdata_includes_pct_change_as_seventh_field():
+    """2026-08-12新增：使用者要求第2列(日期/OHLCV)加上漲跌幅，這裡驗證customdata每列
+    多了一個(今日收盤-前一日收盤)/前一日收盤*100的欄位，第一天沒有前一日資料是None，
+    不是0(0%代表「跟昨天平盤」，語意不同，見render_chart_html()裡的說明)。"""
+    df = _sample_df(n=3)  # close: 102, 103, 104
+    fig = chart_data.build_candlestick_figure(df)
+
+    render_chart_html(fig, df)
+
+    candlestick = next(t for t in fig.data if t.type == "candlestick")
+    assert candlestick.customdata[0][6] is None
+    assert candlestick.customdata[1][6] == pytest.approx((103 - 102) / 102 * 100)
+    assert candlestick.customdata[2][6] == pytest.approx((104 - 103) / 103 * 100)
+
+
+def test_render_chart_html_ma_row_defaults_to_ma60_not_ma120():
+    """2026-08-12改版：第3列(MA方向)預設要包含MA60、不包含MA120(除非show_ma120=True)，
+    見MA_ROW_BASE_PERIODS的說明。"""
+    df = _sample_df()
+    fig = chart_data.build_candlestick_figure(df)
+
+    html = render_chart_html(fig, df)
+
+    start = html.index("var ma_row_labels = ") + len("var ma_row_labels = ")
+    end = html.index(";", start)
+    ma_row_labels = json.loads(html[start:end])
+    assert ma_row_labels == ["MA5", "MA10", "MA20", "MA60", "MA240"]
+
+
+def test_render_chart_html_show_ma120_true_inserts_ma120_between_ma60_and_ma240():
+    df = _sample_df()
+    fig = chart_data.build_candlestick_figure(df)
+
+    html = render_chart_html(fig, df, show_ma120=True)
+
+    start = html.index("var ma_row_labels = ") + len("var ma_row_labels = ")
+    end = html.index(";", start)
+    ma_row_labels = json.loads(html[start:end])
+    assert ma_row_labels == ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240"]

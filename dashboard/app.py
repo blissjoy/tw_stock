@@ -383,7 +383,10 @@ def main() -> None:
                 sr_levels=sr_levels, show_support_resistance=show_sr,
                 show_macd=show_macd, show_kd=show_kd, show_sar=show_sar,
             )
-            html_str = render_chart_html(fig, price_df, stock_label=chart_title, div_id=f"tw-stock-chart-{widget_key}")
+            html_str = render_chart_html(
+                fig, price_df, stock_label=chart_title, div_id=f"tw-stock-chart-{widget_key}",
+                show_ma120=120 in selected_periods,
+            )
             # +40px留給桌面版同款的固定資訊框/軸數值標籤疊加空間(見chart_render.py)，避免
             # iframe高度剛好卡住把最上面幾列文字裁掉。
             st.components.v1.html(html_str, height=int(fig.layout.height or 700) + 40, scrolling=False)

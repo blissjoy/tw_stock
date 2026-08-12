@@ -29,10 +29,11 @@ build_candlestick_figure，這裡也把它清空)，改成跟資訊框一樣的�
 新增的固定資訊框，畫在原本資訊框旁邊。
 
 ⚠️ 2026-08-02改版：使用者要求把股票標題列跟日期/OHLCV列的順序對調(標題在第一列)，並在
-下方新增第三列顯示MA5/10/20/120/240目前數值+方向(↑/↓/=，由跟前一天的diff()判斷)，
-版面調整同時把桌面版全域字級調大兩級(見desktop/main.py)。三列固定框由上到下依序是
-labelBox(股票標題，top:6px，固定不隨hover變化)、infoBox(日期/OHLCV，top:28px，隨hover
-更新)、maBox(MA方向，top:50px，隨hover更新)，`MA_ROW_PERIODS`常數控制第三列顯示的天期。
+下方新增第三列顯示MA目前數值+方向(↑/↓/=，由跟前一天的diff()判斷)，版面調整同時把
+桌面版全域字級調大兩級(見desktop/main.py)。三列固定框由上到下依序是labelBox(股票
+標題，top:6px，固定不隨hover變化)、infoBox(日期/OHLCV+漲跌幅，top:28px，隨hover
+更新)、maBox(MA方向，top:50px，隨hover更新)，`MA_ROW_BASE_PERIODS`常數+`show_ma120`
+參數控制第三列顯示的天期(見該常數的說明)。
 
 ⚠️ 2026-07-29新增：使用者要求仿TradingView，滑鼠十字線要在Y軸顯示對應的價格數值——原生
 的`yaxis.showspikes`(spikesnap="cursor")本來就會畫出跟著滑鼠實際高度走的水平線，但Plotly
@@ -57,13 +58,18 @@ from src.presentation.chart_data import MA_COLORS
 
 SPIKE_COLOR = "rgba(120,120,120,0.6)"
 
-# 固定資訊框第3列(MA方向)要顯示的均線天期：跟src/presentation/chart_data.py裡
-# CANDIDATE_FILTERS均線多頭排列篩選沿用的同一組天期一致，刻意跳過MA60。
-MA_ROW_PERIODS = (5, 10, 20, 120, 240)
-_MA_ROW_TRACE_NAMES = {f"MA{n}" for n in MA_ROW_PERIODS}
+# 固定資訊框第3列(MA方向)要顯示的均線天期。2026-08-12改版：使用者反映MA60應該
+# 直接預設在裡面、MA120改成可選擇要不要顯示——原本MA_ROW_PERIODS是寫死的模組
+# 常數(5,10,20,120,240)，不管使用者有沒有勾選「顯示均線」的MA120都固定顯示；
+# 改成MA_ROW_BASE_PERIODS(5,10,20,60,240)永遠顯示，MA120改由呼叫端傳入的
+# show_ma120參數決定(對應「顯示均線」勾選框裡MA120目前是否勾選)，跟圖上那條
+# 均線線本身是否畫出來的狀態一致，不再各自獨立。
+MA_ROW_BASE_PERIODS = (5, 10, 20, 60, 240)
 
 
-def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id: str = "tw-stock-chart") -> str:
+def render_chart_html(
+    fig, price_df: pd.DataFrame, stock_label: str = "", div_id: str = "tw-stock-chart", show_ma120: bool = False,
+) -> str:
     """就地調整fig的hover/spike相關設定(呼叫端傳入的fig預期是每次重繪都新建的，這裡直接
     修改不做防禦性複製)，回傳可以直接嵌入頁面的完整HTML字串——桌面版用`QWebEngineView`
     載入，web版用`st.components.v1.html()`嵌入iframe。
@@ -72,7 +78,13 @@ def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id
     hover時要顯示的customdata。
     stock_label: 股票代號+名稱(例如"2330 台積電")，顯示在資訊框正下方的固定第二列，取代
     Plotly自己的title機制(見模組docstring說明原因)。
+    show_ma120: 第3列(MA方向)要不要多顯示MA120——呼叫端傳入「顯示均線」勾選框裡MA120
+    目前是否勾選(大盤固定顯示全部均線，一律傳True)，見MA_ROW_BASE_PERIODS的說明。
     """
+    # MA_ROW_BASE_PERIODS是(5,10,20,60,240)，120依show_ma120插在60跟240之間，維持
+    # 由短到長排序(5,10,20,60,120,240)，不是隨意接在後面。
+    ma_row_periods = MA_ROW_BASE_PERIODS[:4] + ((120,) if show_ma120 else ()) + MA_ROW_BASE_PERIODS[4:]
+    ma_row_trace_names = {f"MA{n}" for n in ma_row_periods}
     fig.update_layout(title=dict(text=""))  # 改用下面的固定CSS列顯示股票代號+名稱，不用Plotly自己的title
     fig.update_xaxes(showspikes=False)  # 關掉共用層的原生x軸spike，改用下面的JS自訂線
     fig.update_yaxes(
@@ -87,17 +99,25 @@ def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id
     # margin.t放大到140，讓legend有足夠空間落在三列box下方。
     fig.update_layout(hovermode="x", margin=dict(t=140))
 
+    # 2026-08-12新增：第2列(日期/OHLCV)加上漲跌幅——跟本專案其他地方(候選清單/產業輪動等)
+    # 「漲跌幅(%)」欄位同一個定義：(今日收盤-前一日收盤)/前一日收盤*100，不是「今日收盤
+    # 對今日開盤」的當日振幅。第一天沒有前一日資料，pct_change()回傳NaN，轉成None讓JS端
+    # 跳過不顯示，不是顯示0%(0%代表「跟昨天平盤」，跟「沒有昨天資料可比較」語意不同)。
+    pct_change_series = price_df["close"].pct_change() * 100
     customdata = [
-        [str(idx.date()), row["open"], row["high"], row["low"], row["close"], int(row["volume"])]
-        for idx, row in price_df.iterrows()
+        [
+            str(idx.date()), row["open"], row["high"], row["low"], row["close"], int(row["volume"]),
+            float(pct_change_series.iloc[i]) if pd.notna(pct_change_series.iloc[i]) else None,
+        ]
+        for i, (idx, row) in enumerate(price_df.iterrows())
     ]
     # 第3列MA方向資訊框用：每個天期存(數值, 方向)，方向由跟前一天的diff()判斷，
     # 資料不足(NaN，例如MA240在剛上市股票的前段)時值/方向都是None，JS端會跳過不顯示。
-    ma_diffs = {n: price_df[f"MA{n}"].diff() for n in MA_ROW_PERIODS if f"MA{n}" in price_df.columns}
+    ma_diffs = {n: price_df[f"MA{n}"].diff() for n in ma_row_periods if f"MA{n}" in price_df.columns}
     ma_customdata = []
     for i in range(len(price_df)):
         row_data: list = []
-        for n in MA_ROW_PERIODS:
+        for n in ma_row_periods:
             diff_series = ma_diffs.get(n)
             value = price_df[f"MA{n}"].iloc[i] if diff_series is not None else None
             if diff_series is None or pd.isna(value):
@@ -163,19 +183,20 @@ def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id
         # 的項目資訊完全重複，不是「不小心被蓋住」而是「這塊區域本來就被maBox佔用，底下的
         # legend項目沒有存在的必要」。改成直接把這幾條均線的legend項目關掉(showlegend=
         # False，只影響圖例顯示，線本身還是照樣畫在圖上)，legend項目數變少，剩下的项目
-        # (MA60+SAR+切線/軌道線+支撐壓力+MACD/KD)才不會被三列固定框佔用的區域擋住。
-        # MA60不在MA_ROW_PERIODS裡(maBox跳過MA60)，legend繼續保留它的項目。
-        if trace.name in _MA_ROW_TRACE_NAMES:
+        # 才不會被三列固定框佔用的區域擋住。2026-08-12改版：maBox現在預設涵蓋MA60(原本
+        # 跳過)，MA120改成show_ma120=True時才會出現在maBox、才需要跟著關掉legend——
+        # ma_row_trace_names隨show_ma120動態決定，不是固定集合。
+        if trace.name in ma_row_trace_names:
             trace.showlegend = False
 
     customdata_json = json.dumps(customdata)
     macd_customdata_json = json.dumps(macd_customdata) if macd_customdata is not None else "null"
     kd_customdata_json = json.dumps(kd_customdata) if kd_customdata is not None else "null"
     ma_customdata_json = json.dumps(ma_customdata)
-    ma_row_periods_json = json.dumps([f"MA{n}" for n in MA_ROW_PERIODS])
+    ma_row_periods_json = json.dumps([f"MA{n}" for n in ma_row_periods])
     # 第3列MA方向資訊框的標籤("MA5"等)改用跟圖上那條均線一樣的顏色(MA_COLORS)，取代
     # 被關掉的legend項目原本提供的「顏色→均線」對照功能(見上面showlegend=False的說明)。
-    ma_row_colors_json = json.dumps([MA_COLORS.get(n, "#999999") for n in MA_ROW_PERIODS])
+    ma_row_colors_json = json.dumps([MA_COLORS.get(n, "#999999") for n in ma_row_periods])
     row_axes_json = json.dumps(row_axes)
     stock_label_json = json.dumps(stock_label)
     post_script = f"""
@@ -208,7 +229,7 @@ def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id
     }}
 
     // 第1列：股票標題(固定不隨hover變化)；第2列：日期/OHLCV(隨hover更新)；
-    // 第3列：MA5/10/20/120/240目前數值+方向(隨hover更新)。
+    // 第3列：MA(依MA_ROW_BASE_PERIODS+show_ma120決定)目前數值+方向(隨hover更新)。
     var labelBox = makeFixedBox('6px');
     var infoBox = makeFixedBox('36px');
     var maBox = makeFixedBox('66px');
@@ -263,14 +284,23 @@ def render_chart_html(fig, price_df: pd.DataFrame, stock_label: str = "", div_id
 
     function fmtRow(d) {{
         var color = d[4] >= d[1] ? '#c0392b' : '#27ae60';
+        // 2026-08-12新增：漲跌幅＝(今日收盤-前一日收盤)/前一日收盤，跟開高低收的顏色
+        // 依據(今日收盤vs今日開盤)不同基準，用自己的正負號決定紅漲綠跌；d[6]是第一天
+        // (沒有前一日資料可比較)時為null，不顯示這一段。
+        var pctHtml = '';
+        if (d[6] !== null && d[6] !== undefined) {{
+            var pctColor = d[6] > 0 ? '#c0392b' : (d[6] < 0 ? '#27ae60' : '#888');
+            var pctSign = d[6] > 0 ? '+' : '';
+            pctHtml = '&nbsp;&nbsp;漲跌幅<span style="color:' + pctColor + '">' + pctSign + d[6].toFixed(2) + '%</span>';
+        }}
         return '<b>' + d[0] + '</b>&nbsp;&nbsp;開<span style="color:' + color + '">' + d[1].toFixed(2)
             + '</span>&nbsp;高<span style="color:' + color + '">' + d[2].toFixed(2)
             + '</span>&nbsp;低<span style="color:' + color + '">' + d[3].toFixed(2)
             + '</span>&nbsp;收<span style="color:' + color + '">' + d[4].toFixed(2)
-            + '</span>&nbsp;&nbsp;量 ' + d[5].toLocaleString();
+            + '</span>' + pctHtml + '&nbsp;&nbsp;量 ' + d[5].toLocaleString();
     }}
 
-    // MA5/10/20/120/240目前數值+方向(↑紅/↓綠/=灰，沿用本專案「漲紅跌綠」的既有配色
+    // MA(依MA_ROW_BASE_PERIODS+show_ma120決定)目前數值+方向(↑紅/↓綠/=灰，沿用本專案「漲紅跌綠」的既有配色
     // 慣例——2026-08-04起SAR的紅綠也改成同一套規則，不再是獨立慣例，見chart_data.py
     // build_candlestick_figure()的說明)。d是ma_customdata_json裡的一列，每個天期
     // 佔2個位置(數值, 方向)，資料不足時值是null，直接跳過不顯示。
