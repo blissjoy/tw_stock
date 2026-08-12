@@ -1444,21 +1444,63 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         buy_date = st.text_input("買入日期(YYYY-MM-DD)", value=default_buy_date)
         cost_price = st.number_input("成本價", min_value=0.0, step=0.01, value=float(initial.get("cost_price") or 0) if is_edit else 0.0)
         shares = st.number_input("持股數", min_value=0, step=1000, value=int(initial.get("shares") or 0) if is_edit else 0)
-        fee = portfolio_data.estimate_buy_fee(cost_price or None, shares or None)
-        st.caption(f"預估買入手續費：{fee:,} 元（依成本價×股數自動估算，計入成本基礎）" if fee is not None else "（填成本價與持股數後自動估算）")
+
+        # 2026-08-12改版：使用者反映系統估算的手續費可能跟券商實收不同，要求開放
+        # 手動修改，不能只是唯讀顯示。key加上「這是哪一筆批次(或新增)」，避免不同
+        # 批次的session_state互相污染(例如編輯A批次時手動改過的金額，被拿去當B
+        # 批次的預設值)。
+        #
+        # ⚠️ 用一個明確的「已鎖定」布林旗標(_fee_locked_key)、而不是單純比較「上一次
+        # 估算值」，是實測踩過坑才改對的：一開始只成本價填了、股數還沒填時estimate_
+        # buy_fee()回傳None(target視為0)，session_state[_fee_key]被初始化成0；等
+        # 股數也填好、估算值第一次從None變成一個真正的數字(例如43)時，如果只比較
+        # 「這次估算值跟上次估算值(None)是否都不是None」，這個從無到有的第一次更新
+        # 會被誤判成不該套用，導致欄位卡在0、白白算出估算值卻顯示不出來(截圖實測
+        # 發現的真bug)。改成明確追蹤「目前顯示的值是不是等於上一次我們自己填入的
+        # 值(_fee_auto_value_key)」，只要沒被使用者改動過就持續跟隨最新估算值，
+        # 這裡不會有None/0混用比較造成的邊界問題。編輯模式一開始就直接鎖定(視為
+        # 已確認)，不會被成本價/股數變動覆蓋，跟桌面版_StockEditDialog的判斷一致。
+        fee_estimate = portfolio_data.estimate_buy_fee(cost_price or None, shares or None)
+        target_fee = int(fee_estimate) if fee_estimate is not None else 0
+        _dialog_instance_key = f"lot_{initial['id']}" if is_edit else "new_lot"
+        _fee_key = f"inventory_lot_dialog_fee_{_dialog_instance_key}"
+        _fee_locked_key = f"inventory_lot_dialog_fee_locked_{_dialog_instance_key}"
+        _fee_auto_value_key = f"inventory_lot_dialog_fee_auto_{_dialog_instance_key}"
+        if _fee_key not in st.session_state:
+            if is_edit:
+                st.session_state[_fee_key] = int(initial.get("fee") or 0)
+                st.session_state[_fee_locked_key] = True
+            else:
+                st.session_state[_fee_key] = target_fee
+                st.session_state[_fee_locked_key] = False
+        elif not st.session_state[_fee_locked_key]:
+            if st.session_state[_fee_key] != st.session_state.get(_fee_auto_value_key):
+                st.session_state[_fee_locked_key] = True  # 使用者上次rerun之間手動改過
+            elif target_fee != st.session_state.get(_fee_auto_value_key):
+                st.session_state[_fee_key] = target_fee
+        st.session_state[_fee_auto_value_key] = target_fee
+
+        fee = st.number_input("買入手續費", min_value=0, step=1, key=_fee_key)
+        st.caption(
+            f"系統估算：{fee_estimate:,} 元（依成本價×股數計算，可能跟券商實收不同，可手動修改）"
+            if fee_estimate is not None else "（填成本價與持股數後自動估算，可再手動修改）"
+        )
         note = st.text_input("備註", value=initial.get("note") or "" if is_edit else "")
 
         if st.button("確認", key="inventory_lot_dialog_confirm"):
             if not resolved_id:
                 st.warning("請輸入股票代號。")
                 return
+            # 成本價/股數/手續費都是空的(0)時視為None，跟舊版estimate_buy_fee()兩者
+            # 缺一就回傳None的語意一致，避免存進一筆意義不明的「0元手續費」。
+            fee_to_save = fee if (cost_price or shares or fee) else None
             if is_edit:
                 portfolio_storage.update_inventory_stock(
-                    portfolio_conn, initial["id"], buy_date or None, cost_price or None, shares or None, fee, note,
+                    portfolio_conn, initial["id"], buy_date or None, cost_price or None, shares or None, fee_to_save, note,
                 )
             else:
                 portfolio_storage.add_inventory_stock(
-                    portfolio_conn, resolved_id, buy_date or None, cost_price or None, shares or None, fee, note,
+                    portfolio_conn, resolved_id, buy_date or None, cost_price or None, shares or None, fee_to_save, note,
                 )
             st.rerun()
 

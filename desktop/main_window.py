@@ -620,7 +620,14 @@ class _StockEditDialog(QDialog):
         # 見下面的說明)。
         self.cost_price_input: QDoubleSpinBox | None = None
         self.shares_input: QSpinBox | None = None
+        self.fee_input: QSpinBox | None = None
         self.fee_estimate_label = QLabel("")
+        # 2026-08-12改版：使用者反映系統估算的手續費可能跟券商實收金額不同，要求
+        # 開放手動修改，不能只是唯讀顯示——這個旗標記錄使用者是否已經手動改過手續費，
+        # True之後成本價/股數再變動也不會自動覆蓋使用者已經確認/改過的金額(編輯既有
+        # 批次、已經有存過的手續費時也視為「已確認」，同樣不會被自動重算蓋掉)，跟
+        # 買入日期「編輯模式不強制覆蓋」的既有原則一致。
+        self._fee_manually_edited = is_inventory and initial.get("fee") is not None
         if is_inventory:
             # QDoubleSpinBox/QSpinBox沒有原生的「留空」狀態，用setSpecialValueText()
             # 讓數值等於最小值(0)時顯示提示文字取代"0.00"，values()裡把0視為None——
@@ -638,15 +645,23 @@ class _StockEditDialog(QDialog):
             self.shares_input.setValue(int(initial.get("shares") or 0))
             layout.addRow("持股數：", self.shares_input)
 
-            # 手續費：2026-08-02改版，使用者反映庫存/證券app本來就內含這筆費用，
-            # 新增庫存時不應該還要自己查來填——改成系統依成本價×股數自動估算
-            # (見src/presentation/portfolio_data.py的estimate_buy_fee())，這裡
-            # 只顯示估算結果，不是可編輯欄位；成本價/股數改變時即時重算顯示。
-            # 會計入帳面損益/報酬率的成本基礎(見_merge_holdings_with_snapshot())。
+            # 手續費：2026-08-02改版，系統依成本價×股數自動估算(見src/presentation/
+            # portfolio_data.py的estimate_buy_fee())省得使用者自己查；2026-08-12
+            # 再改版，使用者反映實際券商收費可能跟估算不同(折扣手續費率、低消門檻等
+            # 因素)，改成可編輯的欄位，估算值只是預設起點，使用者可以照證券公司對帳單
+            # 實收金額手動修改——手動改過之後(或編輯既有批次、本來就有存過金額)，成本價/
+            # 股數再變動就不會自動覆蓋，見上面_fee_manually_edited的說明。這筆金額會
+            # 計入帳面損益/報酬率的成本基礎(見_merge_holdings_with_snapshot())。
+            self.fee_input = QSpinBox()
+            self.fee_input.setRange(0, 999_999)
+            self.fee_input.setSuffix(" 元")
+            self.fee_input.setValue(int(initial.get("fee") or 0))
+            self.fee_input.editingFinished.connect(self._on_fee_manually_edited)
+            layout.addRow("買入手續費：", self.fee_input)
             self.fee_estimate_label.setStyleSheet("color: #666666;")
             self.cost_price_input.valueChanged.connect(self._update_fee_estimate)
             self.shares_input.valueChanged.connect(self._update_fee_estimate)
-            layout.addRow("預估買入手續費：", self.fee_estimate_label)
+            layout.addRow("", self.fee_estimate_label)
 
         self.note_input = QLineEdit(initial.get("note") or "")
         layout.addRow("備註：", self.note_input)
@@ -676,12 +691,22 @@ class _StockEditDialog(QDialog):
         賣出」要另外付的手續費+證交稅(estimate_sell_cost())會隨現價每天變動，不是
         買入當下就能決定的固定數字，不在這個新增/編輯批次的對話框估算，而是列表
         畫面「預估賣出成本」欄位即時算給使用者看(見_merge_holdings_with_
-        snapshot())。"""
+        snapshot())。2026-08-12改版：`fee_input`是可編輯欄位，這裡只在使用者還沒
+        手動改過(`_fee_manually_edited`為False)時才把算出來的估算值寫回`fee_
+        input`，`fee_estimate_label`則不管有沒有手動改過都持續顯示系統估算值，
+        供使用者比對「系統算的」跟「自己填的/券商實收的」差多少。"""
         fee = portfolio_data.estimate_buy_fee(self.cost_price_input.value() or None, self.shares_input.value() or None)
         if fee is None:
-            self.fee_estimate_label.setText("（填成本價與持股數後自動估算）")
+            self.fee_estimate_label.setText("（填成本價與持股數後自動估算，可再手動修改）")
         else:
-            self.fee_estimate_label.setText(f"{fee:,} 元（依成本價×股數自動估算，計入成本基礎）")
+            self.fee_estimate_label.setText(f"系統估算：{fee:,} 元（依成本價×股數計算，可能跟券商實收不同，可手動修改）")
+            if not self._fee_manually_edited:
+                self.fee_input.setValue(fee)
+
+    def _on_fee_manually_edited(self) -> None:
+        """使用者自己編輯過手續費欄位(對焦離開/按Enter觸發)，之後成本價/股數再變動
+        就不再自動覆蓋這個欄位，見_update_fee_estimate()的說明。"""
+        self._fee_manually_edited = True
 
     def _normalize_buy_date(self) -> None:
         self.buy_date_input.setText(_normalize_date_text(self.buy_date_input.text()))
@@ -712,18 +737,26 @@ class _StockEditDialog(QDialog):
         self.accept()
 
     def values(self) -> dict:
-        """呼叫端在dialog.exec()回傳Accepted後呼叫，取得使用者輸入的結果。fee是
-        系統自動估算的結果(見_update_fee_estimate()/portfolio_data.estimate_
-        buy_fee())，不是使用者輸入，觀察清單(is_inventory=False)不需要這個概念，
-        固定回傳None。"""
+        """呼叫端在dialog.exec()回傳Accepted後呼叫，取得使用者輸入的結果。2026-08-12
+        改版：fee直接讀`fee_input`目前的值(可能是系統估算、也可能是使用者手動改過的
+        金額，見_update_fee_estimate()/_on_fee_manually_edited())，不再無條件重算
+        一次覆蓋掉使用者的修改；觀察清單(is_inventory=False)不需要這個概念，固定
+        回傳None。"""
         cost_price = self.cost_price_input.value() or None if self.cost_price_input is not None else None
         shares = self.shares_input.value() or None if self.shares_input is not None else None
+        # fee維持「成本價/股數都還沒填、使用者也沒手動碰過手續費欄位」時回傳None(跟
+        # 舊版estimate_buy_fee()兩者缺一就回傳None的語意一致)，避免一筆連成本價/
+        # 股數都還沒填的空白批次被存進一筆意義不明的「0元手續費」。
+        fee = None
+        if self._is_inventory and self.fee_input is not None:
+            if self._fee_manually_edited or (cost_price is not None and shares is not None):
+                fee = self.fee_input.value()
         return {
             "stock_id": self._result_stock_id,
             "buy_date": self.buy_date_input.text().strip() or None,
             "cost_price": cost_price,
             "shares": shares,
-            "fee": portfolio_data.estimate_buy_fee(cost_price, shares) if self._is_inventory else None,
+            "fee": fee,
             "note": self.note_input.text().strip(),
         }
 
