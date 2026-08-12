@@ -1064,6 +1064,10 @@ class MainWindow(QMainWindow):
         # 清單顯示的資料可能過時。
         self._last_seen_watchlist_price_update: str | None = None
         self._last_seen_watchlist_holder_update: str | None = None
+        # 庫存清單逃命示警版本的同一種機制(見_check_for_external_inventory_update())——
+        # 2026-08-12新增，使用者要求「庫存損益是整個系統存在的關鍵」，股價每次更新都要
+        # 檢查一次，不像觀察清單那樣只在使用者剛好停留在該分頁時才刷新(見該方法說明)。
+        self._last_seen_inventory_price_update: str | None = None
         # 「重新整理」新股票F/G即時補抓(見_maybe_fetch_missing_holder_shares())：
         # _holder_fetch_worker追蹤目前是否有補抓在跑，避免重疊啟動；
         # _holder_fetch_attempted_stock_ids是整個桌面程式執行期間的一次性guard，
@@ -1092,6 +1096,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_date_list()
         self._reload_candidates()
+        # 2026-08-12新增：庫存清單逃命示警一啟動系統就要檢查一次，不能只靠使用者剛好
+        # 切到「庫存清單」分頁才被動觸發(_on_tab_changed()的既有lazy-refresh邏輯)——
+        # 使用者明確要求「庫存損益是整個系統存在的關鍵」。放在這裡(而不是等showEvent()
+        # 補打第一個分頁的刷新)是因為就算使用者開著視窗停在別的分頁，也要能立刻看到
+        # 分頁文字變紅/加🚨(見_refresh_inventory_tab()結尾)，不是只有切過去「庫存清單」
+        # 分頁那一刻才知道。
+        self._refresh_inventory_tab()
 
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._poll_pipeline_status)
@@ -5052,6 +5063,24 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         self._last_seen_watchlist_price_update = price_update
         self._last_seen_watchlist_holder_update = holder_update
 
+    def _check_for_external_inventory_update(self) -> None:
+        """庫存清單逃命示警版本的_check_for_external_candidate_update()——2026-08-12
+        新增，使用者要求「庫存損益是整個系統存在的關鍵」，每次股價更新(不論是排程
+        background觸發、還是本視窗自己抓取完成)都要主動重新檢查一次逃命示警。
+
+        跟_check_for_external_watchlist_update()不同：這裡不管使用者目前停留在哪個
+        分頁都主動重新整理(比照_check_for_external_candidate_update()的做法)——逃命
+        示警關係到庫存損益，不能因為使用者剛好沒有停留在「庫存清單」分頁就不檢查，
+        分頁文字要不要變紅/加🚨(見_refresh_inventory_tab()結尾)必須即時反映，不能
+        等使用者自己切過去才知道。
+        """
+        if self.conn is None or self.portfolio_conn is None:
+            return
+        price_update = chart_data.get_latest_update_time(self.conn)
+        if self._last_seen_inventory_price_update is not None and price_update != self._last_seen_inventory_price_update:
+            self._refresh_inventory_tab()
+        self._last_seen_inventory_price_update = price_update
+
     def _poll_pipeline_status(self) -> None:
         # 如果本視窗自己觸發的PipelineWorker正在跑，狀態列已經由_on_fetch_progress()顯示
         # 更細緻的下載進度(例如「TPEx 500/1980檔」)，這裡就不要每5秒用pipeline_status.json
@@ -5062,6 +5091,7 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         if self.conn is not None:
             self._check_for_external_candidate_update()
             self._check_for_external_watchlist_update()
+            self._check_for_external_inventory_update()
         status = pipeline_status.read_status()
         state = status.get("status") if status else None
         if state == "running":

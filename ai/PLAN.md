@@ -9700,3 +9700,65 @@ expander跟報表版`_build_report_institutional_html()`)的「單位：張」
 說明文字都改成「累計買賣超（單位：張）——各欄各自往前累計，非獨立
 區間」，純文字標籤修改，不影響計算邏輯，`pytest tests/ -q -k
 institutional`69個測試全過。
+
+## 庫存逃命示警：啟動時檢查＋每次股價更新都檢查（2026-08-12）
+
+使用者要求「一啟動系統時就檢查庫存的逃命狀況，每次更新股價時也要檢查，
+因為庫存的損益是整個系統存在的關鍵」。釐清範圍後確認要做兩個層面：
+①App內(桌面版/web版)一開啟/一載入就檢查，不能只靠使用者剛好切到
+「庫存清單」分頁才被動看到；②接進`scripts/daily_pipeline.py`本身，
+發現逃命示警要主動發LINE通知，跟候選清單同一則訊息一起送、不要分成
+兩則。
+
+**①App內檢查**：
+- 桌面版：`MainWindow.__init__()`裡`_build_ui()`之後直接呼叫一次
+  `_refresh_inventory_tab()`(不用等使用者切到該分頁)；新增
+  `_check_for_external_inventory_update()`(比照既有的候選清單/觀察
+  清單「外部更新偵測」機制)，每5秒輪詢`_poll_pipeline_status()`時
+  一併追蹤股價更新時間戳，變了就重新檢查——**不管使用者目前停留在
+  哪個分頁都主動重新整理**(跟只在「剛好停留在該分頁」才刷新的觀察
+  清單版本不同，因為逃命示警攸關損益，不能因為使用者沒在看那個分頁
+  就不檢查)。
+- web版：這部分其實2026-08-12稍早實作「庫存清單分頁層級紅色提示」時
+  就已經符合了——`_load_inventory_escape_signals_cached()`在
+  `st.tabs()`建立分頁列之前就無條件執行，本來就涵蓋「頁面第一次載入」
+  跟「使用者任何互動觸發的重新整理」，不用另外改。
+
+**②daily_pipeline.py主動推播**：`format_candidates_message()`
+(src/notify/line_notify.py)新增`inventory_escape_signals`參數，有
+內容時在候選清單內容後面加一段「🚨庫存逃命示警」，兩段合併後才套用
+LINE單則長度上限(不是候選清單先自己截斷一次)。`daily_pipeline.py`
+的通知區塊(非dry_run分支)新增獨立的portfolio_conn開關+try/except，
+查`list_inventory_stock_ids()`+`load_escape_signals_for_stocks()`，
+結果傳入`format_candidates_message()`；檢查失敗不影響候選清單通知
+照常發送(跟其他通知管道獨立try/except同一個精神)。
+
+⚠️ **範圍取捨**：這個檢查跟著`dry_run`走，不像`chip_refresh`那樣獨立
+於`dry_run`之外——`--dry-run`也用於本機測試，讓逃命通知繞過dry_run
+會有安全風險(測試時可能不小心對真實LINE頻道發出真的訊息)。代價是
+17:00/21:00這兩場排程帶`--dry-run`，不會主動推播逃命示警(即使17:00
+收盤後的最終價+法人資料其實最適合檢查)。2026-08-12跟使用者確認過
+這個取捨(問卷選項：保持現狀／17:00拿掉--dry-run／新增獨立旗標)，
+使用者選擇維持現狀——庫存逃命狀態仍然會在App開啟/互動時看得到，只是
+17:00/21:00不會額外主動推播LINE。
+
+新增4個測試(daily_pipeline.py：庫存有逃命示警時合併進同一則LINE訊息、
+檢查失敗不影響候選清單通知；line_notify.py：有/無逃命示警的組合行為、
+候選清單為空時逃命示警段落仍照常顯示)，並修正4個既有測試新增
+`get_default_portfolio_connection`的mock(這幾個既有測試dry_run=False
+但沒有這個mock，我新增的程式碼會讓它們意外對真的Turso發出網路請求，
+在這個sandbox環境會直接卡住不回應——修正時順手把`_fresh_portfolio_
+conn()`從檔案後段搬到跟`_fresh_conn()`相鄰的位置，兩個「空DB」
+helper放在一起)。`pytest tests/ -q`1187個測試全過。
+
+對正式`data/tw_stock.db`+複製一份`portfolio.db`測試(0050/2317/6139
+三檔已知有逃命示警的真實持股)驗證：桌面版offscreen腳本確認`MainWindow()`
+建構完成當下(不用手動呼叫任何刷新)分頁文字已經是「🚨 庫存清單」、
+0050列已經標🔺；直接呼叫`format_candidates_message()`搭配真實
+`load_escape_signals_for_stocks()`結果，確認組出來的LINE文字正確
+把候選清單跟3檔逃命示警合併成同一則訊息。
+
+驗證途中重新踩到先前記錄過的坑：offscreen腳本忘記設`LOCAL_DB_PATH`，
+第一次執行又落到Turso分支——這次照著memory備忘錄的提醒事先設好
+`LOCAL_DB_PATH`+`PORTFOLIO_DB_PATH`，執行時間從先前兩次的12~18分鐘
+縮短到幾秒鐘完成，備忘錄的教訓確實有用。

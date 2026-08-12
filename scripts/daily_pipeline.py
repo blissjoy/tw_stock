@@ -37,12 +37,12 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.data import finmind_client, holder_shares_sync, storage, tpex_client, twse_client, yfinance_client  # noqa: E402
+from src.data import finmind_client, holder_shares_sync, portfolio_storage, storage, tpex_client, twse_client, yfinance_client  # noqa: E402
 from src.data.connection import get_default_portfolio_connection  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
-from src.presentation import chart_data, data_fetch_log, pipeline_status, watchlist_export  # noqa: E402
+from src.presentation import chart_data, data_fetch_log, pipeline_status, portfolio_data, watchlist_export  # noqa: E402
 from src.screener.daily_screener import refresh_indicator_window, run_screen_and_store  # noqa: E402
 
 
@@ -451,6 +451,18 @@ def run_daily_pipeline(
     拆成獨立旗標後，17:00那次排程可以同時帶`--dry-run --chip-refresh`（不重複發送當天
     已經發過的LINE/Email候選清單通知，但仍執行這三件籌碼相關更新）。
 
+    庫存逃命示警：2026-08-12新增，使用者要求「庫存損益是整個系統存在的關鍵」，每次
+    真正發送通知(=非dry_run)都要檢查一次目前持股有沒有逃命示警，跟候選清單同一則
+    LINE訊息一起發送(見format_candidates_message()的inventory_escape_signals參數)。
+    ⚠️ 這個檢查跟著dry_run走、不獨立於dry_run之外(不像chip_refresh)——`--dry-run`
+    也用於本機測試(見模組docstring的範例指令)，讓逃命通知繞過dry_run會有安全風險
+    (測試時可能不小心對真實LINE頻道發出真的訊息)。代價是17:00/21:00這兩場排程帶
+    `--dry-run`，不會觸發逃命示警的主動LINE推播——即使17:00收盤後的最終價+法人資料
+    其實最適合檢查。2026-08-12跟使用者確認過這個取捨，決定維持現狀：庫存逃命狀態
+    仍然會在桌面版/web版開啟或互動時看得到(見desktop/main_window.py的_check_for_
+    external_inventory_update()、dashboard/app.py的_load_inventory_escape_signals_
+    cached())，只是17:00/21:00這兩個時段不會額外主動推播。
+
     trigger：2026-08-06新增，"automatic"(預設，Windows工作排程器排程觸發)／"manual"
     (桌面版「▶ 手動抓取今日資料」按鈕，見desktop/main_window.py的PipelineWorker)——
     只用來標記寫進data_fetch_log.jsonl的這筆紀錄是怎麼被觸發的(見「日誌」分頁)，不影響
@@ -587,11 +599,33 @@ def run_daily_pipeline(
             except Exception as exc:  # noqa: BLE001
                 print(f"通知篩選失敗，改寄未篩選的原始候選清單（略過，不影響已寫入的候選清單）：{exc}")
 
+            # 2026-08-12新增：庫存逃命示警——使用者要求「庫存損益是整個系統存在的關鍵」，
+            # 每次真正發送通知(=股價/籌碼資料剛更新完)都要主動檢查一次目前持股有沒有
+            # 逃命示警，跟候選清單同一則LINE訊息一起發送(不要分成兩則，理由見
+            # format_candidates_message()的inventory_escape_signals參數說明)。獨立
+            # try/except、獨立開關portfolio_conn(跟下面chip_refresh區塊各自獨立一條
+            # 連線，理由一致：這裡失敗不應該讓候選清單通知整個發不出去，也不應該被
+            # chip_refresh=False的排程漏掉這個檢查——這個檢查不受chip_refresh旗標
+            # 控制，只要不是dry_run就會執行)。
+            inventory_escape_signals = None
+            try:
+                inventory_portfolio_conn = get_default_portfolio_connection()
+                try:
+                    inventory_stock_ids = portfolio_storage.list_inventory_stock_ids(inventory_portfolio_conn)
+                    inventory_escape_signals = portfolio_data.load_escape_signals_for_stocks(conn, inventory_stock_ids)
+                finally:
+                    inventory_portfolio_conn.close()
+            except Exception as exc:  # noqa: BLE001
+                print(f"庫存逃命示警檢查失敗（略過，不影響候選清單通知）：{exc}")
+
             # 兩個通知管道各自獨立try/except：例如Gmail憑證還沒設定時，LINE通知仍應正常發送，
             # 不應該讓其中一個管道還沒設定/暫時失敗就讓整條pipeline中斷（候選清單已經寫進Turso了）。
             try:
                 stock_names = {sid: info.get("name", "") for sid, info in stock_info_by_id.items()}
-                send_line_broadcast(format_candidates_message(iso_date, notify_candidates, stock_names=stock_names))
+                send_line_broadcast(format_candidates_message(
+                    iso_date, notify_candidates, stock_names=stock_names,
+                    inventory_escape_signals=inventory_escape_signals,
+                ))
             except Exception as exc:  # noqa: BLE001
                 print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
             try:

@@ -23,7 +23,10 @@ MAX_MESSAGE_LENGTH = 5000  # LINE單則文字訊息長度上限
 _CONFIDENCE_PATTERN = re.compile(r"（(\d+)%）")
 
 
-def format_candidates_message(date: str, candidates: list[dict], stock_names: dict[str, str] | None = None) -> str:
+def format_candidates_message(
+    date: str, candidates: list[dict], stock_names: dict[str, str] | None = None,
+    inventory_escape_signals: dict[str, list[dict]] | None = None,
+) -> str:
     """把每日候選清單格式化成單則LINE文字訊息，超過LINE長度上限時截斷。
 
     ⚠️ 2026-08-01改版：`candidates`(來自`screen_all_stocks()`)同一檔股票符合多條
@@ -35,29 +38,48 @@ def format_candidates_message(date: str, candidates: list[dict], stock_names: di
     多少、多強的訊號重疊」，不是隨意順序)。
 
     stock_names：{stock_id: name}，省略或查無名稱時該檔只顯示代號。
+
+    inventory_escape_signals(2026-08-12新增)：{股票代號: 逃命示警清單}(見
+    src.presentation.portfolio_data.load_escape_signals_for_stocks())，有內容
+    (至少一檔股票的清單非空)時在候選清單內容後面加一段「🚨庫存逃命示警」。使用者
+    明確要求跟候選清單同一則LINE訊息一起發送，不要分成兩則——理由是庫存損益是
+    整個系統存在的關鍵，獨立成另一則訊息容易被候選清單通知的訊息量淹沒、漏看。
+    截斷長度限制(MAX_MESSAGE_LENGTH)在兩段都組完之後才套用一次，不是候選清單
+    先自己截斷一次、逃命示警再疊加上去(那樣總長度可能超過LINE單則訊息上限)。
     """
     if not candidates:
-        return f"【{date} 每日選股】今天沒有符合條件的候選股。"
-    stock_names = stock_names or {}
+        lines = [f"【{date} 每日選股】今天沒有符合條件的候選股。"]
+    else:
+        stock_names = stock_names or {}
+        grouped: dict[str, list[dict]] = {}
+        for c in candidates:
+            grouped.setdefault(c["stock_id"], []).append(c)
 
-    grouped: dict[str, list[dict]] = {}
-    for c in candidates:
-        grouped.setdefault(c["stock_id"], []).append(c)
+        def _confidence_sum(matches: list[dict]) -> int:
+            total = 0
+            for m in matches:
+                match = _CONFIDENCE_PATTERN.search(m.get("signal_name", "") or "")
+                if match:
+                    total += int(match.group(1))
+            return total
 
-    def _confidence_sum(matches: list[dict]) -> int:
-        total = 0
-        for m in matches:
-            match = _CONFIDENCE_PATTERN.search(m.get("signal_name", "") or "")
-            if match:
-                total += int(match.group(1))
-        return total
+        ranked = sorted(grouped.items(), key=lambda item: _confidence_sum(item[1]), reverse=True)
 
-    ranked = sorted(grouped.items(), key=lambda item: _confidence_sum(item[1]), reverse=True)
+        lines = [f"【{date} 每日選股】共{len(grouped)}檔候選："]
+        for stock_id, matches in ranked:
+            name = stock_names.get(stock_id, "")
+            lines.append(f"・{stock_id}{name} 符合規格數{len(matches)}")
 
-    lines = [f"【{date} 每日選股】共{len(grouped)}檔候選："]
-    for stock_id, matches in ranked:
-        name = stock_names.get(stock_id, "")
-        lines.append(f"・{stock_id}{name} 符合規格數{len(matches)}")
+    active_escapes = {sid: matches for sid, matches in (inventory_escape_signals or {}).items() if matches}
+    if active_escapes:
+        stock_names = stock_names or {}
+        lines.append("")
+        lines.append(f"🚨庫存逃命示警（{len(active_escapes)}檔）：")
+        for stock_id, matches in active_escapes.items():
+            name = stock_names.get(stock_id, "")
+            rule_ids = "、".join(m["rule_id"] for m in matches)
+            lines.append(f"・{stock_id}{name}：{rule_ids}")
+
     return "\n".join(lines)[:MAX_MESSAGE_LENGTH]
 
 

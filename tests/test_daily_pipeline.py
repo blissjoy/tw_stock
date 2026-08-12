@@ -12,6 +12,15 @@ def _fresh_conn():
     return storage.init_db(":memory:")
 
 
+def _fresh_portfolio_conn():
+    import sqlite3
+
+    from src.data import portfolio_storage
+    conn = sqlite3.connect(":memory:")
+    portfolio_storage.ensure_portfolio_schema(conn)
+    return conn
+
+
 def _price_row(stock_id="2330", d="2026-07-22"):
     return {
         "stock_id": stock_id, "date": d, "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0,
@@ -364,6 +373,7 @@ def test_run_daily_pipeline_writes_heartbeat_status_on_each_progress_tick(monkey
 
 def test_run_daily_pipeline_sends_notifications_when_not_dry_run(monkeypatch):
     conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
     _stub_stock_info(monkeypatch, [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
@@ -379,10 +389,68 @@ def test_run_daily_pipeline_sends_notifications_when_not_dry_run(monkeypatch):
     assert [c[0] for c in notify_calls] == ["line", "email"]
 
 
+def test_run_daily_pipeline_combines_inventory_escape_signals_into_line_message(monkeypatch):
+    """2026-08-12新增：使用者要求「庫存損益是整個系統存在的關鍵」，每次真正發送
+    通知都要檢查庫存逃命示警，且要跟候選清單同一則LINE訊息一起發送、不要分成
+    兩則。這裡驗證庫存有股票且該股票有逃命示警時，實際送出的LINE文字包含逃命
+    示警段落，而且只呼叫一次send_line_broadcast。"""
+    from src.data import portfolio_storage
+
+    conn = _fresh_conn()
+    portfolio_conn = _fresh_portfolio_conn()
+    portfolio_storage.add_inventory_stock(portfolio_conn, "2317", buy_date="2026-07-01", cost_price=100.0, shares=1000)
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: portfolio_conn)
+    _stub_stock_info(monkeypatch, [{"stock_id": "2317", "name": "鴻海", "market": "TWSE", "industry": "電子"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+    monkeypatch.setattr(
+        daily_pipeline.portfolio_data, "load_escape_signals_for_stocks",
+        lambda conn, stock_ids: {"2317": [{"rule_id": "R-CANDLE-05", "title": "高檔變盤線", "date": "2026-07-22"}]},
+    )
+
+    line_calls = []
+    monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: line_calls.append(text))
+    monkeypatch.setattr(daily_pipeline, "send_email", lambda subject, body: None)
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
+
+    assert len(line_calls) == 1  # 只發一則，不是候選清單跟逃命示警分開兩則
+    assert "🚨庫存逃命示警" in line_calls[0]
+    assert "2317鴻海：R-CANDLE-05" in line_calls[0]
+
+
+def test_run_daily_pipeline_sends_candidate_notification_even_when_inventory_escape_check_fails(monkeypatch):
+    """庫存逃命示警檢查本身失敗(例如portfolio DB連線壞掉)不應該讓候選清單通知
+    整個發不出去，跟其他通知管道各自獨立try/except同一個精神。"""
+    conn = _fresh_conn()
+
+    def _raise_portfolio_conn():
+        raise RuntimeError("模擬portfolio DB連線失敗")
+
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", _raise_portfolio_conn)
+    _stub_stock_info(monkeypatch, [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+
+    line_calls = []
+    monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: line_calls.append(text))
+    monkeypatch.setattr(daily_pipeline, "send_email", lambda subject, body: None)
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
+
+    assert len(line_calls) == 1
+    assert "🚨庫存逃命示警" not in line_calls[0]
+
+
 def test_run_daily_pipeline_line_still_sent_when_email_not_configured(monkeypatch):
     """Gmail憑證尚未設定時，send_email()會丟RuntimeError，但不應該阻止LINE通知照常發送、
     也不應該讓整條pipeline因此中斷（候選清單已經寫進資料庫了）。"""
     conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
     _stub_stock_info(monkeypatch, [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
@@ -415,6 +483,7 @@ def test_run_daily_pipeline_notifications_apply_same_default_filters_as_ui(monke
     pipeline.py有沒有正確接上、用篩選後的結果縮小candidates。
     """
     conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
     _stub_stock_info(monkeypatch, [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
@@ -463,6 +532,7 @@ def test_run_daily_pipeline_falls_back_to_unfiltered_candidates_when_notify_filt
     收不到通知——候選清單已經成功寫進DB了，退回寄出未篩選的原始candidates即可。
     """
     conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
     _stub_stock_info(monkeypatch, [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
@@ -1206,15 +1276,6 @@ def test_run_daily_pipeline_continues_when_taiex_update_raises(monkeypatch):
 # ============================================================
 # fetch_today_tpex_institutional / refresh_watchlist_holder_shares (2026-08-04新增)
 # ============================================================
-
-
-def _fresh_portfolio_conn():
-    import sqlite3
-
-    from src.data import portfolio_storage
-    conn = sqlite3.connect(":memory:")
-    portfolio_storage.ensure_portfolio_schema(conn)
-    return conn
 
 
 def test_fetch_today_tpex_institutional_writes_rows_and_upserts_stocks(monkeypatch):
