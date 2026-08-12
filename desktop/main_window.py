@@ -1658,6 +1658,17 @@ class MainWindow(QMainWindow):
         overview_toolbar.addStretch()
         overview_layout.addLayout(overview_toolbar)
 
+        # 2026-08-12新增：使用者反映「個股明細」最上方看不出現在顯示的是哪一檔股票，
+        # 尤其是從產業輪動/庫存清單等清單頁跳轉過來、切換分頁很快的情況下容易搞混。
+        # 跟「個股分析」／「三維過濾法」分頁一樣在最上方顯示「代號 名稱」，見
+        # _refresh_stock_overview_view()設值。
+        self.stock_overview_header_label = QLabel("")
+        header_font = self.stock_overview_header_label.font()
+        header_font.setBold(True)
+        header_font.setPointSize(header_font.pointSize() + 1)
+        self.stock_overview_header_label.setFont(header_font)
+        overview_layout.addWidget(self.stock_overview_header_label)
+
         # 預設的checkable QPushButton在Fusion風格下checked/unchecked視覺差異很小，
         # 使用者不容易一眼看出目前是哪個檢視——明確加style讓checked狀態變成藍底白字，
         # 跟表格裡漲跌用的紅/綠是不同語意(這裡純粹是「目前選取」的UI狀態，不代表
@@ -4366,11 +4377,14 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         各自一個_CollapsibleBox+QTextEdit(見_build_stock_overview_tab())，分開設值。
         """
         if self.conn is None or not self._current_stock_id:
+            self.stock_overview_header_label.setText("")
             placeholder = "<p>請先從候選清單點選或查詢一檔股票。</p>"
             for title in self._STOCK_OVERVIEW_BLOCKS:
                 self._set_overview_block_html(title, placeholder)
             return
         stock_id = self._current_stock_id
+        stock_name = chart_data.get_stock_name(self.conn, stock_id)
+        self.stock_overview_header_label.setText(f"{stock_id} {stock_name}" if stock_name else stock_id)
         builders = {
             "交易資訊": self._build_overview_quote_html,
             "法人買賣總覽": self._build_overview_institutional_html,

@@ -9386,3 +9386,18 @@ Playwright對正式`data/tw_stock.db`實際點擊產業輪動個股名稱儲存�
 環境目前沒有庫存資料無法即時UI驗證，套用的是跟產業輪動完全相同的程式碼
 路徑(已驗證)，加上桌面版庫存清單已直接驗證過，判斷風險低、不另外寫測試
 資料到使用者真實的庫存DB裡驗證。
+
+## 「個股明細」最上方補上股票代號+名稱標題（2026-08-12）
+
+使用者反映「個股明細」分頁最上方看不出現在顯示的是哪一檔股票，容易搞混——
+跟「個股分析」／「三維過濾法」分頁已經有的`「股票代號 名稱」`標題慣例
+不一致。桌面版`_build_stock_overview_tab()`新增`stock_overview_header_
+label`(粗體、字級+1)放在「全部展開/收合」按鈕上方，`_refresh_stock_
+overview_view()`裡用`chart_data.get_stock_name()`查名稱設值；網頁版
+`render_stock_overview_section()`在最上方加`st.markdown(f"#### {stock_
+id} {stock_name}")`。
+
+`pytest tests/ -q`1170個測試全過(UI標籤變更，跟這個session其餘Qt/
+Streamlit widget變更一致不寫進pytest套件)。網頁版用Playwright對2330
+實際截圖確認顯示「2330 台積電」；桌面版用offscreen腳本驗證`stock_
+overview_header_label.text()`精確等於「2330 台積電」。

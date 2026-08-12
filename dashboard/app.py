@@ -719,6 +719,11 @@ def main() -> None:
         # 讓每個expander在「第一次以這把新key出現」的當下就正確初始化成目標
         # 狀態。個別區塊自己點頭部箭頭展開/收合，在同一個generation內仍然正常
         # 運作(那是widget自己原生的session_state追蹤，不受這裡影響)。
+        # 2026-08-12新增：使用者反映「個股明細」最上方看不出現在顯示的是哪一檔股票，
+        # 跟「個股分析」／「三維過濾法」分頁一樣在最上方顯示「代號 名稱」。
+        stock_name = chart_data.get_stock_name(conn, stock_id)
+        st.markdown(f"#### {stock_id} {stock_name}" if stock_name else f"#### {stock_id}")
+
         overview_titles = ["交易資訊", "法人買賣總覽", "主力進出", "資券變化總覽", "大戶籌碼", "MOPS增減資紀錄"]
         gen_key = f"stock_overview_gen_{stock_id}"
         default_key = f"stock_overview_bulk_default_{stock_id}"
