@@ -1774,7 +1774,19 @@ class MainWindow(QMainWindow):
         # 收合時清掉底色。見_on_industry_tree_item_expanded()的說明。
         self.industry_tree.itemExpanded.connect(self._on_industry_tree_item_expanded)
         self.industry_tree.itemCollapsed.connect(self._on_industry_tree_item_collapsed)
+        # 2026-08-12新增：雙擊個股子列跳轉「個股資訊」，比照庫存清單/觀察清單/候選
+        # 清單既有的雙擊跳轉慣例(見_navigate_to_stock_detail())。父列(產業彙總)雙擊
+        # 不做任何事，只有展開後的個股子列才有對應的股票代號可以跳轉。
+        self.industry_tree.itemDoubleClicked.connect(self._on_industry_tree_item_double_clicked)
         rotation_layout.addWidget(self.industry_tree, stretch=1)
+
+    def _on_industry_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        if item.parent() is None:
+            return  # 父列(產業彙總)本身沒有對應單一股票，雙擊不動作
+        stock_id = item.text(0)  # 子列欄位0是股票代號(見_format_industry_stock_row())
+        if not stock_id:
+            return
+        self._navigate_to_stock_detail(stock_id)
 
     def _on_industry_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         """點「股票數」欄位文字也能展開/收合——不是只能點原生箭頭那個小三角，跟庫存
@@ -2082,9 +2094,7 @@ class MainWindow(QMainWindow):
         stock_id = item.data(0, Qt.ItemDataRole.UserRole)
         if not stock_id:
             return
-        self._current_stock_id = stock_id
-        self._current_stock_source = None  # 從庫存清單點過來，跟手動查詢一樣不顯示來源標籤
-        self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)
+        self._navigate_to_stock_detail(stock_id)
 
     @staticmethod
     def _format_inventory_row(row: pd.Series, is_lot: bool) -> list[str]:
@@ -3107,9 +3117,7 @@ class MainWindow(QMainWindow):
         stock_id_item = self.watchlist_table.item(row, 0)  # 欄位0：股票代號
         if stock_id_item is None:
             return
-        self._current_stock_id = stock_id_item.text()
-        self._current_stock_source = None  # 從觀察清單點過來，跟手動查詢一樣不顯示來源標籤
-        self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)
+        self._navigate_to_stock_detail(stock_id_item.text())
 
     def _on_watchlist_add_stock(self) -> None:
         if self.portfolio_conn is None:
@@ -3492,6 +3500,25 @@ class MainWindow(QMainWindow):
         self.candidates_table.setSortingEnabled(True)
         self.candidates_table.resizeRowsToContents()  # 讓多行的訊號欄位撐開列高，完整顯示
 
+    def _navigate_to_stock_detail(self, stock_id: str, source: str | None = None) -> None:
+        """把指定股票帶入「個股資訊」分頁並切換過去，同時把上方「個股查詢」欄位文字也
+        設成這檔股票的代號——2026-08-12使用者反映從產業輪動/庫存清單點過去後，搜尋框
+        還留著切換前的舊內容(或原本就是空的)，跟畫面上實際顯示的股票對不起來，容易
+        搞混。候選清單/觀察清單/庫存清單/產業輪動四個既有(或這次新增)的跳轉入口統一
+        呼叫這個方法，不要各自維護一份幾乎一樣但漏了同步搜尋框的邏輯。
+
+        source：候選清單跳轉時傳入「這是哪一天的選股策略」，右上角會顯示「來源：X月
+        X日的選股策略」；其餘入口(觀察清單/庫存清單/產業輪動/手動查詢)一律不顯示來源
+        標籤，跟_on_search()的既有慣例一致。
+        """
+        self._current_stock_id = stock_id
+        self._current_stock_source = source
+        self.search_input.setText(stock_id)
+        # 切換會觸發_on_tab_changed()呼叫_rerender_chart()，這裡不用另外呼叫(也不應該
+        # 在切換前就呼叫：分頁還沒顯示的話，圖表/分析面板還沒有正確的layout，見
+        # _build_stock_detail_tab()的說明)。
+        self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)
+
     def _navigate_to_candidate_row(self, row: int) -> None:
         """把候選清單第row列的股票帶入「個股資訊」分頁並切換過去。⚠️ 2026-08-06改版：
         使用者反映原本「點任一列(包含勾選欄checkbox本身)就會跳轉」很奇怪——勾選checkbox
@@ -3505,14 +3532,9 @@ class MainWindow(QMainWindow):
         stock_id_item = self.candidates_table.item(row, 1)  # 欄位1：股票代號(欄位0是勾選欄)
         if stock_id_item is None:
             return
-        self._current_stock_id = stock_id_item.text()
         # 記錄來源候選清單日期(目前分頁選取的日期)，供「個股資訊」分頁右上角顯示
-        # 「來源：X月X日的選股策略」。自動切到該分頁——切換會觸發_on_tab_changed()
-        # 呼叫_rerender_chart()，這裡不用另外呼叫(也不應該在切換前就呼叫：分頁還沒
-        # 顯示的話，圖表/分析面板還沒有正確的layout，見_build_stock_detail_tab()的
-        # 說明)。
-        self._current_stock_source = self.date_combo.currentText() or None
-        self.tabs.setCurrentIndex(TAB_STOCK_DETAIL)
+        # 「來源：X月X日的選股策略」。
+        self._navigate_to_stock_detail(stock_id_item.text(), source=self.date_combo.currentText() or None)
 
     def _on_candidate_search(self) -> None:
         """在目前候選清單的列裡搜尋代號或名稱是否存在，找到就選取該列、捲動過去、並

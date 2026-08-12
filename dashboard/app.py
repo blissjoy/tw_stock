@@ -1528,9 +1528,14 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             (row for row, col in summary_event.selection.cells if col == "name"), None,
         )
         if name_clicked_row is not None:
-            st.session_state["detail_stock_id"] = str(summary_df.iloc[name_clicked_row]["stock_id"])
+            stock_id = str(summary_df.iloc[name_clicked_row]["stock_id"])
+            st.session_state["detail_stock_id"] = stock_id
             st.session_state["detail_stock_source"] = None
-            st.session_state["detail_query_input"] = ""
+            # 2026-08-12修正：改成把搜尋框設成股票代號本身(不是清空)，同時同步
+            # _detail_query_last_seen，讓「個股資訊」分頁的搜尋框能直接顯示現在
+            # 看的是哪一檔，不會空白造成混淆——見TAB_STOCK_DETAIL分支的完整說明。
+            st.session_state["detail_query_input"] = stock_id
+            st.session_state["_detail_query_last_seen"] = stock_id
             st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
             st.session_state["_pending_inventory_summary_table_reset"] = True
             st.rerun()
@@ -1848,9 +1853,13 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             (row for row, col in watchlist_event.selection.cells if col == "name"), None,
         )
         if name_clicked_row is not None:
-            st.session_state["detail_stock_id"] = str(watchlist_df.iloc[name_clicked_row]["stock_id"])
+            stock_id = str(watchlist_df.iloc[name_clicked_row]["stock_id"])
+            st.session_state["detail_stock_id"] = stock_id
             st.session_state["detail_stock_source"] = None
-            st.session_state["detail_query_input"] = ""
+            # 2026-08-12修正：搜尋框同步顯示股票代號，見inventory_summary_table
+            # 那處(TAB_INVENTORY分支)的完整說明。
+            st.session_state["detail_query_input"] = stock_id
+            st.session_state["_detail_query_last_seen"] = stock_id
             st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
             st.session_state["_pending_watchlist_table_reset"] = True
             st.rerun()
@@ -2147,6 +2156,12 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
     if "_pending_inventory_summary_table_reset" in st.session_state:
         st.session_state.pop("_pending_inventory_summary_table_reset")
         st.session_state["inventory_summary_table"] = {"selection": {"rows": [], "columns": [], "cells": []}}
+    # 2026-08-12新增：產業輪動每個產業各自一張個股明細表格，key是動態組出來的
+    # (f"industry_stocks_table_{industry}")，不是固定key，這裡記的是「要重置哪一個
+    # key」本身，不是布林旗標，理由跟上面幾個_pending_*_table_reset一致。
+    pending_industry_stocks_key = st.session_state.pop("_pending_industry_stocks_table_reset_key", None)
+    if pending_industry_stocks_key is not None:
+        st.session_state[pending_industry_stocks_key] = {"selection": {"rows": [], "columns": [], "cells": []}}
     tab_market, tab_screener, tab_stock_detail, tab_industry, tab_inventory, tab_watchlist, tab_backfill = st.tabs(
         TAB_OPTIONS, key="active_tab", on_change="rerun",
     )
@@ -2601,12 +2616,14 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                     if name_clicked_row is not None:
                         selected_stock_id = str(candidates_df.iloc[name_clicked_row]["stock_id"])
                         # 記錄來源候選清單日期，供「個股資訊」分頁右上角顯示「來源：X月X日的
-                        # 選股策略」；順便清掉手動查詢欄位殘留的舊文字(不然下面「個股資訊」
-                        # 分頁重新渲染時，text_input帶著上次查詢的舊文字又會把這裡剛設定的
-                        # stock_id蓋掉，見下面TAB_STOCK_DETAIL分支的說明)，再切到該分頁。
+                        # 選股策略」。2026-08-12修正：搜尋框改成同步顯示股票代號(不是清空)，
+                        # 同時設定_detail_query_last_seen，讓下面TAB_STOCK_DETAIL分支判斷
+                        # 「query沒變」而不會重新觸發resolve_stock_id()/清掉來源標籤——完整
+                        # 說明見那個分支開頭的註解。
                         st.session_state["detail_stock_id"] = selected_stock_id
                         st.session_state["detail_stock_source"] = selected_date or latest_date
-                        st.session_state["detail_query_input"] = ""
+                        st.session_state["detail_query_input"] = selected_stock_id
+                        st.session_state["_detail_query_last_seen"] = selected_stock_id
                         st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
                         # 順便排定下一輪把這個cell selection清掉(見main()開頭的說明)，
                         # 不然使用者之後切回「選股」分頁時，st.dataframe()還記得上次點過
@@ -2622,10 +2639,22 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 query = st.text_input(
                     "輸入股票代號或名稱（例如 2330 或 台積電）", value="", key="detail_query_input",
                 )
-            if query:
-                # 手動查詢：清掉來源標籤(不是從候選清單點過來的)。
+            # 2026-08-12修正：使用者反映從產業輪動/庫存清單點過去後，搜尋框顯示是空的，
+            # 跟畫面上實際顯示的股票對不起來，容易搞混——原本的做法是導覽時把這個欄位
+            # 清成""(見candidates_table/watchlist_table/inventory_summary_table三處
+            # 點名稱跳轉的程式碼)，是刻意避免「text_input帶著上次殘留的查詢文字，把
+            # 剛設定好的detail_stock_id蓋掉」，但代價就是搜尋框看起來像沒查過。
+            #
+            # 改成導覽時把這個欄位設成股票代號本身(不是清空)，同時記一份「上次已經
+            # 處理過的文字」(_detail_query_last_seen)：只有query真的變成「跟上次處理
+            # 過的不一樣」時，才視為使用者剛打的新查詢、觸發resolve_stock_id()＋清掉
+            # 來源標籤；如果query沒變(不管是導覽剛帶進來的股票代號、還是使用者之前
+            # 手動查過的舊文字)，就不重複觸發，detail_stock_id/detail_stock_source
+            # 維持原本(可能是導覽時明確設定的來源標籤)不被覆蓋。
+            if query and query != st.session_state.get("_detail_query_last_seen"):
                 st.session_state["detail_stock_id"] = resolve_stock_id(conn, query) or query.strip()
                 st.session_state["detail_stock_source"] = None
+            st.session_state["_detail_query_last_seen"] = query
             # detail_stock_id要先算好(不是等source_col畫完才算)，因為「資料更新至」
             # 要跟「來源」標籤一起放在source_col，需要先知道是哪一檔股票才能查
             # get_stock_update_time()。
@@ -2757,8 +2786,16 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                             else:
                                 stocks_display = stocks_df.copy()
                                 stocks_display["volume_lots"] = (stocks_df["volume"] // 1000).astype(int)
-                                st.dataframe(
+                                # 2026-08-12新增：點「名稱」欄跳轉個股資訊，邏輯跟候選清單/
+                                # 觀察清單/庫存清單一致(見TAB_SCREENER分支的說明)。這裡每個
+                                # 產業各自一張表格(在for迴圈裡)，key要帶上industry字串本身
+                                # 避免widget key衝突；reset用的中介key也要記住是哪個industry
+                                # 的表格，不能像候選清單那樣是固定的單一key。
+                                st.caption("點「名稱」欄可直接查看個股資訊")
+                                stocks_table_key = f"industry_stocks_table_{industry}"
+                                stocks_event = st.dataframe(
                                     stocks_display, use_container_width=True, hide_index=True,
+                                    on_select="rerun", selection_mode="single-cell", key=stocks_table_key,
                                     column_order=["stock_id", "name", "close", "open", "high", "low", "change", "pct_change", "volume_lots"],
                                     column_config={
                                         "stock_id": "股票代號", "name": "名稱",
@@ -2771,6 +2808,18 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                                         "volume_lots": st.column_config.NumberColumn("總成交張數", format="%d"),
                                     },
                                 )
+                                name_clicked_row = next(
+                                    (row for row, col in stocks_event.selection.cells if col == "name"), None,
+                                )
+                                if name_clicked_row is not None:
+                                    stock_id = str(stocks_display.iloc[name_clicked_row]["stock_id"])
+                                    st.session_state["detail_stock_id"] = stock_id
+                                    st.session_state["detail_stock_source"] = None
+                                    st.session_state["detail_query_input"] = stock_id
+                                    st.session_state["_detail_query_last_seen"] = stock_id
+                                    st.session_state["_pending_active_tab"] = TAB_STOCK_DETAIL
+                                    st.session_state["_pending_industry_stocks_table_reset_key"] = stocks_table_key
+                                    st.rerun()
                                 # 使用者明確要求驗證：個股明細的總成交張數加總，理論上要等於
                                 # 展開標題裡的「成交量合計」——這裡兩者都是volume//1000後才
                                 # 加總/顯示，逐股先捨去小數再加總，理論上會小於等於「先加總

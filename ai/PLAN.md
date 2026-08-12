@@ -9341,3 +9341,48 @@ both_connections_even_when_sync_raises`)，用假的Turso連線物件+攔截
 假設乾淨。跟使用者確認另一個process(PID 390204，`desktop/main.py`)是
 使用者自己真的在用的桌面版視窗後，一併結束其餘9個測試殘留process，只留下
 使用者自己的視窗，機器上乾淨了。
+
+## 產業輪動/庫存清單補上點名稱跳轉個股資訊＋搜尋框同步（2026-08-12）
+
+使用者要求：①產業輪動、庫存清單點股票名稱要能跳轉到「個股資訊」，比照
+選股候選清單既有的「點名稱跳轉」模式；②跳轉後「個股資訊」上方的「個股
+查詢」欄位文字要同步代入該股票代號，不然容易搞混。
+
+**盤點現況**：庫存清單/觀察清單/候選清單三處既有的跳轉邏輯(桌面版
+`_navigate_to_candidate_row()`/`_navigate_to_watchlist_row()`/
+`_on_inventory_tree_item_double_clicked()`；網頁版`detail_query_input`
+相關三處)全部都只切換股票、**沒有同步搜尋框文字**——桌面版讓搜尋框留著
+切換前的舊文字，網頁版更明確地刻意把搜尋框清空成""(原本的註解寫得很清楚：
+故意清空是為了避免`text_input`帶著上次殘留文字，把剛設定好的`detail_
+stock_id`蓋掉)。產業輪動則是桌面版/網頁版都完全没有任何跳轉功能。
+
+**桌面版修正**：新增共用方法`_navigate_to_stock_detail(stock_id, source=None)`，
+除了原本的「設定`_current_stock_id`+切分頁」，多做一步`self.search_input.
+setText(stock_id)`；候選清單/觀察清單/庫存清單三個既有方法改成呼叫這個共用
+方法(不是只修使用者這次點名的兩個，三個都有同樣的搜尋框沒同步問題)。產業
+輪動樹狀列新增`itemDoubleClicked`訊號，雙擊個股子列(用`item.parent() is
+not None`跟父列的產業彙總列區分)呼叫同一個共用方法。
+
+**網頁版修正**：核心問題是原本的邏輯用`if query:`(搜尋框有沒有文字)當
+「使用者剛手動查詢」的判斷依據，一旦把搜尋框設成股票代號(不清空)，每次
+`st.rerun()`重新執行整支script時，這個條件永遠是True，會不斷重新觸發
+`resolve_stock_id()`並把剛設定好的「來源：X月X日的選股策略」標籤洗掉。
+改成額外記錄`_detail_query_last_seen`(上次已經處理過的查詢文字)，只有
+`query != _detail_query_last_seen`時才視為「真的是使用者剛打的新查詢」，
+導覽跳轉時把`detail_query_input`跟`_detail_query_last_seen`同時設成股票
+代號，兩者相等就不會誤觸發。候選清單/觀察清單/庫存清單三處既有跳轉、以及
+產業輪動新增的跳轉(`st.dataframe`加上`on_select="rerun", selection_
+mode="single-cell"`，每個產業各自一張表格用`f"industry_stocks_table_
+{industry}"`當key，「重置這次觸發跳轉的cell selection」用一個記著「要
+重置哪個動態key」的中介session_state key，不是像候選清單那樣的固定key)
+都套用同一套。
+
+`pytest tests/ -q`1170個測試全過(這類Qt/Streamlit widget互動邏輯延續
+`tests/test_main_window_helpers.py`既有慣例不寫進pytest套件)。用offscreen
+腳本驗證桌面版產業輪動雙擊子列+庫存清單雙擊都正確同步搜尋框；網頁版用
+Playwright對正式`data/tw_stock.db`實際點擊產業輪動個股名稱儲存格(canvas
+格線元件，`get_by_text()`點不到，改用像素座標`page.mouse.click()`)，
+確認正確跳轉到3360尚立、搜尋框正確顯示「3360」。庫存清單網頁版因為正式
+環境目前沒有庫存資料無法即時UI驗證，套用的是跟產業輪動完全相同的程式碼
+路徑(已驗證)，加上桌面版庫存清單已直接驗證過，判斷風險低、不另外寫測試
+資料到使用者真實的庫存DB裡驗證。
