@@ -371,8 +371,7 @@ def main() -> None:
                 all_levels = chart_overlays.compute_support_resistance_levels(price_df)
                 sr_levels = chart_overlays.nearest_support_resistance(all_levels, float(price_df["close"].iloc[-1]))
 
-            stock_name = chart_data.get_stock_name(conn, stock_id)
-            chart_title = f"{stock_id} {stock_name}" if stock_name else stock_id
+            chart_title = chart_data.format_stock_label(conn, stock_id)
             # 十字準星：2026-08-04起改用render_chart_html()+st.components.v1.html()(iframe
             # 執行原始HTML+JS)取代st.plotly_chart()，才能疊加貫穿價格/成交量/MACD/KD子圖的
             # 十字線＋左上角動態資訊框，跟桌面版效果一致，見src/presentation/chart_render.py。
@@ -720,9 +719,8 @@ def main() -> None:
         # 狀態。個別區塊自己點頭部箭頭展開/收合，在同一個generation內仍然正常
         # 運作(那是widget自己原生的session_state追蹤，不受這裡影響)。
         # 2026-08-12新增：使用者反映「個股明細」最上方看不出現在顯示的是哪一檔股票，
-        # 跟「個股分析」／「三維過濾法」分頁一樣在最上方顯示「代號 名稱」。
-        stock_name = chart_data.get_stock_name(conn, stock_id)
-        st.markdown(f"#### {stock_id} {stock_name}" if stock_name else f"#### {stock_id}")
+        # 跟「個股分析」／「三維過濾法」分頁一樣在最上方顯示「代號 名稱（產業別）」。
+        st.markdown(f"#### {chart_data.format_stock_label(conn, stock_id)}")
 
         overview_titles = ["交易資訊", "法人買賣總覽", "主力進出", "資券變化總覽", "大戶籌碼", "MOPS增減資紀錄"]
         gen_key = f"stock_overview_gen_{stock_id}"
@@ -1341,8 +1339,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         if st.button("🖨 產生PDF報表", key=f"report_pdf_btn_{stock_id}"):
             import weasyprint
 
-            stock_name = chart_data.get_stock_name(conn, stock_id)
-            stock_label = f"{stock_id} {stock_name}" if stock_name else stock_id
+            stock_label = chart_data.format_stock_label(conn, stock_id)
             with st.spinner("正在產生PDF報表..."):
                 report_html = _build_full_report_html(stock_id, stock_label)
                 pdf_bytes = weasyprint.HTML(string=report_html).write_pdf()

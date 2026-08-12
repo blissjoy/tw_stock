@@ -3740,8 +3740,7 @@ class MainWindow(QMainWindow):
         # 把plotly.js整包內嵌，桌面版離線也能看圖。寫進暫存檔案再用load()開啟，理由見__init__裡
         # _chart_html_path的註解(setHtml對大內容會靜默失敗)。不傳title給build_candlestick_
         # figure(桌面版改用render_chart_html的stock_label固定列顯示代號+名稱，見那裡的說明)。
-        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
-        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        stock_label = chart_data.format_stock_label(self.conn, self._current_stock_id)
         # 直接讀build_candlestick_figure()算好的圖表高度，setFixedHeight()精準給
         # QWebEngineView剛好的空間，不用像之前那樣用setMinimumHeight()「猜」一個數字
         # (見self.chart_view建構處的說明)。+20px緩衝對應瀏覽器預設body margin，實際
@@ -3778,8 +3777,7 @@ class MainWindow(QMainWindow):
         # 使用者反映「不知道現在顯示的是誰的分析」——第一行固定加註股票代碼+名稱，跟圖表
         # 標題(render_chart_html的stock_label)、視窗標題一致，三處都看得到同一個代碼名稱
         # 才不會誤把上一檔股票的資料當成目前這檔。
-        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
-        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        stock_label = chart_data.format_stock_label(self.conn, self._current_stock_id)
         # 2026-08-08新增：今天量能相對5日均量(書中「基本量」)的水位判讀，跟「量價訊號」
         # 不同——那行只在攻擊量/爆量等特定命名訊號觸發時才顯示，這裡是每天都有結論的
         # 基礎陳述(見src/patterns/latest_day_summary.py的summarize_volume_vs_ma5()說明)。
@@ -4245,8 +4243,7 @@ class MainWindow(QMainWindow):
             self._set_autoheight_html(self.analysis_tech_view, "")
             self._set_autoheight_html(self.analysis_chip_view, "")
             return
-        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
-        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        stock_label = chart_data.format_stock_label(self.conn, self._current_stock_id)
         sections = self._build_analysis_sections_html(self._current_stock_id, f"個股分析：{stock_label}")
         self._set_autoheight_html(self.analysis_summary_view, sections["summary"])
         self._set_autoheight_html(self.analysis_tech_view, sections["tech"])
@@ -4258,8 +4255,7 @@ class MainWindow(QMainWindow):
         if self.conn is None or not self._current_stock_id:
             self._set_autoheight_html(self.q3_analysis_view, "<p>請先從候選清單點選或查詢一檔股票。</p>")
             return
-        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
-        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        stock_label = chart_data.format_stock_label(self.conn, self._current_stock_id)
         content_html = self._build_q3_analysis_html(self._current_stock_id, f"三維過濾法：{stock_label}")
         self._set_autoheight_html(self.q3_analysis_view, content_html)
 
@@ -4390,8 +4386,7 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         if self.conn is None or not self._current_stock_id:
             self.report_view.setHtml("<p>請先從候選清單點選或查詢一檔股票。</p>")
             return
-        stock_name = chart_data.get_stock_name(self.conn, self._current_stock_id)
-        stock_label = f"{self._current_stock_id} {stock_name}" if stock_name else self._current_stock_id
+        stock_label = chart_data.format_stock_label(self.conn, self._current_stock_id)
         report_html = self._build_report_html(self._current_stock_id, stock_label)
         self._report_html_path.write_text(report_html, encoding="utf-8")
         self.report_view.load(QUrl.fromLocalFile(str(self._report_html_path)))
@@ -4444,8 +4439,7 @@ iframe {{ width: 100%; height: 900px; border: none; }}
                 self._set_overview_block_html(title, placeholder)
             return
         stock_id = self._current_stock_id
-        stock_name = chart_data.get_stock_name(self.conn, stock_id)
-        self.stock_overview_header_label.setText(f"{stock_id} {stock_name}" if stock_name else stock_id)
+        self.stock_overview_header_label.setText(chart_data.format_stock_label(self.conn, stock_id))
         builders = {
             "交易資訊": self._build_overview_quote_html,
             "法人買賣總覽": self._build_overview_institutional_html,

@@ -16,8 +16,10 @@ from src.presentation.chart_data import (
     build_candlestick_figure,
     compute_ma_bullish_flags,
     compute_sar_flip_flags,
+    format_stock_label,
     get_latest_candidate_update_time,
     get_latest_update_time,
+    get_stock_industry,
     get_stock_name,
     get_stock_update_time,
     list_candidate_dates,
@@ -629,6 +631,36 @@ def test_get_stock_name_returns_name_when_found():
 def test_get_stock_name_returns_none_when_not_found():
     conn = _fresh_conn()
     assert get_stock_name(conn, "9999") is None
+
+
+def test_get_stock_industry_returns_industry_when_found():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體業", "updated_at": "2026-07-22"}])
+    assert get_stock_industry(conn, "2330") == "半導體業"
+
+
+def test_get_stock_industry_returns_none_when_null_or_not_found():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "0050", "name": "元大台灣50", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    assert get_stock_industry(conn, "0050") is None  # ETF等沒有industry分類
+    assert get_stock_industry(conn, "9999") is None  # 查無此股票
+
+
+def test_format_stock_label_includes_industry_when_available():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體業", "updated_at": "2026-07-22"}])
+    assert format_stock_label(conn, "2330") == "2330 台積電（半導體業）"
+
+
+def test_format_stock_label_omits_industry_when_missing():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "0050", "name": "元大台灣50", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    assert format_stock_label(conn, "0050") == "0050 元大台灣50"
+
+
+def test_format_stock_label_falls_back_to_stock_id_when_name_missing():
+    conn = _fresh_conn()
+    assert format_stock_label(conn, "9999") == "9999"
 
 
 def test_list_candidate_dates_returns_dates_descending():

@@ -1031,6 +1031,30 @@ def get_stock_name(conn, stock_id: str) -> str | None:
     return row[0] if row else None
 
 
+def get_stock_industry(conn, stock_id: str) -> str | None:
+    """回傳股票代號對應的產業別，查無資料(或這檔股票的industry欄位是NULL，例如
+    ETF/存託憑證等非個股分類，見load_industry_rotation()的已知資料品質限制說明)
+    回傳None。2026-08-12新增，供format_stock_label()組「代號 名稱（產業別）」用。
+    """
+    row = conn.execute("SELECT industry FROM stocks WHERE stock_id = ?", (stock_id,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def format_stock_label(conn, stock_id: str) -> str:
+    """組出「代號 名稱（產業別）」的顯示字串，供「個股資訊」各處標題(圖表/個股分析/
+    個股明細/產出報表/三維過濾法)共用——2026-08-12使用者要求在既有「代號 名稱」後面
+    加上產業別，方便一眼看出這檔股票的產業，不用切去「產業輪動」分頁另外查。查無
+    名稱/產業別的部分就省略，不留空括號或多餘空格(例如剛上市、industry尚未建檔的
+    股票，只顯示代號，不假造「(None)」這種文字)。
+    """
+    name = get_stock_name(conn, stock_id)
+    industry = get_stock_industry(conn, stock_id)
+    label = f"{stock_id} {name}" if name else stock_id
+    if industry:
+        label += f"（{industry}）"
+    return label
+
+
 def get_stock_update_time(conn, stock_id: str) -> str | None:
     """回傳指定股票stocks.updated_at時間戳，查無資料回傳None。2026-08-04新增，供
     「個股資訊」分頁右上角顯示「資料更新至：...」用——刻意用這檔股票自己的
