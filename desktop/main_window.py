@@ -4566,7 +4566,7 @@ iframe {{ width: 100%; height: 900px; border: none; }}
         if cumulative is None:
             return "<p>查無法人買賣資料。</p>"
         periods = list(stock_detail_data.INSTITUTIONAL_PERIODS.keys())
-        table = '<p style="color:#666666;">單位：張</p><table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0"><tr><td></td>'
+        table = '<p style="color:#666666;">累計買賣超（單位：張）——各欄各自往前累計，非獨立區間</p><table cellspacing="0" cellpadding="4" width="100%" border="1" bordercolor="#e0e0e0"><tr><td></td>'
         for label in periods:
             table += f"<td align='right'><b>{label}</b></td>"
         table += "</tr>"
