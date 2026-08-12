@@ -9590,3 +9590,53 @@ string=...).write_pdf()`攔截成直接把HTML寫進檔案，不做真的PDF轉�
 驗證途中意外發現本機同時殘留6個過去驗證網頁版忘記關掉的`streamlit`
 背景程序(port 8521~8526)，使用者確認後已全部清除；也養成這次驗證完
 立刻關閉自己啟動的streamlit測試伺服器的習慣，不要等到累積很多個。
+
+## 庫存清單逃命示警提示（2026-08-12）
+
+使用者要求三件事：①「個股分析」逃命示警每條標上日期(已在上一則PLAN
+條目完成)；②庫存清單項目若有逃命示警，要出現紅色告警三角牌；③庫存
+裡任一檔股票有逃命示警時，「庫存清單」分頁本身也要有醒目提示。
+
+新增`portfolio_data.load_escape_signals_for_stocks(main_conn, stock_ids)`，
+對每檔股票即時呼叫`chart_data.load_price_history()`＋`analyze_stock_
+signals()`，只保留`is_escape=True`的訊號，回傳`{股票代號: 訊號清單}`
+——沒有獨立的「只算escape規則」輕量版本，每檔股票都要重新跑一次完整
+規則掃描，庫存規模通常數十檔以內不會有明顯效能問題，先不做快取(避免
+過度工程)。
+
+**②單檔標記**：桌面版`_populate_inventory_tree()`在有逃命示警的股票
+父列名稱前面加🔺(unicode本身自帶紅色，不用另外setForeground)，並在
+名稱欄setToolTip列出實際觸發的規則(編號/標題/日期)；web版`st.dataframe`
+沒有per-cell hover tooltip，改成表格上方一個`st.expander()`列出同樣的
+明細，名稱欄一樣加🔺前綴。
+
+**③分頁層級提示**：桌面版QTabWidget可以直接`tabBar().setTabTextColor()`
++`setTabText()`把分頁文字變紅、加🚨前綴，做法直接；web版遇到架構限制——
+`st.tabs(TAB_OPTIONS, key="active_tab")`是用「分頁標籤文字」本身當
+session_state的值，如果標籤文字依逃命示警狀態動態變來變去，使用者
+停留在該分頁時儲存的值可能跟新一輪的選項文字對不上，重新製造一次
+`_pending_active_tab`模式當初要解決的「widget instantiate時機」問題。
+改用`st.tabs()`正上方一則`st.error()`橫幅取代分頁標籤變色，不管使用者
+在哪個分頁都看得到，也完全不用碰`st.tabs()`本身。這個判斷必須在
+`st.tabs()`建立分頁列之前就算出來，代表跟desktop版「只在切到該分頁
+才觸發」的lazy重算不同，web版每次使用者跟畫面上任何元件互動(streamlit
+重跑整個script)都會重新觸發這個檢查——用`st.cache_data(ttl=600)`包一層
+10分鐘TTL快取壓低成本(逃命示警本來就只在daily_pipeline每天跑一次後
+才會變化，10分鐘內的些微延遲可接受)。
+
+新增2個測試(`load_escape_signals_for_stocks()`正確分股票各自的訊號清單、
+查無股價資料回傳空清單不拋例外)，`pytest tests/ -q`1181個測試全過。
+兩邊前端對正式`data/tw_stock.db`找到當天(2026-08-12)真的有逃命示警的
+股票(0050/2317/6139，規則含R-CANDLE-05高檔變盤線、R-TREND-04空頭趨勢
+判定、R-ESCAPE-KD-DEATH-CROSS KD死亡交叉)，複製一份`portfolio.db`加入
+測試持股後驗證：web版Playwright截圖確認頂部紅色橫幅＋名稱欄🔺＋expander
+明細跟獨立掃描結果完全吻合；桌面版offscreen腳本直接讀取QTreeWidget文字/
+tooltip跟`tabText()`確認同樣正確(桌面版查詢走Turso分支耗時較久，見下一段)。
+
+驗證過程中重新踩到一個先前記錄過的坑：offscreen腳本直接`from desktop.
+main_window import MainWindow`繞過`desktop/main.py`入口，沒有自動套用
+該入口用`os.environ.setdefault()`設的`LOCAL_DB_PATH`/`PORTFOLIO_DB_PATH`
+預設值，這次忘記自己補設，兩次(「產出報表」跟這次「庫存清單」)驗證都
+落到Turso分支，各自多花了10幾分鐘才完成(不是真的卡死，只是很慢)——
+已更新對應的memory備忘錄提醒之後offscreen驗證桌面版功能務必自己先設好
+這兩個環境變數。

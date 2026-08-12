@@ -188,6 +188,22 @@ def main() -> None:
 
     portfolio_conn = get_portfolio_conn()
 
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_inventory_escape_signals_cached(_conn, stock_ids: tuple[str, ...]) -> dict[str, list[dict]]:
+        """庫存清單逃命示警查詢(portfolio_data.load_escape_signals_for_stocks())
+        加上10分鐘TTL快取。2026-08-12新增：使用者要求「庫存裡任一檔股票有逃命
+        示警時要有醒目提示」，這個判斷必須在st.tabs()建立分頁列之前就算出來
+        (見下面呼叫處的說明)，代表每次使用者在畫面上做任何互動(streamlit對整個
+        script重新執行一次)都會重新觸發這個檢查，即使使用者根本不在看庫存清單
+        分頁——不像桌面版QTabWidget只在切到該分頁時才觸發(見desktop/main_window.py
+        的_on_tab_changed())，這是streamlit的架構限制，沒辦法做到完全對等的
+        lazy重算。逃命示警只在daily_pipeline每天跑一次之後才會變化，10分鐘內
+        不會過期太多，用TTL快取把「每次互動都重跑全部持股規則掃描」的成本壓下來，
+        不快取的話成本太高。_conn參數名稱底線開頭是streamlit慣例，代表不納入
+        快取key的hash計算(sqlite3.Connection物件本來就沒辦法被hash)。
+        """
+        return portfolio_data.load_escape_signals_for_stocks(_conn, list(stock_ids))
+
     def render_price_chart(stock_id: str, widget_key: str, is_market_overview: bool = False):
         """回傳(render_chart_and_summary, render_analysis_panel)兩個callable，不自己
         決定排版——大盤只需要這兩塊(圖表/大盤分析各一個st.tabs()分頁)，但個股資訊
@@ -1633,13 +1649,22 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             st.success(f"已加入{len(stock_ids)}檔股票到{len(selected_ids)}個群組。")
             st.rerun()
 
-    def render_inventory_tab() -> None:
+    def render_inventory_tab(escape_signals: dict[str, list[dict]]) -> None:
         """「庫存清單」分頁：使用者實際持有的股票，記錄成本價/持股數/手續費，算浮動
         損益。桌面版用QTreeWidget做master-detail(父列=每檔股票的加權平均彙總，子列=
         個別買入批次)，Streamlit沒有對應的樹狀元件，改成兩層表格：彙總表格(一列一檔
         股票)可點選一列，選中後下方顯示該股票的批次明細表格(一列一筆批次，原生多選
         用於批次刪除)。底層資料函式(portfolio_data.load_inventory_summary()/
         load_inventory_lots())跟桌面版共用，未改動。
+
+        escape_signals(2026-08-12新增，見_load_inventory_escape_signals_cached())：
+        {股票代號: 逃命示警清單}，由呼叫端(在st.tabs()之前)算好傳進來，不在這裡
+        重複查一次——避免同一輪script執行對同樣的股票清單重複觸發規則掃描(雖然
+        st.cache_data會讓第二次呼叫直接命中快取，但用參數傳遞語意上更清楚是同一份
+        資料，不是兩次獨立查詢)。有逃命示警的股票在「名稱」欄前面標🔺，st.dataframe
+        沒有原生的per-cell hover tooltip，改用表格下方一個expander列出細節(規則
+        編號/標題/日期)，跟桌面版setToolTip()提供的資訊等價，只是互動方式不同
+        (滑鼠hover vs 點開expander)。
         """
         lots_df = portfolio_data.load_inventory_lots(conn, portfolio_conn)
         summary_df = portfolio_data.load_inventory_summary(conn, portfolio_conn)
@@ -1653,6 +1678,19 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             st.info("目前沒有任何庫存股票，點上方「➕ 新增批次」開始記錄。")
             return
 
+        stocks_with_escape = {
+            stock_id: matches
+            for stock_id, matches in escape_signals.items()
+            if matches and stock_id in set(summary_df["stock_id"])
+        }
+        if stocks_with_escape:
+            with st.expander(f"🔺 {len(stocks_with_escape)}檔持股目前有逃命示警", expanded=False):
+                for stock_id, matches in stocks_with_escape.items():
+                    stock_name = summary_df.loc[summary_df["stock_id"] == stock_id, "name"].iloc[0]
+                    st.markdown(f"**{stock_id} {stock_name}**")
+                    for m in matches:
+                        st.markdown(f"- {m['rule_id']} {m.get('title', '')}（{m.get('date') or '-'}）")
+
         st.subheader("庫存總覽")
         # ⚠️ 數字欄位先轉成「已格式化好的字串」("-"代表缺值)，不依賴column_config.
         # NumberColumn自動格式化——見_fmt_or_dash()的說明，一整欄全部是None時
@@ -1660,6 +1698,10 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
         # listing_type等其他欄位)保留給後面selection查詢用，只有display版本套用
         # 字串轉換。
         summary_display = summary_df.copy()
+        summary_display["name"] = summary_df.apply(
+            lambda r: ("🔺 " if r["stock_id"] in stocks_with_escape else "") + (r["name"] if pd.notna(r["name"]) else "-"),
+            axis=1,
+        )
         summary_display["close"] = summary_df["close"].apply(lambda v: _fmt_or_dash(v, 2))
         summary_display["pct_change"] = summary_df["pct_change"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
         summary_display["cost_price"] = summary_df["cost_price"].apply(lambda v: _fmt_or_dash(v, 2))
@@ -2325,6 +2367,19 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
     pending_industry_stocks_key = st.session_state.pop("_pending_industry_stocks_table_reset_key", None)
     if pending_industry_stocks_key is not None:
         st.session_state[pending_industry_stocks_key] = {"selection": {"rows": [], "columns": [], "cells": []}}
+    # 2026-08-12新增：庫存清單任一檔股票有逃命示警時的醒目提示——刻意不採用「分頁
+    # 標籤文字變色/加前綴」(桌面版desktop/main_window.py的做法，QTabWidget.tabBar()
+    # 可以直接setTabTextColor())：這裡的TAB_OPTIONS/st.tabs(key="active_tab")是
+    # 用「分頁標籤文字」本身當session_state["active_tab"]的值(見下面st.tabs()呼叫
+    # 前一大段註解)，如果標籤文字依逃命示警狀態動態變來變去("庫存清單"⇄"🚨 庫存
+    # 清單")，使用者當下正停留在庫存清單分頁時，儲存的active_tab值可能跟新一輪
+    # 算出來的選項文字對不上，等於重新製造一次這段註解說明過的「widget instantiate
+    # 時機」問題，風險比效果大。改用st.tabs()正上方一則st.error()橫幅，不管使用者
+    # 在哪個分頁都看得到，效果比分頁標籤變色更醒目，也完全不用碰st.tabs()本身。
+    _inventory_stock_ids_for_alert = tuple(portfolio_data.load_inventory_summary(conn, portfolio_conn)["stock_id"])
+    _inventory_escape_signals = _load_inventory_escape_signals_cached(conn, _inventory_stock_ids_for_alert)
+    if any(_inventory_escape_signals.values()):
+        st.error("🚨 庫存清單有股票出現逃命示警，請至「庫存清單」分頁查看。", icon="🚨")
     tab_market, tab_screener, tab_stock_detail, tab_industry, tab_inventory, tab_watchlist, tab_backfill = st.tabs(
         TAB_OPTIONS, key="active_tab", on_change="rerun",
     )
@@ -2997,7 +3052,7 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
 
     with tab_inventory:
         if tab_inventory.open:
-            render_inventory_tab()
+            render_inventory_tab(_inventory_escape_signals)
 
     with tab_watchlist:
         if tab_watchlist.open:

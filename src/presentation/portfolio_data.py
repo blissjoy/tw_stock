@@ -264,6 +264,41 @@ def load_inventory_summary(main_conn, portfolio_conn) -> pd.DataFrame:
     ]
 
 
+def load_escape_signals_for_stocks(main_conn, stock_ids: list[str]) -> dict[str, list[dict]]:
+    """對每一檔股票即時跑一次`analyze_stock_signals()`，只保留`is_escape=True`的
+    訊號，回傳{stock_id: [逃命示警清單]}——供「庫存清單」畫面標示哪些持股現在有
+    逃命示警。2026-08-12新增，使用者要求：①庫存清單項目有逃命示警要標紅色警示
+    三角牌；②只要庫存裡任一檔股票有逃命示警，「庫存清單」分頁本身也要有醒目
+    提示。這個函式是兩者共用的底層查詢，呼叫端各自決定怎麼呈現(單檔標記/整個
+    分頁提示)。
+
+    查無資料(price_df為空，例如已下市或代號打錯)的股票回傳空清單，不是拋例外——
+    庫存清單本來就可能收錄已經查不到最新股價的股票(見load_inventory_lots()同一個
+    「不假造資料」原則)，這裡跟著沿用。
+
+    ⚠️ 效能：每檔股票都要重新查一次股價/趨勢歷史＋跑一次完整規則掃描(scan_
+    golden_tier()+所有screen_*規則)，不是只算escape相關的規則——逃命示警訊號是
+    從`analyze_stock_signals()`回傳的完整清單裡依`is_escape`挑出來的子集，沒有
+    獨立的輕量版本可以只算這部分。庫存股票數通常是數十檔以內，即時算不會有明顯
+    效能問題；如果之後使用者庫存規模變得很大、畫面明顯變慢，才需要考慮加一層
+    比照SAR/量價矩陣那套「daily_indicators快取表」的快取機制，目前先不做，避免
+    過度工程。
+    """
+    from src.presentation import chart_data
+    from src.screener.daily_screener import analyze_stock_signals
+
+    result: dict[str, list[dict]] = {}
+    for stock_id in stock_ids:
+        price_df = chart_data.load_price_history(main_conn, stock_id)
+        if price_df.empty:
+            result[stock_id] = []
+            continue
+        trend_df = chart_data.load_price_history(main_conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        matches = analyze_stock_signals(price_df, trend_df=trend_df)
+        result[stock_id] = [m for m in matches if m.get("is_escape")]
+    return result
+
+
 def load_watchlist(main_conn, portfolio_conn, group_id: int) -> pd.DataFrame:
     """回傳指定觀察清單群組的DataFrame(含現價/損益/報酬率等衍生欄位)，依stock_id排序。"""
     rows = portfolio_storage.list_watchlist_rows(portfolio_conn, group_id)

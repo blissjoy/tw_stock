@@ -2149,19 +2149,28 @@ class MainWindow(QMainWindow):
         self._navigate_to_stock_detail(stock_id)
 
     @staticmethod
-    def _format_inventory_row(row: pd.Series, is_lot: bool) -> list[str]:
+    def _format_inventory_row(row: pd.Series, is_lot: bool, has_escape: bool = False) -> list[str]:
         """組出一列(父列或子列)要顯示的文字，父列/子列共用同一組欄位結構(見
         _INVENTORY_TREE_HEADERS)，只是彼此留空的欄位不同——父列沒有單一的買入
         日期/備註，子列則不重複顯示股票代號/名稱/現價/漲跌幅/SAR(樹狀縮排本身
         已經表達了從屬關係，不需要每個子列重複一次)。
+
+        has_escape(2026-08-12新增)：這檔股票目前有逃命示警時，在父列名稱前面
+        加上🔺(紅色三角警示符號，unicode本身自帶紅色，不需要另外setForeground)
+        ——只標父列(is_lot=False)，子列(個別批次)本來就不重複顯示名稱，沒有
+        對應可以標記的位置。
         """
         def fmt(key: str, spec: str = "{:.2f}") -> str:
             value = row.get(key)
             return spec.format(value) if pd.notna(value) else "-"
 
+        name_text = "" if is_lot else (row["name"] if pd.notna(row["name"]) else "-")
+        if not is_lot and has_escape:
+            name_text = f"🔺 {name_text}"
+
         return [
             "" if is_lot else row["stock_id"],
-            "" if is_lot else (row["name"] if pd.notna(row["name"]) else "-"),
+            name_text,
             (row["buy_date"] if pd.notna(row["buy_date"]) and row["buy_date"] else "-") if is_lot else "",
             "" if is_lot else fmt("close"),
             "" if is_lot else fmt("pct_change", "{:+.2f}"),
@@ -2178,14 +2187,23 @@ class MainWindow(QMainWindow):
             (row["note"] if pd.notna(row["note"]) and row["note"] else "") if is_lot else "",
         ]
 
-    def _populate_inventory_tree(self, summary_df: pd.DataFrame, lots_df: pd.DataFrame) -> None:
+    def _populate_inventory_tree(
+        self, summary_df: pd.DataFrame, lots_df: pd.DataFrame,
+        escape_signals: dict[str, list[dict]] | None = None,
+    ) -> None:
         """重建整棵樹：每檔股票一個父列(彙總數字，來自summary_df)，底下掛著這檔
         股票的每一筆批次子列(來自lots_df依stock_id分組)。重建前記錄目前已展開的
         股票代號，重建後對這些股票的新父列重新setExpanded(True)——不然每次新增/
         編輯/刪除批次觸發的重新整理，都會把使用者剛展開看的股票收合回去，體驗
         很差。
+
+        escape_signals(2026-08-12新增，見portfolio_data.load_escape_signals_
+        for_stocks())：{股票代號: 逃命示警清單}，有訊號的股票父列名稱前面標🔺，
+        並在名稱欄setToolTip列出實際觸發的規則(規則編號/標題/日期)，滑鼠移過去
+        才看得到細節，不佔用表格版面。
         """
         tree = self.inventory_tree
+        escape_signals = escape_signals or {}
         expanded_stock_ids = {
             tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
             for i in range(tree.topLevelItemCount())
@@ -2194,13 +2212,19 @@ class MainWindow(QMainWindow):
         tree.setSortingEnabled(False)
         tree.clear()
 
+        name_col = _INVENTORY_TREE_HEADERS.index("名稱")
         lots_by_stock = dict(tuple(lots_df.groupby("stock_id"))) if not lots_df.empty else {}
         for _, row in summary_df.reset_index(drop=True).iterrows():
+            stock_escapes = escape_signals.get(row["stock_id"]) or []
             parent_item = _NumericTreeWidgetItem()
-            for col_idx, value in enumerate(self._format_inventory_row(row, is_lot=False)):
+            for col_idx, value in enumerate(self._format_inventory_row(row, is_lot=False, has_escape=bool(stock_escapes))):
                 parent_item.setText(col_idx, value)
                 if col_idx in _INVENTORY_TREE_NUMERIC_COLUMNS:
                     parent_item.setTextAlignment(col_idx, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if stock_escapes:
+                parent_item.setToolTip(name_col, "\n".join(
+                    f"{m['rule_id']} {m.get('title', '')}（{m.get('date') or '-'}）" for m in stock_escapes
+                ))
             parent_item.setData(0, Qt.ItemDataRole.UserRole, row["stock_id"])
             tree.addTopLevelItem(parent_item)
 
@@ -2241,10 +2265,20 @@ class MainWindow(QMainWindow):
             return
         lots_df = portfolio_data.load_inventory_lots(self.conn, self.portfolio_conn)
         summary_df = portfolio_data.load_inventory_summary(self.conn, self.portfolio_conn)
-        self._populate_inventory_tree(summary_df, lots_df)
+        escape_signals = portfolio_data.load_escape_signals_for_stocks(self.conn, list(summary_df["stock_id"]))
+        self._populate_inventory_tree(summary_df, lots_df, escape_signals)
         self.inventory_summary_label.setText(
             self._portfolio_summary_text(lots_df, "總持股成本", "總市值", "累積總損益"),
         )
+        # 2026-08-12新增：使用者要求「只要庫存裡任一檔股票有逃命示警，庫存清單
+        # 分頁本身也要有醒目提示」——QTabWidget/QTabBar沒有原生的「分頁底色」
+        # API(setTabTextColor只能改文字顏色，不是背景)，改用「文字變紅＋標籤
+        # 加🚨前綴」達到同樣的醒目效果，比另外用stylesheet硬改QTabBar::tab的
+        # 背景色更不容易在不同主題/樣式下跑版。
+        has_any_escape = any(escape_signals.values())
+        tab_bar = self.tabs.tabBar()
+        tab_bar.setTabTextColor(TAB_INVENTORY, QColor("#C0392B") if has_any_escape else QColor())
+        self.tabs.setTabText(TAB_INVENTORY, ("🚨 庫存清單" if has_any_escape else "庫存清單"))
 
     def _on_inventory_add(self) -> None:
         if self.portfolio_conn is None:

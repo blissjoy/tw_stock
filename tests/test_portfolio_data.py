@@ -270,6 +270,43 @@ def test_load_inventory_summary_ignores_lots_missing_cost_price_or_shares_in_wei
     assert row["lot_count"] == 2
 
 
+def test_load_escape_signals_for_stocks_keeps_only_is_escape_matches_per_stock(monkeypatch):
+    """庫存清單畫面要標示哪些持股現在有逃命示警——這裡驗證①每檔股票各自拿到
+    自己的訊號清單(不會混到別檔的)②只保留is_escape=True的項目，一般訊號被過濾掉。
+    用price_df最後一筆收盤價分辨是哪一檔股票在呼叫analyze_stock_signals()，
+    不用真的接規則庫(跟test_daily_screener.py同一套monkeypatch風格)。"""
+    main_conn = _main_conn()
+    _seed_stock(main_conn, "2330", "台積電", [{"date": "2026-08-01", "close": 100.0}])
+    _seed_stock(main_conn, "2454", "聯發科", [{"date": "2026-08-01", "close": 200.0}])
+
+    def fake_analyze(price_df, trend_df=None):
+        last_close = price_df["close"].iloc[-1]
+        if last_close == 100.0:
+            return [
+                {"rule_id": "R-ESCAPE-1", "is_escape": True, "date": "2026-08-01"},
+                {"rule_id": "R-NORMAL-1", "is_escape": False, "date": "2026-08-01"},
+            ]
+        return [{"rule_id": "R-NORMAL-2", "is_escape": False, "date": "2026-08-01"}]
+
+    monkeypatch.setattr("src.screener.daily_screener.analyze_stock_signals", fake_analyze)
+
+    result = portfolio_data.load_escape_signals_for_stocks(main_conn, ["2330", "2454"])
+
+    assert [m["rule_id"] for m in result["2330"]] == ["R-ESCAPE-1"]
+    assert result["2454"] == []
+
+
+def test_load_escape_signals_for_stocks_returns_empty_list_when_no_price_data():
+    """股票代號查無股價資料(例如已下市或打錯代號)時回傳空清單，不拋例外——
+    庫存清單本來就可能收錄查不到最新股價的股票，見load_inventory_lots()同一個
+    「不假造資料」原則。"""
+    main_conn = _main_conn()
+
+    result = portfolio_data.load_escape_signals_for_stocks(main_conn, ["9999"])
+
+    assert result == {"9999": []}
+
+
 def test_load_watchlist_returns_only_stocks_in_given_group():
     main_conn = _main_conn()
     portfolio_conn = _portfolio_conn()
