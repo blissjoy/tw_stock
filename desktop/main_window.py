@@ -596,7 +596,15 @@ class _StockEditDialog(QDialog):
         id_row.addWidget(self.name_label)
         layout.addRow("股票代號：", id_row)
 
-        self.buy_date_input = QLineEdit(initial.get("buy_date") or "")
+        # 2026-08-12新增：新增庫存批次時預設帶入今天日期(不是空白)，使用者反映多數
+        # 情況買入日期就是今天，每次都要自己打很麻煩；只有「新增」(initial裡沒有
+        # stock_id，跟590行判斷編輯模式的既有寫法一致)才給這個預設值，編輯既有批次
+        # 時仍然照舊顯示那一筆原本存的日期(即使是空的也不該被強制蓋成今天)。
+        if is_inventory and "stock_id" not in initial:
+            default_buy_date = datetime.now().strftime("%Y-%m-%d")
+        else:
+            default_buy_date = initial.get("buy_date") or ""
+        self.buy_date_input = QLineEdit(default_buy_date)
         if is_inventory:
             self.buy_date_input.setPlaceholderText("YYYY-MM-DD，可留空，也可以直接打8碼數字如20260802")
             # 離開這個欄位(Tab跳下一格/點別的地方)時自動把"20260802"這類8碼數字

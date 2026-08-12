@@ -1437,7 +1437,11 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                 resolved_name = chart_data.get_stock_name(conn, resolved_id) if resolved_id else None
                 st.caption(f"解析為：{resolved_id} {resolved_name}" if resolved_name else "（查無此股票代號，仍可儲存）")
 
-        buy_date = st.text_input("買入日期(YYYY-MM-DD)", value=initial.get("buy_date") or "" if is_edit else "")
+        # 2026-08-12新增：新增庫存批次時預設帶入今天日期(不是空白)，使用者反映多數
+        # 情況買入日期就是今天，每次都要自己打很麻煩；編輯既有批次時仍照舊顯示那一筆
+        # 原本存的日期，不強制蓋成今天，比照桌面版_StockEditDialog同一個判斷方式。
+        default_buy_date = (initial.get("buy_date") or "") if is_edit else date.today().isoformat()
+        buy_date = st.text_input("買入日期(YYYY-MM-DD)", value=default_buy_date)
         cost_price = st.number_input("成本價", min_value=0.0, step=0.01, value=float(initial.get("cost_price") or 0) if is_edit else 0.0)
         shares = st.number_input("持股數", min_value=0, step=1000, value=int(initial.get("shares") or 0) if is_edit else 0)
         fee = portfolio_data.estimate_buy_fee(cost_price or None, shares or None)
