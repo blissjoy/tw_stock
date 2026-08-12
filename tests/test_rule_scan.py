@@ -27,6 +27,30 @@ def _flat_df(n_days: int = 40) -> pd.DataFrame:
     )
 
 
+def _swing_df(direction: str) -> pd.DataFrame:
+    """先走一段(跌或漲)、幅度>=trend_position.MIN_SWING_PCT(10%)後反轉，最後收在新高/
+    新低附近——這樣compute_trend_position()才會真的算出is_at_high/is_at_low=True。
+    跟_trend_df()不同：_trend_df()從頭到尾都是同一個方向，沒有任何一段「已確認」的
+    反向段可以當錨點(見trend_position.py的docstring)，is_at_high/is_at_low永遠是
+    False，不能用來測試需要「真的位於高/低檔」這個前提的規則(R-CANDLE-05/13)。
+
+    direction="up"：先跌後漲，結束在本波段高檔。
+    direction="down"：先漲後跌，結束在本波段低檔。
+    """
+    sign = 1 if direction == "up" else -1
+    leg1 = [100 - sign * i * 1.0 for i in range(20)]
+    leg2 = [leg1[-1] + sign * i * 1.2 for i in range(1, 21)]
+    close = pd.Series(leg1 + leg2)
+    n_days = len(close)
+    dates = pd.date_range("2026-01-01", periods=n_days, freq="B")
+    close.index = dates
+    open_ = close - 0.05 * sign
+    high = pd.concat([open_, close], axis=1).max(axis=1) + 0.1
+    low = pd.concat([open_, close], axis=1).min(axis=1) - 0.1
+    volume = pd.Series([1000] * n_days, index=dates)
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume})
+
+
 def test_scan_golden_tier_returns_empty_when_not_enough_days():
     df = _trend_df(20, "up")  # 少於MIN_DAYS(30)
     assert scan_golden_tier(df) == []
@@ -104,7 +128,7 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
     expected = [
         "R-MA-08", "R-MA-09", "R-MA-12", "R-MA-16", "R-MA-13", "R-MA-14",
         "R-INDICATOR-02", "R-INDICATOR-03", "R-INDICATOR-11", "R-INDICATOR-14", "R-INDICATOR-15",
-        "R-INDICATOR-22", "R-VOLPRICE-01", "R-CANDLE-05", "R-CANDLE-13", "R-CANDLE-25",
+        "R-INDICATOR-22", "R-VOLPRICE-01", "R-CANDLE-25",
         "R-TREND-03", "R-MA-15", "R-INDICATOR-09", "R-MA-19", "R-MA-20",
     ]
     for rule_id in expected:
@@ -116,6 +140,56 @@ def test_scan_golden_tier_wires_every_underlying_check_correctly(monkeypatch):
     assert "R-TREND-04" not in rule_ids  # trend固定為"多頭"，不該同時冒出空頭趨勢
     assert rule_ids.count("R-MA-19") == 1  # 只有買點①觸發，買點②③④沒有
     assert rule_ids.count("R-MA-20") == 1  # 只有賣點①觸發，賣點②③④沒有
+    # 2026-08-12新增：R-CANDLE-05/R-CANDLE-13這裡故意不放進expected——雖然is_reversal_
+    # candle_at_high/_at_low都monkeypatch成永遠True，但這兩條規則現在還多要求「真的
+    # 位於本波段高/低檔」(is_at_high/is_at_low，見rule_scan.py的修正說明)，這裡沒有
+    # monkeypatch compute_trend_position，_trend_df(60, "up")是從頭到尾同一個方向的
+    # 單調走勢、沒有任何一段完整的反向段可以當錨點，is_at_high/is_at_low整段都是False
+    # (見test_scan_golden_tier_gates_reversal_candle_on_trend_position()的驗證)——
+    # 這裡反過來確認「純K棒外觀符合，但沒有真的位於高低檔」時不會誤觸發，是這次修正
+    # 的迴歸測試，不是純粹忘記寫。
+    assert "R-CANDLE-05" not in rule_ids
+    assert "R-CANDLE-13" not in rule_ids
+
+
+def test_scan_golden_tier_gates_reversal_candle_on_trend_position(monkeypatch):
+    """2026-08-12修正的迴歸測試：使用者反映2317在8/12是一根接近大紅K的實體棒，卻被標成
+    R-CANDLE-05「高檔變盤線」——追查後發現規則文件(ai/zhu-rules/K棒型態/高檔變盤線.md)
+    原文寫的是「若位於高檔 AND K棒外觀符合8種變盤線之一」，但rule_scan.py接線時漏了
+    「位於高檔」這個前提，只要K棒外觀符合就無條件觸發。這裡驗證修正後兩個條件都要
+    成立才會觸發，任一條件不成立都不會觸發：
+    ①K棒外觀符合＋真的位於本波段高/低檔 → 觸發
+    ②K棒外觀符合，但沒有位於本波段高/低檔(例如純粹單調走勢，沒有反向段可以當高低檔
+      錨點) → 不觸發(is_reversal_candle_at_high/_at_low雖然monkeypatch成True，仍然
+      被is_at_high/is_at_low擋下)
+    is_reversal_candle_at_high/_at_low本身的K棒幾何判斷正確性由test_candle_shapes.py
+    另外驗證，這裡monkeypatch成True/False，只單獨隔離測試新增的位置門檻邏輯。
+    """
+    # ①K棒外觀符合＋真的位於本波段高檔 → R-CANDLE-05觸發
+    df_at_high = _swing_df("up")
+    monkeypatch.setattr(rule_scan, "is_reversal_candle_at_high", lambda o, h, l, c, pc: pd.Series(True, index=df_at_high.index))
+    monkeypatch.setattr(rule_scan, "is_reversal_candle_at_low", lambda o, h, l, c, pc: pd.Series(False, index=df_at_high.index))
+    rule_ids_at_high = [item["rule_id"] for item in scan_golden_tier(df_at_high)]
+    assert "R-CANDLE-05" in rule_ids_at_high
+    assert "R-CANDLE-13" not in rule_ids_at_high  # 位於高檔時is_at_low必然是False
+
+    # ②K棒外觀符合＋真的位於本波段低檔 → R-CANDLE-13觸發(鏡射版)
+    df_at_low = _swing_df("down")
+    monkeypatch.setattr(rule_scan, "is_reversal_candle_at_high", lambda o, h, l, c, pc: pd.Series(False, index=df_at_low.index))
+    monkeypatch.setattr(rule_scan, "is_reversal_candle_at_low", lambda o, h, l, c, pc: pd.Series(True, index=df_at_low.index))
+    rule_ids_at_low = [item["rule_id"] for item in scan_golden_tier(df_at_low)]
+    assert "R-CANDLE-13" in rule_ids_at_low
+    assert "R-CANDLE-05" not in rule_ids_at_low
+
+    # ③K棒外觀符合，但走勢是單調的(_trend_df())，沒有反向段可以當錨點，永遠不會
+    # 「位於本波段高/低檔」→ 即使外觀monkeypatch成True，R-CANDLE-05/13都不該觸發。
+    # 這是使用者原始回報的情境(2317在一段單純上漲/下跌中出現符合外觀的K棒)的直接重現。
+    monotonic_df = _trend_df(60, "up")
+    monkeypatch.setattr(rule_scan, "is_reversal_candle_at_high", lambda o, h, l, c, pc: pd.Series(True, index=monotonic_df.index))
+    monkeypatch.setattr(rule_scan, "is_reversal_candle_at_low", lambda o, h, l, c, pc: pd.Series(True, index=monotonic_df.index))
+    rule_ids_monotonic = [item["rule_id"] for item in scan_golden_tier(monotonic_df)]
+    assert "R-CANDLE-05" not in rule_ids_monotonic
+    assert "R-CANDLE-13" not in rule_ids_monotonic
 
 
 def test_scan_golden_tier_reports_bear_trend_and_skips_bull(monkeypatch):

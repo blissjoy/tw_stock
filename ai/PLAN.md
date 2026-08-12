@@ -9640,3 +9640,47 @@ main_window import MainWindow`繞過`desktop/main.py`入口，沒有自動套用
 落到Turso分支，各自多花了10幾分鐘才完成(不是真的卡死，只是很慢)——
 已更新對應的memory備忘錄提醒之後offscreen驗證桌面版功能務必自己先設好
 這兩個環境變數。
+
+## R-CANDLE-05/R-CANDLE-13缺少「位於高/低檔」門檻修正（2026-08-12）
+
+使用者反映2317在8/12是一根接近大紅K的實體棒(開264.5/高270.5/低264.0/
+收270.0)，卻被標成R-CANDLE-05「高檔變盤線」，覺得不合理。
+
+追查後發現兩件事：
+1. **這根K棒本身確實符合規則庫定義的「紡錘線」**：`is_spindle_candle()`
+   的紡錘線定義跟西方K線學「Spinning Top」方向相反——不是「小實體+長
+   影線」，是「上下影線都很短(≤實體一半)」，不分紅黑方向。2317這根
+   K棒上下影線都只有0.5、遠小於實體5.5的一半，符合定義，這部分是照書
+   實作，不是bug。
+2. **但規則接線漏了一個前提**：`ai/zhu-rules/K棒型態/高檔變盤線.md`／
+   `低檔變盤線.md`原文的判斷邏輯都寫「若**位於高檔** AND K棒外觀符合8種
+   變盤線之一」，但`rule_scan.py`原本只檢查K棒外觀，完全沒檢查「是否
+   真的位於本波段高/低檔」——同檔案的姊妹規則(晚星/晨星`evening_star_
+   pattern`/`morning_star_pattern`)都有正確接上`is_at_high`/`is_at_low`
+   (`src.indicators.trend_position.compute_trend_position()`)，唯獨這
+   兩條規則漏接。
+
+**修正**：`scan_golden_tier()`裡R-CANDLE-05/13改成`is_at_high/is_at_low
+AND is_reversal_candle_at_high/_at_low`兩個條件都要成立才觸發，跟規則
+文件原文一致；順便把`compute_trend_position()`的呼叫搬到函式最前面統一
+算一次(原本只有後段「趨勢位置模組解鎖的規則」區塊才算，現在K棒幾何
+區塊也要用，不要算兩次)。
+
+新增/調整3個測試：既有的`test_scan_golden_tier_wires_every_underlying_
+check_correctly`用的是從頭到尾單調上漲、沒有任何反向段可當高低檔錨點
+的`_trend_df()`，加上gate後R-CANDLE-05/13不會再觸發，從`expected`清單
+移出並改成明確的`not in`斷言(順便當這次修正的迴歸測試)；新增`_swing_df()`
+(先跌後漲/先漲後跌、真的走出>=10%完整波段)＋`test_scan_golden_tier_
+gates_reversal_candle_on_trend_position()`驗證「外觀符合+真的位於高/
+低檔→觸發」「外觀符合但沒有位於高/低檔(單調走勢)→不觸發」兩種情境都
+正確。`pytest tests/ -q`1182個測試全過。
+
+對正式`data/tw_stock.db`前300檔股票逐檔重新掃描比對修正前後：**159檔
+股票原本會因為單純K棒外觀符合就誤觸發R-CANDLE-05，修正後正確被「沒有
+真的位於高檔」擋下**(例如0055在8/12是根開43.78/收43.75的十字線狀K棒，
+但股價正處於盤整、沒有走出任何一段>=10%的波段，不算「位於高檔」)——
+證實這是影響層面不小的真實bug，不是使用者誤會。2317/0050重新掃描後
+R-CANDLE-05**仍然觸發**，但這次是正確的：兩者目前都是真的處於本波段
+高檔(2317近期漲幅19.4%、0050漲幅14.7%，`compute_trend_position()`
+算出來的真實波段)，「紡錘線出現在真高檔」的組合本來就是這條規則要抓
+的情境，不是還沒修好。

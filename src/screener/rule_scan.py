@@ -149,6 +149,13 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
     open_, high, low, close, volume = df["open"], df["high"], df["low"], df["close"], df["volume"]
     prev_close = close.shift(1)
 
+    # 趨勢位置模組(2026-07-26新增)：本波段是否處於高檔/低檔，見trend_position.py的
+    # compute_trend_position() docstring。搬到函式最前面(原本只在後段「解鎖的規則」
+    # 區塊才算)，因為R-CANDLE-05/13(K棒幾何區塊，在下面)2026-08-12起也需要用到，
+    # 提前計算一次、全函式共用同一份結果，不要算兩次。
+    trend_position = compute_trend_position(high, low, close)
+    is_at_high, is_at_low = trend_position["is_at_high"], trend_position["is_at_low"]
+
     results: list[dict] = []
 
     def add(rule_id: str, note: str) -> None:
@@ -466,10 +473,18 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
         add("R-VOLPRICE-01", "出現攻擊量或爆大量，且股價同步上漲，主力吸籌訊號")
 
     # --- K棒幾何 ---
-    if _last_bool(is_reversal_candle_at_high(open_, high, low, close, prev_close)):
-        add("R-CANDLE-05", "十字線/墓碑線/長T線/紡錘線/槌子/倒槌/跌停/長黑等反轉K棒幾何成立")
-    if _last_bool(is_reversal_candle_at_low(open_, high, low, close, prev_close)):
-        add("R-CANDLE-13", "十字線/墓碑線/長T線/紡錘線/槌子/倒槌/漲停/長紅等反轉K棒幾何成立")
+    # ⚠️ 2026-08-12修正：R-CANDLE-05/13原本只檢查K棒外觀(is_reversal_candle_at_high/
+    # _at_low)，沒有檢查規則文件(ai/zhu-rules/K棒型態/高檔變盤線.md、低檔變盤線.md)
+    # 原文的判斷邏輯明訂的「if 位於高檔 and is_reversal_candle_high:」前提——導致任何
+    # 符合8種外觀之一的K棒都會被標成「變盤線」，不管股價當下是不是真的在本波段高/低檔，
+    # 例如強勢大紅K只要上下影線夠短(這裡的「紡錘線」跟西方Spinning Top方向相反，見
+    # is_spindle_candle()說明)也會被誤標成「高檔變盤線」。同檔案的姊妹規則(晚星/晨星
+    # evening_star_pattern/morning_star_pattern)都有正確接上is_at_high/is_at_low，
+    # 這裡補上同樣的「AND位於高檔／低檔」門檻，跟規則文件原文一致。
+    if bool(is_at_high.iloc[-1]) and _last_bool(is_reversal_candle_at_high(open_, high, low, close, prev_close)):
+        add("R-CANDLE-05", "位於本波段高檔，且十字線/墓碑線/長T線/紡錘線/槌子/倒槌/跌停/長黑等反轉K棒幾何成立")
+    if bool(is_at_low.iloc[-1]) and _last_bool(is_reversal_candle_at_low(open_, high, low, close, prev_close)):
+        add("R-CANDLE-13", "位於本波段低檔，且十字線/墓碑線/長T線/紡錘線/槌子/倒槌/漲停/長紅等反轉K棒幾何成立")
     if _last_bool(is_hammer_candle(open_, high, low, close)):
         add("R-CANDLE-25", "下影線>=實體2倍、上影線短，槌子線")
     if _last_bool(is_inverted_hammer_candle(open_, high, low, close)):
@@ -729,8 +744,7 @@ def scan_golden_tier(df: pd.DataFrame, trend_df: pd.DataFrame | None = None) -> 
     # 重新檢視先前因「趨勢位置未實作」被排除的規則，把參數需求剛好就是is_at_high/is_at_low
     # (不需要更細的初升/主升/末升等子階段)的部分接上；其餘(is_bull_early_or_main_stage、
     # is_start_of_decline、is_late_stage_rally等更細緻的子階段判斷)本模組尚未提供，維持排除。
-    trend_position = compute_trend_position(high, low, close)
-    is_at_high, is_at_low = trend_position["is_at_high"], trend_position["is_at_low"]
+    # (is_at_high/is_at_low本身已在函式最前面算好，這裡開始接上會用到它們的規則。)
 
     # R-TREND-12多頭高檔爆量停利訊號：is_at_bull_high直接對應is_at_high。
     exhaustion_signal_12 = bull_high_volume_exhaustion_signal(volume, open_, close, ma5_volume, is_at_high)
