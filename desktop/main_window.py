@@ -4308,15 +4308,17 @@ class MainWindow(QMainWindow):
         return "".join(blocks), anchor_ids
 
     def _build_report_html(self, stock_id: str, stock_label: str) -> str:
-        """組出「產出報表」的完整HTML文件，依使用者指定的順序包含：圖表、個股明細、
-        個股分析、附錄(引用筆記全文)——2026-08-04新增，供匯出/列印成PDF用，不是
-        即時互動畫面：
+        """組出「產出報表」的完整HTML文件，依使用者指定的順序包含：圖表、個股明細
+        (含三維過濾法，插在資券變化總覽/融資維持率分析之後)、個股分析、附錄(引用
+        筆記全文)——2026-08-04新增，供匯出/列印成PDF用，不是即時互動畫面：
         - 圖表：用`<iframe>`內嵌已經寫好的self._chart_html_path(render_chart_html()
           產生的完整獨立HTML檔案，含Plotly.js)，不重新處理它的內部結構——這個檔案
           在_rerender_chart()裡只要查詢過股票就會寫入，不受目前停留在哪個inner tab
           影響，所以這裡可以直接引用。
         - 個股明細：重用_build_overview_*_html()這5個既有方法，跟_refresh_stock_
-          overview_view()用的是同一組函式。
+          overview_view()用的是同一組函式。三維過濾法(2026-08-12新增)重用
+          _build_q3_analysis_html()，跟「三維過濾法」分頁同一份資料來源，使用者
+          指定要放在融資維持率分析下面。
         - 個股分析：這裡不能直接重用_build_analysis_sections_html()(那個是給即時
           互動畫面用的，「原文與頁碼」是開新視窗的ruledoc:///連結，「查看技術面↓」
           是跳到_CollapsibleBox的jumpto:///連結，兩者在匯出的PDF裡都不會有作用)。
@@ -4332,9 +4334,18 @@ class MainWindow(QMainWindow):
             "資券變化總覽": self._build_overview_margin_html,
             "大戶籌碼": self._build_overview_chip_html,
         }
-        detail_html = "".join(
-            f"<h3>{html.escape(title)}</h3>{builder(stock_id)}" for title, builder in detail_builders.items()
-        )
+        detail_parts = []
+        for title, builder in detail_builders.items():
+            detail_parts.append(f"<h3>{html.escape(title)}</h3>{builder(stock_id)}")
+            if title == "資券變化總覽":
+                # 2026-08-12新增：使用者反映報表沒有包含「三維過濾法」，指定放在
+                # 融資維持率分析(資券變化總覽區塊的最後一段，見
+                # _build_overview_margin_html())下面——直接重用_build_q3_analysis_html()
+                # (跟「三維過濾法」分頁同一份資料來源)，這裡不重複帶「三維過濾法：」
+                # 前綴當header_label，用外層<h3>當標題即可，避免跟內文的粗體股票
+                # 標籤重複顯得累贅。
+                detail_parts.append(f"<h3>三維過濾法</h3>{self._build_q3_analysis_html(stock_id, stock_label)}")
+        detail_html = "".join(detail_parts)
 
         price_df = chart_data.load_price_history(self.conn, stock_id)
         trend_df = chart_data.load_price_history(self.conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)

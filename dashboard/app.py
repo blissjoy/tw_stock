@@ -1167,6 +1167,110 @@ def main() -> None:
         )
         return warning + table
 
+    def _build_report_q3_html(stock_id: str) -> str:
+        """「三維過濾法」報表區塊(HTML字串版本，供weasyprint排版用)，照抄desktop/
+        main_window.py的_build_q3_analysis_html()，跟render_q3_analysis_section()
+        同一份資料來源(q3_analysis.load_q3_analysis())，只是輸出HTML字串而非
+        streamlit元件。2026-08-12新增：使用者反映報表沒有包含三維過濾法，指定
+        放在融資維持率分析(_build_report_margin_html()結尾)下面——呼叫端用
+        <h3>三維過濾法</h3>當標題，這裡不重複輸出股票標籤，避免跟報表最上方的
+        H1標題重複。"""
+        price_df = load_price_history(conn, stock_id)
+        if price_df.empty:
+            return f"<p>查無股票代號 {html.escape(stock_id)} 的價格資料。</p>"
+        trend_df = load_price_history(conn, stock_id, days=chart_data.TREND_LOOKBACK_DAYS)
+        result = q3_analysis.load_q3_analysis(price_df, trend_df=trend_df)
+        if result is None:
+            return "<p>資料天數不足，無法計算三維過濾法。</p>"
+
+        ind = result["indicators"]
+        verdict = result["verdict"]
+
+        def fmt(value, digits: int = 2) -> str:
+            return f"{value:.{digits}f}" if value is not None else "-"
+
+        bullets_html = "".join(f"<li>{html.escape(b)}</li>" for b in verdict["bullets"])
+        verdict_html = (
+            f"<p><b>🤖 AI判定(規則版)：{html.escape(verdict['text'])}</b>　"
+            f"防守支撐價：${fmt(verdict['support_price'])}　(綜合評分 {verdict['score']:+d})</p>"
+            f"<ul>{bullets_html}</ul>"
+        )
+
+        matrix = result["matrix"]
+        if matrix is not None:
+            caveat_html = (
+                f"<br><span style='color:#b36b00;'>⚠️ {html.escape(matrix['caveat'])}</span>"
+                if matrix.get("caveat")
+                else ""
+            )
+            matrix_html = (
+                f"<p><b>矩陣：{html.escape(matrix['label'])}</b><br>{html.escape(matrix['interpretation'])}"
+                f"（{html.escape(matrix['rule_id'])}）{caveat_html}</p>"
+            )
+        else:
+            matrix_html = "<p>今天沒有落在任何已定義的矩陣格。</p>"
+
+        patterns = result["patterns"]
+        if patterns:
+            pattern_items = []
+            for p in patterns:
+                basis_badge = (
+                    "<span style='color:#b36b00;'>⚠️簡化版</span>　"
+                    if p["basis"] == q3_patterns.BASIS_SIMPLIFIED
+                    else "<span style='color:#666;'>沿用既有規則</span>　"
+                )
+                pattern_items.append(
+                    f"<li>{basis_badge}<b>{html.escape(p['name'])}</b>（{html.escape(p['rule_id'])}）："
+                    f"{html.escape(p['note'])}</li>"
+                )
+            patterns_html = (
+                "<p style='color:#888;font-size:90%;'>「⚠️簡化版」代表本專案沒有對應既有規則，"
+                "由本功能自行實作核心條件，跟外部工具原文定義不會100%一致；「沿用既有規則」代表"
+                "判斷邏輯跟系統其他地方完全一致。</p>"
+                f"<ul>{''.join(pattern_items)}</ul>"
+            )
+        else:
+            patterns_html = "<p>今天沒有觸發任何已定義的型態。</p>"
+
+        indicator_rows = [
+            ("8日均線(8MA)", fmt(ind["ma8"])),
+            ("月線(20MA)", fmt(ind["ma20"])),
+            ("季線(60MA)", fmt(ind["ma60"])),
+            ("KD指標", f"K:{fmt(ind['k'])} D:{fmt(ind['d'])}"),
+            ("RSI", fmt(ind["rsi"])),
+            ("MACD柱狀", fmt(ind["macd_osc"])),
+            ("OBV(能量潮)", fmt(ind["obv"], 0)),
+            ("ATR(真實波幅)", fmt(ind["atr"])),
+            ("乖離率(BIAS)", f"{fmt(ind['bias_pct'])}%"),
+            ("連續站上布林上軌", f"{ind['bollinger_streak_days']} 天"),
+            ("均線交叉", html.escape(ind["ma_cross"])),
+            ("爆量訊號", "有" if ind["big_volume_today"] else "無"),
+            (
+                "今日量價關係",
+                (html.escape(ind["volume_price_relation"]) if ind["volume_price_relation"] else "-")
+                + (
+                    f"　（今日量/5日均量={ind['volume_ratio_vs_ma5_pct']:.0f}%）"
+                    if ind["volume_ratio_vs_ma5_pct"] is not None
+                    else ""
+                ),
+            ),
+            ("今日Q1/Q2/Q3", f"{html.escape(ind['q1_price'])}／{html.escape(ind['q2_volume'])}／{html.escape(ind['q3_position'])}"),
+        ]
+        indicator_table = "".join(f"<tr><td>{label}</td><td>{value}</td></tr>" for label, value in indicator_rows)
+
+        return (
+            f"{verdict_html}"
+            "<p><b>12種量價矩陣</b></p>"
+            f"{matrix_html}"
+            "<p><b>30種主力型態</b></p>"
+            f"{patterns_html}"
+            "<p><b>技術指標總覽</b></p>"
+            f"<table cellpadding='4'>{indicator_table}</table>"
+            "<p style='color:#888;font-size:90%;'>「三維過濾法」複製外部工具Antigravity"
+            "儀表板的分析框架(見ai/q3-rules/)，AI判定為規則版加權評分，非LLM生成文字，"
+            "僅供參考，不是投資建議。</p>"
+        )
+
     def _format_reference_html_as_anchors(reference: str, note_anchor_map: dict[str, str]) -> str:
         """把「原文與頁碼」文字裡的.md檔名轉成跳到附錄的PDF內部錨點連結，照抄desktop/
         main_window.py的_format_reference_html_as_anchors()——PDF匯出後沒有「開新
@@ -1309,9 +1413,14 @@ def main() -> None:
             "資券變化總覽": _build_report_margin_html,
             "大戶籌碼": lambda _sid: _build_report_chip_html(),
         }
-        detail_html = "".join(
-            f"<h3>{html.escape(title)}</h3>{builder(stock_id)}" for title, builder in detail_builders.items()
-        )
+        detail_parts = []
+        for title, builder in detail_builders.items():
+            detail_parts.append(f"<h3>{html.escape(title)}</h3>{builder(stock_id)}")
+            if title == "資券變化總覽":
+                # 2026-08-12新增：使用者反映報表沒有包含「三維過濾法」，指定放在
+                # 融資維持率分析(資券變化總覽區塊的最後一段)下面。
+                detail_parts.append(f"<h3>三維過濾法</h3>{_build_report_q3_html(stock_id)}")
+        detail_html = "".join(detail_parts)
 
         analysis_html, appendix_html = _build_report_analysis_html(stock_id)
         chart_html = _build_report_chart_image_html(stock_id)
