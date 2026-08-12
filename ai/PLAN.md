@@ -9401,3 +9401,37 @@ id} {stock_name}")`。
 Streamlit widget變更一致不寫進pytest套件)。網頁版用Playwright對2330
 實際截圖確認顯示「2330 台積電」；桌面版用offscreen腳本驗證`stock_
 overview_header_label.text()`精確等於「2330 台積電」。
+
+## 修正桌面版：停留在非「圖表」內層分頁時換股票，該分頁不會更新（2026-08-12）
+
+使用者反映：停留在「三維過濾法」分頁時，用「個股查詢」搜尋框查另一檔股票
+按Enter，畫面只有「圖表」換了，「三維過濾法」還停在舊股票的資料。
+
+**查證**：桌面版「個股資訊」5個內層分頁(圖表/個股分析/個股明細/產出報表/
+三維過濾法)裡，只有「圖表」是`_on_search()`/`_on_tab_changed()`直接呼叫
+`_rerender_chart()`更新；其餘4個都是掛在`detail_inner_tabs.currentChanged`
+訊號上的懶惰重新整理(`_on_detail_inner_tab_changed()`)，只有「切分頁」這個
+動作本身才會觸發。如果使用者「已經停留在某個分頁時才換股票」(不管是用搜尋
+框、還是從候選清單/觀察清單/庫存清單/產業輪動點名稱跳轉過來)，內層分頁
+index根本沒有變化，這個訊號不會觸發，該分頁就會一直顯示舊股票的資料，
+直到使用者手動切到別的分頁再切回來才會更新。
+
+網頁版(`dashboard/app.py`)不受影響——Streamlit的執行模型是整支script重跑，
+5個內層`st.tabs()`裡的`render_chart_fn()`/`render_analysis_fn()`/
+`render_stock_overview_section()`/`render_stock_report_section()`/
+`render_q3_analysis_section()`每次rerun都無條件呼叫(沒有`.open`延遲載入
+判斷)，不管使用者目前停在哪個內層分頁都會拿到最新的`detail_stock_id`，
+沒有這個問題。
+
+**修正**：新增`_refresh_current_stock_detail_views()`，換股票時統一呼叫
+`_rerender_chart()`(圖表)+`_on_detail_inner_tab_changed(目前的內層分頁
+index)`(其餘4個分頁裡目前顯示中的那一個)，涵蓋「手動查詢」跟「從清單點
+名稱跳轉」兩種換股票路徑，不管使用者當下停留在哪個內層分頁都會換成新股票
+資料。`_on_search()`跟`_on_tab_changed()`的「個股資訊」分支都改叫這個
+方法，取代原本各自只呼叫`_rerender_chart()`。
+
+`pytest tests/ -q`1170個測試全過(UI互動邏輯延續本session慣例不寫進pytest
+套件)。用offscreen腳本重現使用者情境：先查2330、切到「三維過濾法」分頁，
+確認顯示2330資料；接著在停留在這個分頁的狀態下改查2317，確認「三維過濾法」
+正確換成2317資料(不再是修正前的停留在2330)，「圖表」分頁也一併確認仍正常
+反映新股票，沒有被這次改動破壞既有行為。

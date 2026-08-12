@@ -3354,8 +3354,12 @@ class MainWindow(QMainWindow):
             # 切到「個股資訊」分頁時重新整理一次(不管是不是剛從候選清單點過來)，確保
             # 圖表/分析面板都是在分頁真正顯示、有正確layout之後才計算(見_build_stock_
             # detail_tab()的說明)；_rerender_chart()本身有「沒有選取任何股票」的
-            # 空狀態防呆，不會因為使用者還沒選過股票就直接切過來而出錯。
-            self._rerender_chart()
+            # 空狀態防呆，不會因為使用者還沒選過股票就直接切過來而出錯。2026-08-12
+            # 改叫_refresh_current_stock_detail_views()(見該方法說明)，不是只呼叫
+            # _rerender_chart()：從候選清單/觀察清單/庫存清單/產業輪動點名稱跳轉
+            # 過來時，如果使用者上次停留在「三維過濾法」等非「圖表」的內層分頁，
+            # 只更新圖表不會讓目前顯示中的那個內層分頁換成新股票的資料。
+            self._refresh_current_stock_detail_views()
         elif index == TAB_INDUSTRY_ROTATION:
             self._refresh_industry_rotation_tab()
         elif index == TAB_INVENTORY:
@@ -3620,7 +3624,23 @@ class MainWindow(QMainWindow):
         resolved = chart_data.resolve_stock_id(self.conn, query) if self.conn is not None else None
         self._current_stock_id = resolved or query
         self._current_stock_source = None  # 手動查詢，右上角不顯示來源
+        self._refresh_current_stock_detail_views()
+
+    def _refresh_current_stock_detail_views(self) -> None:
+        """換股票後統一呼叫，確保「個股資訊」不管使用者目前停留在哪個內層分頁(圖表/
+        個股分析/個股明細/產出報表/三維過濾法)都會換成新股票的資料。⚠️ 2026-08-12
+        修正：使用者反映在「三維過濾法」分頁時直接用搜尋框查另一檔股票，畫面只有
+        「圖表」換了、「三維過濾法」還停在舊股票——追查是原本`_on_search()`只呼叫
+        `_rerender_chart()`(只更新圖表本身)，其餘4個內層分頁的重新整理都是掛在
+        `detail_inner_tabs.currentChanged`訊號(切分頁「這個動作」才觸發)，如果
+        使用者「已經停留在某個分頁時才換股票」，內層分頁index根本沒有變化，訊號
+        不會觸發，該分頁就會一直顯示舊股票的資料，直到使用者手動切走再切回來。
+        這裡改成不管目前停留在內層哪個分頁，換股票時都主動重新整理「圖表」+目前
+        這個內層分頁兩者，`_on_search()`跟`_on_tab_changed()`的「個股資訊」分支
+        都改叫這個方法，涵蓋「手動查詢」跟「從候選清單/觀察清單/庫存清單/產業
+        輪動點名稱跳轉過來」兩種換股票的路徑。"""
         self._rerender_chart()
+        self._on_detail_inner_tab_changed(self.detail_inner_tabs.currentIndex())
 
     def _rerender_chart(self) -> None:
         if self.conn is None or not self._current_stock_id:
