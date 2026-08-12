@@ -9326,9 +9326,18 @@ both_connections_even_when_sync_raises`)，用假的Turso連線物件+攔截
 `sqlite3.connect()`驗證兩邊連線在`sync()`拋例外時仍然都被close()。
 `pytest tests/ -q`1170個測試全過。
 
-另外發現目前還有多個從8/5～8/11起就沒結束過的python.exe process(對應
-`daily_pipeline.py`的多個排程時段)，不確定是否為同一類洩漏問題，先只
-處理這次回報的Turso同步事故，其餘留待之後有空再個別查證，不在這次
-擴大處理範圍。已卡住的殭屍process(PID 101592)本身不會因為程式碼修好
-而自己恢復，需要另外手動結束，跟使用者確認後才動手(操作真實在跑的
-process，不是單純改程式碼)。
+另外發現目前還有多個從8/5～8/11起就沒結束過的python.exe process，一開始
+猜測可能對應`daily_pipeline.py`的多個排程時段、同一類洩漏問題。已卡住的
+殭屍process(PID 101592)本身不會因為程式碼修好而自己恢復，需要另外手動
+結束，跟使用者確認後才動手(操作真實在跑的process，不是單純改程式碼)。
+
+**後續處理**：跟使用者確認後結束PID 101592，排程工作狀態從「Running」變回
+「Ready」，確認8/12晚上21:15能正常執行。另外查了其餘那幾個從8/5~8/11就
+沒結束過的python.exe process的command line，發現**都不是daily_pipeline.py
+排程的問題，是我自己這幾天驗證UI時透過背景執行launch的測試程式**沒清乾淨
+(1個一次性遷移腳本+3個PySide6截圖驗證腳本+5個streamlit測試伺服器
+`--server.port 8517/8518/8519/8580`)——`pkill -f`收尾清理有漏網之魚，之後
+驗證UI用的背景process要更確實地確認真的被結束，不能只憑pkill跑過一次就
+假設乾淨。跟使用者確認另一個process(PID 390204，`desktop/main.py`)是
+使用者自己真的在用的桌面版視窗後，一併結束其餘9個測試殘留process，只留下
+使用者自己的視窗，機器上乾淨了。
