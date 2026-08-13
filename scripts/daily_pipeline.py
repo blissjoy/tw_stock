@@ -29,15 +29,18 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.data import finmind_client, holder_shares_sync, portfolio_storage, storage, tpex_client, twse_client, yfinance_client  # noqa: E402
+from src.data import finmind_client, holder_shares_sync, storage, tpex_client, twse_client, yfinance_client  # noqa: E402
 from src.data.connection import get_default_portfolio_connection  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
@@ -602,17 +605,29 @@ def run_daily_pipeline(
             # 2026-08-12新增：庫存逃命示警——使用者要求「庫存損益是整個系統存在的關鍵」，
             # 每次真正發送通知(=股價/籌碼資料剛更新完)都要主動檢查一次目前持股有沒有
             # 逃命示警，跟候選清單同一則LINE訊息一起發送(不要分成兩則，理由見
-            # format_candidates_message()的inventory_escape_signals參數說明)。獨立
-            # try/except、獨立開關portfolio_conn(跟下面chip_refresh區塊各自獨立一條
-            # 連線，理由一致：這裡失敗不應該讓候選清單通知整個發不出去，也不應該被
-            # chip_refresh=False的排程漏掉這個檢查——這個檢查不受chip_refresh旗標
-            # 控制，只要不是dry_run就會執行)。
-            inventory_escape_signals = None
+            # format_candidates_message()的inventory_warnings參數說明)。獨立try/except、
+            # 獨立開關portfolio_conn(跟下面chip_refresh區塊各自獨立一條連線，理由一致：
+            # 這裡失敗不應該讓候選清單通知整個發不出去，也不應該被chip_refresh=False的
+            # 排程漏掉這個檢查——這個檢查不受chip_refresh旗標控制，只要不是dry_run就會
+            # 執行)。用load_inventory_summary()一次拿到現價/成本/損益%(不是只拿stock_id
+            # 清單再另外查)，2026-08-13改版把「有逃命示警的持股」的現價/成本/損益%一併
+            # 附進LINE訊息，不是只列規則編號。
+            inventory_warnings = None
             try:
                 inventory_portfolio_conn = get_default_portfolio_connection()
                 try:
-                    inventory_stock_ids = portfolio_storage.list_inventory_stock_ids(inventory_portfolio_conn)
-                    inventory_escape_signals = portfolio_data.load_escape_signals_for_stocks(conn, inventory_stock_ids)
+                    summary_df = portfolio_data.load_inventory_summary(conn, inventory_portfolio_conn)
+                    escape_signals = portfolio_data.load_escape_signals_for_stocks(conn, list(summary_df["stock_id"]))
+                    inventory_warnings = [
+                        {
+                            "stock_id": row["stock_id"], "name": row["name"],
+                            "close": row["close"] if pd.notna(row["close"]) else None,
+                            "cost_price": row["cost_price"] if pd.notna(row["cost_price"]) else None,
+                            "return_pct": row["return_pct"] if pd.notna(row["return_pct"]) else None,
+                        }
+                        for _, row in summary_df.iterrows()
+                        if escape_signals.get(row["stock_id"])
+                    ]
                 finally:
                     inventory_portfolio_conn.close()
             except Exception as exc:  # noqa: BLE001
@@ -622,9 +637,10 @@ def run_daily_pipeline(
             # 不應該讓其中一個管道還沒設定/暫時失敗就讓整條pipeline中斷（候選清單已經寫進Turso了）。
             try:
                 stock_names = {sid: info.get("name", "") for sid, info in stock_info_by_id.items()}
+                stock_industries = {sid: info.get("industry", "") for sid, info in stock_info_by_id.items()}
                 send_line_broadcast(format_candidates_message(
-                    iso_date, notify_candidates, stock_names=stock_names,
-                    inventory_escape_signals=inventory_escape_signals,
+                    iso_date, notify_candidates, stock_names=stock_names, stock_industries=stock_industries,
+                    inventory_warnings=inventory_warnings,
                 ))
             except Exception as exc:  # noqa: BLE001
                 print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
@@ -702,6 +718,19 @@ def main() -> None:
         db_path = Path(args.local_db)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = storage.init_db(db_path)
+        # ⚠️ 2026-08-13修正：--local-db代表「這次執行用本機檔案、不連Turso」，這個語意
+        # 理應也適用於庫存/觀察清單DB(run_daily_pipeline()裡呼叫get_default_portfolio_
+        # connection()，讀PORTFOLIO_DB_PATH環境變數)——但這裡原本沒有對應的預設值，
+        # Windows工作排程器8個排程任務全部都帶--local-db，卻沒有一個帶PORTFOLIO_DB_
+        # PATH，導致庫存查詢一路以來都悄悄落到Turso上一個獨立的庫存清單資料庫，跟
+        # desktop/main.py固定使用的本機data/portfolio.db(使用者實際管理持股用的檔案)
+        # 完全是兩份互不同步的資料(只有scripts/seed_turso_portfolio_from_local.py這個
+        # 一次性腳本可以手動搬一次，不是持續同步)。2026-08-12新增的庫存逃命示警檢查
+        # 因此查到的是Turso那份可能是空的/過時的庫存清單，即使本機真實持股當天有逃命
+        # 示警也不會被通知到。改用os.environ.setdefault()(尊重使用者已自行設定
+        # PORTFOLIO_DB_PATH的情況，不覆蓋)，預設路徑跟desktop/main.py用的檔名一致
+        # (同一個data目錄下的portfolio.db)，讓排程跟桌面版讀寫同一份庫存清單檔案。
+        os.environ.setdefault("PORTFOLIO_DB_PATH", str(db_path.parent / "portfolio.db"))
     else:
         from src.data import turso_client
         conn = turso_client.get_connection()

@@ -9762,3 +9762,66 @@ helper放在一起)。`pytest tests/ -q`1187個測試全過。
 第一次執行又落到Turso分支——這次照著memory備忘錄的提醒事先設好
 `LOCAL_DB_PATH`+`PORTFOLIO_DB_PATH`，執行時間從先前兩次的12~18分鐘
 縮短到幾秒鐘完成，備忘錄的教訓確實有用。
+
+## 修正：排程一直查錯的庫存DB＋LINE訊息加產業別/現價成本損益%（2026-08-13）
+
+使用者回報8/13的LINE通知沒有出現庫存警示，追查後發現這不是「剛好沒有
+逃命示警」，是一個結構性bug：`scripts/daily_pipeline.py`的`main()`
+處理`--local-db`時只把**主DB**指向本機檔案，完全沒有對應處理**庫存DB**
+——`run_daily_pipeline()`裡呼叫`get_default_portfolio_connection()`
+讀的是`PORTFOLIO_DB_PATH`環境變數，8個Windows排程任務全部都帶
+`--local-db`卻沒有一個帶這個環境變數，導致排程執行時的庫存查詢一路
+以來都悄悄連到Turso上一個獨立的庫存清單資料庫，跟`desktop/main.py`
+固定使用的本機`data/portfolio.db`(使用者實際透過桌面版管理持股寫入
+的檔案)完全是兩份互不同步的資料——`.env`裡設定的
+`TURSO_PORTFOLIO_DATABASE_URL`能連得上，所以不會報錯，只是查到的是
+另一份(可能是空的)庫存清單，安靜地找不到任何持股，當然也就不會有
+任何逃命示警可以通知。兩者之間只有`scripts/seed_turso_portfolio_
+from_local.py`這支一次性腳本可以手動搬一次，不是持續同步。
+
+修正：`main()`處理`--local-db`時，改用`os.environ.setdefault(
+"PORTFOLIO_DB_PATH", str(db_path.parent / "portfolio.db"))`，把庫存DB
+預設指向跟主DB同一個目錄下的`portfolio.db`(跟desktop/main.py用的
+是同一份檔案)，尊重使用者已經自行設定`PORTFOLIO_DB_PATH`的情況(不
+覆蓋)。不需要改Windows排程任務參數，下次排程執行就會自動生效。
+
+同時使用者也要求改版LINE通知格式：
+```
+【2026-08-13 每日選股】共3檔候選：
+・5321美而快(產業別) 符合規格數2
+・2459敦吉(產業別) 符合規格數1
+・7718友鋮(產業別) 符合規格數1
+
+【庫存警示】
+（有逃命示警則逐檔列出）鴻海 現{現價} 成{成本} {損益%}
+（都沒有則顯示）安全
+```
+`format_candidates_message()`(src/notify/line_notify.py)改版：
+①新增`stock_industries`參數，候選清單每行名稱後面加`(產業別)`(省略
+或查無資料時退回不帶括號的舊格式，向下相容)；②把原本的
+`inventory_escape_signals`參數換成`inventory_warnings`(list[dict]，
+每筆含現價/成本/損益%，呼叫端算好才傳進來，這裡只負責格式化)，並
+明確定義三種狀態：`None`(檢查沒執行/失敗，整段「【庫存警示】」都不
+出現，避免使用者誤以為「有檢查、沒問題」)／`[]`(有檢查、目前沒有
+任何逃命示警，顯示「安全」)／非空清單(逐檔列出「{名稱} 現{現價}
+成{成本} {損益%}」，任一數值缺值顯示"-")。`daily_pipeline.py`呼叫端
+改用`load_inventory_summary()`一次拿到現價/成本/損益%(不再只查
+stock_id清單)，再篩出有逃命示警的股票組成`inventory_warnings`。
+
+新增/調整測試：line_notify.py新增6個測試涵蓋產業別格式化、庫存警示
+三種狀態(有警示/安全/未檢查)、候選清單為空時警示段落仍顯示、缺值
+顯示"-"；daily_pipeline.py把舊的`test_run_daily_pipeline_combines_
+inventory_escape_signals_into_line_message`改寫成驗證新格式(含真實
+損益%計算，不是只驗證規則編號字串)，新增「安全」跟「檢查失敗時整段
+不出現」兩個狀態各自的測試，順手拿掉一個變成重複的舊測試。
+`pytest tests/ -q`1191個測試全過。
+
+對正式`data/tw_stock.db`+真正的本機`data/portfolio.db`(不是複製，
+直接用使用者實際在用的檔案，唯讀查詢不會寫入)驗證：模擬`main()`
+處理`--local-db`的路徑，確認`PORTFOLIO_DB_PATH`正確解析成
+`d:\tw_stock\data\portfolio.db`，且用這個路徑查出來的庫存清單正確
+顯示使用者真正的持股(2317鴻海、6139亞翔，不是空清單)，兩檔今天
+都有真實的逃命示警，現價/成本/損益%數字也正確——修正前這整段查詢
+會查到Turso上完全不同(甚至可能是空)的庫存清單，這個bug可能已經
+存在好幾天沒被發現，直到今天使用者實際注意到「怎麼沒有庫存警示」
+才浮現。

@@ -389,19 +389,21 @@ def test_run_daily_pipeline_sends_notifications_when_not_dry_run(monkeypatch):
     assert [c[0] for c in notify_calls] == ["line", "email"]
 
 
-def test_run_daily_pipeline_combines_inventory_escape_signals_into_line_message(monkeypatch):
-    """2026-08-12新增：使用者要求「庫存損益是整個系統存在的關鍵」，每次真正發送
-    通知都要檢查庫存逃命示警，且要跟候選清單同一則LINE訊息一起發送、不要分成
-    兩則。這裡驗證庫存有股票且該股票有逃命示警時，實際送出的LINE文字包含逃命
-    示警段落，而且只呼叫一次send_line_broadcast。"""
+def test_run_daily_pipeline_combines_inventory_warnings_into_line_message(monkeypatch):
+    """2026-08-12新增、2026-08-13改版：使用者要求「庫存損益是整個系統存在的關鍵」，
+    每次真正發送通知都要檢查庫存逃命示警，且要跟候選清單同一則LINE訊息一起發送、
+    不要分成兩則，格式是「【庫存警示】」＋逐檔「{名稱} 現{現價} 成{成本} {損益%}」。
+    這裡驗證庫存有股票且該股票有逃命示警時，實際送出的LINE文字包含正確的現價/
+    成本/損益%(來自load_inventory_summary()，不是只列規則編號)，而且只呼叫一次
+    send_line_broadcast。"""
     from src.data import portfolio_storage
 
     conn = _fresh_conn()
     portfolio_conn = _fresh_portfolio_conn()
-    portfolio_storage.add_inventory_stock(portfolio_conn, "2317", buy_date="2026-07-01", cost_price=100.0, shares=1000)
+    portfolio_storage.add_inventory_stock(portfolio_conn, "2317", buy_date="2026-07-01", cost_price=200.0, shares=1000)
     monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: portfolio_conn)
     _stub_stock_info(monkeypatch, [{"stock_id": "2317", "name": "鴻海", "market": "TWSE", "industry": "電子"}])
-    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row(stock_id="2317")])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
     monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
@@ -416,14 +418,45 @@ def test_run_daily_pipeline_combines_inventory_escape_signals_into_line_message(
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
 
-    assert len(line_calls) == 1  # 只發一則，不是候選清單跟逃命示警分開兩則
-    assert "🚨庫存逃命示警" in line_calls[0]
-    assert "2317鴻海：R-CANDLE-05" in line_calls[0]
+    assert len(line_calls) == 1  # 只發一則，不是候選清單跟庫存警示分開兩則
+    assert "【庫存警示】" in line_calls[0]
+    # _price_row()收盤價104.0、成本價200.0，return_pct由load_inventory_summary()算
+    # (含估計手續費，不是單純(現價-成本)/成本的簡化算法，見portfolio_data.py)。
+    assert "・鴻海 現104.00 成200.00 -48.2%" in line_calls[0]
 
 
-def test_run_daily_pipeline_sends_candidate_notification_even_when_inventory_escape_check_fails(monkeypatch):
-    """庫存逃命示警檢查本身失敗(例如portfolio DB連線壞掉)不應該讓候選清單通知
-    整個發不出去，跟其他通知管道各自獨立try/except同一個精神。"""
+def test_run_daily_pipeline_line_message_shows_safe_when_inventory_has_no_warnings(monkeypatch):
+    """庫存有持股、檢查有正常執行，但沒有任何一檔觸發逃命示警時，要顯示「安全」，
+    不是完全不出現【庫存警示】這段(那個狀態是檢查失敗，見下一個測試)——兩者
+    使用者體驗上必須可以區分。"""
+    from src.data import portfolio_storage
+
+    conn = _fresh_conn()
+    portfolio_conn = _fresh_portfolio_conn()
+    portfolio_storage.add_inventory_stock(portfolio_conn, "2317", buy_date="2026-07-01", cost_price=100.0, shares=1000)
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: portfolio_conn)
+    _stub_stock_info(monkeypatch, [{"stock_id": "2317", "name": "鴻海", "market": "TWSE", "industry": "電子"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row(stock_id="2317")])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+    monkeypatch.setattr(daily_pipeline.portfolio_data, "load_escape_signals_for_stocks", lambda conn, stock_ids: {"2317": []})
+
+    line_calls = []
+    monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: line_calls.append(text))
+    monkeypatch.setattr(daily_pipeline, "send_email", lambda subject, body: None)
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
+
+    assert "【庫存警示】" in line_calls[0]
+    assert "安全" in line_calls[0]
+
+
+def test_run_daily_pipeline_omits_inventory_section_when_escape_check_fails(monkeypatch):
+    """庫存逃命示警檢查本身失敗(例如portfolio DB連線壞掉)時，訊息裡不該出現
+    【庫存警示】這段(inventory_warnings維持None，見format_candidates_message()
+    的三態說明)——不能讓使用者誤以為「有檢查、沒問題」，也不影響候選清單通知
+    照常發送。"""
     conn = _fresh_conn()
 
     def _raise_portfolio_conn():
@@ -443,7 +476,7 @@ def test_run_daily_pipeline_sends_candidate_notification_even_when_inventory_esc
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
 
     assert len(line_calls) == 1
-    assert "🚨庫存逃命示警" not in line_calls[0]
+    assert "【庫存警示】" not in line_calls[0]
 
 
 def test_run_daily_pipeline_line_still_sent_when_email_not_configured(monkeypatch):
