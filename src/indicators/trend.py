@@ -7,8 +7,24 @@ R-TREND-08/09（趨勢改變先知先覺）則是在趨勢已確認的前提下�
 
 from __future__ import annotations
 
+import math
+
 from src.indicators.pivots import TurningPoint
 from src.rule_registry import implements_rule
+
+
+def _safe_body_pct(close_t: float, open_t: float, *, positive: bool) -> float:
+    """開盤價為0/NaN/inf時，直接視為無法計算，避免除以零或無效值造成警告。"""
+    try:
+        open_value = float(open_t)
+        close_value = float(close_t)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not math.isfinite(open_value) or not math.isfinite(close_value) or open_value == 0:
+        return 0.0
+
+    return (close_value - open_value) / open_value if positive else (open_value - close_value) / open_value
 
 
 def heads_and_bottoms(turning_points: list[TurningPoint]) -> tuple[list[float], list[float]]:
@@ -136,7 +152,7 @@ def bull_pullback_buy_signal(
     """回後買上漲：多頭趨勢中回檔未跌破前低，帶量中長紅K收盤同時突破MA5與前一日高點。"""
     if not (is_bull_trend and pullback_holds_prior_low):
         return False
-    gain_pct = (close_t - open_t) / open_t
+    gain_pct = _safe_body_pct(close_t, open_t, positive=True)
     return close_t > ma5_t and close_t > high_prev and volume_t > volume_prev and gain_pct >= mid_long_red_threshold
 
 
@@ -150,7 +166,7 @@ def bull_consolidation_breakout_signal(
     """盤整的突破：前一趨勢為多頭的盤整區，帶量(前均量1.3倍以上)中長紅K收盤突破上頸線。"""
     if not (prev_trend_bull and is_consolidation):
         return False
-    gain_pct = (close_t - open_t) / open_t
+    gain_pct = _safe_body_pct(close_t, open_t, positive=True)
     return close_t > upper_neckline and volume_t > avg_volume_prev * volume_multiple and gain_pct >= mid_long_red_threshold
 
 
@@ -163,7 +179,7 @@ def bear_rebound_short_signal(
     """彈後空下跌：空頭趨勢中反彈未突破前高，帶量長黑K收盤同時跌破MA5與前一日低點。"""
     if not (is_bear_trend and rebound_fails_prior_high):
         return False
-    loss_pct = (open_t - close_t) / open_t
+    loss_pct = _safe_body_pct(close_t, open_t, positive=False)
     return close_t < ma5_t and close_t < low_prev and volume_t > volume_prev and loss_pct >= long_black_threshold
 
 
@@ -224,7 +240,7 @@ def bear_consolidation_breakdown_signal(
     """盤整的跌破：前一趨勢為空頭的盤整區，帶量長黑K收盤跌破下頸線，與多頭版鏡射對稱。"""
     if not (prev_trend_bear and is_consolidation):
         return False
-    loss_pct = (open_t - close_t) / open_t
+    loss_pct = _safe_body_pct(close_t, open_t, positive=False)
     return close_t < lower_neckline and volume_t > avg_volume_prev * volume_multiple and loss_pct >= long_black_threshold
 
 
@@ -400,7 +416,7 @@ def bull_short_term_entry_ready(
     attack_volume_multiple: float = 1.3, body_gain_threshold: float = 0.02,
 ) -> bool:
     """多頭短線選股6要件：多頭架構+MA10/MA20多排向上+站上兩線+攻擊量(前日1.3倍以上)+紅K實體漲幅>2%。"""
-    body_gain_pct = (close_t - open_t) / open_t
+    body_gain_pct = _safe_body_pct(close_t, open_t, positive=True)
     return (
         is_bull_trend
         and ma10 > ma20 and ma10_slope > 0 and ma20_slope > 0
@@ -442,7 +458,7 @@ def bear_short_term_entry_ready(
     attack_volume_multiple: float = 1.3, body_loss_threshold: float = 0.02,
 ) -> bool:
     """空頭短線選股6要件：與R-TREND-14鏡射對稱，另加收盤跌破MA5且跌破前一日低點作為進場觸發。"""
-    body_loss_pct = (open_t - close_t) / open_t
+    body_loss_pct = _safe_body_pct(close_t, open_t, positive=False)
     return (
         is_bear_trend
         and ma10 < ma20 and ma10_slope < 0 and ma20_slope < 0

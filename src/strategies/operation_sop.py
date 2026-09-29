@@ -8,7 +8,23 @@
 
 from __future__ import annotations
 
+import math
+
 from src.rule_registry import implements_rule
+
+
+def _safe_body_pct(close_t: float, open_t: float, *, positive: bool) -> float:
+    """開盤價為0/NaN/inf時，視為無效漲跌幅，不做除法。"""
+    try:
+        open_value = float(open_t)
+        close_value = float(close_t)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not math.isfinite(open_value) or not math.isfinite(close_value) or open_value == 0:
+        return 0.0
+
+    return (close_value - open_value) / open_value if positive else (open_value - close_value) / open_value
 
 
 @implements_rule("R-STRATEGY-01")
@@ -18,7 +34,7 @@ def short_swing_entry_ready(
     body_gain_threshold: float = 0.02,
 ) -> bool:
     """短線波段20條守則第1條：多頭架構+突破MA5與前高+紅K實體漲幅≥2%+MA20/KD_K向上+量增或量平。"""
-    body_gain_pct = (close_t - open_t) / open_t
+    body_gain_pct = _safe_body_pct(close_t, open_t, positive=True)
     volume_ok = volume_t >= volume_avg or volume_t > volume_prev
     return (
         is_bull_trend

@@ -48,3 +48,19 @@ def test_mid_long_candle_helpers_require_at_least_3_5_pct():
 
     black_flags = is_mid_long_black_candle(open_, close)
     assert black_flags.tolist() == [False, False, True, False]
+
+
+def test_zero_open_candle_pct_is_treated_as_invalid_not_divide_by_zero():
+    open_ = pd.Series([100.0, 0.0, 10.0, 0.0])
+    close = pd.Series([105.0, 0.0, 8.0, 10.0])
+
+    red_pct = red_candle_body_pct(open_, close)
+    black_pct = black_candle_body_pct(open_, close)
+
+    assert red_pct.iloc[0] == pytest.approx(0.05)
+    assert pd.isna(red_pct.iloc[1])
+    assert black_pct.iloc[2] == pytest.approx(0.2)
+    assert pd.isna(red_pct.iloc[3])
+    assert pd.isna(black_pct.iloc[0])
+    assert pd.isna(black_pct.iloc[1])
+    assert pd.isna(black_pct.iloc[3])

@@ -231,6 +231,10 @@ def test_bull_short_term_entry_ready_and_stop_loss_and_exit():
         is_bull_trend=True, ma10=21, ma20=20, ma10_slope=0.1, ma20_slope=0.1,
         close_t=21.6, open_t=21.5, volume_t=1300, volume_prev=1000,
     ) is False  # 漲幅不足2%
+    assert bull_short_term_entry_ready(
+        is_bull_trend=True, ma10=21, ma20=20, ma10_slope=0.1, ma20_slope=0.1,
+        close_t=22, open_t=0, volume_t=1300, volume_prev=1000,
+    ) is False  # 開盤價為0時不能計算實體漲幅
 
     assert bull_short_term_stop_loss(entry_bar_low=100, stop_pct=0.05) == 95
     assert bull_short_term_stop_loss(entry_bar_low=100, stop_pct=0.10) == 93  # 夾回7%上限
@@ -249,6 +253,11 @@ def test_bear_short_term_entry_ready_and_stop_loss_and_exit_mirrors_bull():
         close_t=18, open_t=18.5, volume_t=1300, volume_prev=1000,
         ma5_t=18.5, low_prev=18.2,
     ) is True  # 跌幅=(18.5-18)/18.5≈2.7%>2%，且跌破MA5與前一日低點
+    assert bear_short_term_entry_ready(
+        is_bear_trend=True, ma10=19, ma20=20, ma10_slope=-0.1, ma20_slope=-0.1,
+        close_t=18, open_t=0, volume_t=1300, volume_prev=1000,
+        ma5_t=18.5, low_prev=18.2,
+    ) is False  # 開盤價為0時不能計算實體跌幅
 
     assert bear_short_term_stop_loss(entry_bar_high=100, stop_pct=0.05) == 105
     assert bear_short_term_stop_loss(entry_bar_high=100, stop_pct=0.10) == 107  # 夾回7%上限

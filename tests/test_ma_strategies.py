@@ -96,6 +96,11 @@ def test_ma_tangle_breakout_stop_loss_long_small_vs_big_candle():
     assert ma_tangle_breakout_stop_loss_long(entry_open=100, entry_close=106, entry_low=98) == 98
 
 
+def test_ma_tangle_stop_loss_handles_zero_open_without_dividing():
+    assert ma_tangle_breakout_stop_loss_long(entry_open=0, entry_close=0, entry_low=98) == 98
+    assert ma_tangle_breakdown_stop_loss_short(entry_open=0, entry_close=0, entry_high=102) == 102
+
+
 def test_ma_tangle_breakout_hold_exit_and_reentry():
     close = pd.Series([100.0, 95.0, 105.0])
     low = pd.Series([98.0, 90.0, 100.0])

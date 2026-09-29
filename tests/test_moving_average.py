@@ -191,6 +191,15 @@ def test_ma_strategy_stop_loss_short_mirrors_long():
     assert small_loss_stop == 99  # 跌幅2% < 5%，用轉折高點
 
 
+def test_ma_strategy_stop_loss_handles_zero_open_without_dividing():
+    assert ma_strategy_stop_loss_long(
+        entry_open=0, entry_close=0, entry_low=98, swing_low_after_entry=101
+    ) == 101
+    assert ma_strategy_stop_loss_short(
+        entry_open=0, entry_close=0, entry_high=102, swing_high_after_entry=99
+    ) == 99
+
+
 def test_is_ma_converged_and_line_count():
     close = pd.Series([100.0, 100.0])
     ma_frame = pd.DataFrame({"MA5": [99.0, 99.0], "MA10": [100.0, 100.0], "MA20": [101.0, 150.0]})

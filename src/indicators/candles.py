@@ -24,8 +24,11 @@ MID_BODY_PCT = 0.035    # 中紅/中黑K門檻：漲跌幅介於 3.5%~6.5%
 def red_candle_body_pct(open_: pd.Series, close: pd.Series) -> pd.Series:
     """紅K的實體漲幅%（(收盤-開盤)/開盤），黑K或平盤時為 NaN。"""
     is_red = close > open_
-    pct = (close - open_) / open_
-    return pct.where(is_red)
+    safe_open = pd.to_numeric(open_, errors="coerce")
+    pct = pd.Series(np.nan, index=open_.index, dtype="float64")
+    valid = is_red & safe_open.notna() & (safe_open != 0) & np.isfinite(safe_open.to_numpy())
+    pct.loc[valid] = (close.loc[valid] - safe_open.loc[valid]) / safe_open.loc[valid]
+    return pct
 
 
 @implements_rule("R-CANDLE-21")
@@ -42,8 +45,11 @@ def classify_red_candle_size(open_: pd.Series, close: pd.Series) -> pd.Series:
 def black_candle_body_pct(open_: pd.Series, close: pd.Series) -> pd.Series:
     """黑K的實體跌幅%（(開盤-收盤)/開盤），紅K或平盤時為 NaN。"""
     is_black = close < open_
-    pct = (open_ - close) / open_
-    return pct.where(is_black)
+    safe_open = pd.to_numeric(open_, errors="coerce")
+    pct = pd.Series(np.nan, index=open_.index, dtype="float64")
+    valid = is_black & safe_open.notna() & (safe_open != 0) & np.isfinite(safe_open.to_numpy())
+    pct.loc[valid] = (safe_open.loc[valid] - close.loc[valid]) / safe_open.loc[valid]
+    return pct
 
 
 @implements_rule("R-CANDLE-22")
@@ -145,7 +151,11 @@ TW_DAILY_LIMIT_PCT = 0.10  # 台股現行漲跌幅限制：金管會自2015-06-0
 @implements_rule("R-CANDLE-05")
 def is_doji(open_: pd.Series, close: pd.Series, threshold: float = DOJI_BODY_PCT) -> pd.Series:
     """十字線：開盤收盤價趨近相同(實體漲跌幅<threshold)。"""
-    return ((close - open_).abs() / open_ < threshold).fillna(False)
+    safe_open = pd.to_numeric(open_, errors="coerce")
+    valid = safe_open.notna() & (safe_open != 0) & np.isfinite(safe_open.to_numpy())
+    result = pd.Series(False, index=open_.index, dtype=bool)
+    result.loc[valid] = ((close.loc[valid] - safe_open.loc[valid]).abs() / safe_open.loc[valid] < threshold)
+    return result
 
 
 @implements_rule("R-CANDLE-05")

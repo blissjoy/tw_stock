@@ -9,10 +9,24 @@ Layer3 策略層決定如何使用這裡輸出的布林/分類 Series，不在�
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from src.indicators.candles import is_black_candle, is_red_candle
 from src.rule_registry import implements_rule
+
+
+def _safe_pct_change(num: pd.Series, den: pd.Series) -> pd.Series:
+    """分母為0/NaN/inf時返回NaN，避免 K 線型態判斷因零開盤價觸發 RuntimeWarning。"""
+    safe_den = pd.to_numeric(den, errors="coerce")
+    safe_num = pd.to_numeric(num, errors="coerce")
+    valid = safe_den.notna() & (safe_den != 0) & safe_num.notna() & pd.Series(
+        [math.isfinite(float(x)) for x in safe_den.to_list()], index=den.index
+    ) & pd.Series([math.isfinite(float(x)) for x in safe_num.to_list()], index=num.index)
+    result = pd.Series(float("nan"), index=num.index, dtype="float64")
+    result.loc[valid] = (safe_num.loc[valid] / safe_den.loc[valid])
+    return result
 
 
 def _three_line_break_high(close: pd.Series, low: pd.Series, n: int = 3) -> pd.Series:
@@ -30,8 +44,8 @@ def _three_line_break_low(close: pd.Series, high: pd.Series, n: int = 3) -> pd.S
 @implements_rule("R-CANDLE-06")
 def basic_reversal_at_high(open_: pd.Series, close: pd.Series, is_at_high: pd.Series, pct_threshold: float = 0.03) -> pd.Series:
     """高檔紅K黑K基本反轉型態：前一日中長紅(>=3%)＋當日中長黑(>=3%)，出現在高檔，6型態中力道最弱。"""
-    day1_up_pct = (close.shift(1) - open_.shift(1)) / open_.shift(1)
-    day2_down_pct = (open_ - close) / open_
+    day1_up_pct = _safe_pct_change(close.shift(1) - open_.shift(1), open_.shift(1))
+    day2_down_pct = _safe_pct_change(open_ - close, open_)
     pattern = (
         is_red_candle(open_.shift(1), close.shift(1)) & (day1_up_pct >= pct_threshold)
         & is_black_candle(open_, close) & (day2_down_pct >= pct_threshold)
@@ -42,8 +56,8 @@ def basic_reversal_at_high(open_: pd.Series, close: pd.Series, is_at_high: pd.Se
 @implements_rule("R-CANDLE-14")
 def basic_reversal_at_low(open_: pd.Series, close: pd.Series, is_at_low: pd.Series, pct_threshold: float = 0.03) -> pd.Series:
     """低檔黑K紅K基本反轉型態：前一日中長黑(>=3%)＋當日中長紅(>=3%)，出現在低檔，與R-CANDLE-06鏡射。"""
-    day1_down_pct = (open_.shift(1) - close.shift(1)) / open_.shift(1)
-    day2_up_pct = (close - open_) / open_
+    day1_down_pct = _safe_pct_change(open_.shift(1) - close.shift(1), open_.shift(1))
+    day2_up_pct = _safe_pct_change(close - open_, open_)
     pattern = (
         is_black_candle(open_.shift(1), close.shift(1)) & (day1_down_pct >= pct_threshold)
         & is_red_candle(open_, close) & (day2_up_pct >= pct_threshold)

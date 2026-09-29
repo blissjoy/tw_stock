@@ -153,6 +153,8 @@ def ma_strategy_stop_loss_long(
     swing_low_after_entry：進場後最新出現的「上漲轉折最低點」，由呼叫端用轉折點偵測
     （見 src.indicators.pivots）提供；漲幅<5%時若尚未走出轉折點，退回進場當根低點。
     """
+    if entry_open is None or (pd.isna(entry_open)) or not pd.api.types.is_number(entry_open) or entry_open == 0:
+        return swing_low_after_entry if swing_low_after_entry is not None else entry_low
     gain_pct = (entry_close - entry_open) / entry_open * 100
     if gain_pct >= threshold_pct:
         return entry_low
@@ -226,6 +228,8 @@ def ma_strategy_stop_loss_short(
     threshold_pct: float = 5.0,
 ) -> float:
     """均線戰法做空停損（5%分界法），與做多方向完全鏡射。"""
+    if entry_open is None or (pd.isna(entry_open)) or not pd.api.types.is_number(entry_open) or entry_open == 0:
+        return swing_high_after_entry if swing_high_after_entry is not None else entry_high
     loss_pct = (entry_open - entry_close) / entry_open * 100
     if loss_pct >= threshold_pct:
         return entry_high

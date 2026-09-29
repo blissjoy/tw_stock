@@ -237,6 +237,8 @@ def ma_tangle_breakout_long_entry(close: pd.Series, volume: pd.Series, was_conve
 @implements_rule("R-MA-17")
 def ma_tangle_breakout_stop_loss_long(entry_open: float, entry_close: float, entry_low: float) -> float:
     """停損：進場K線最低點；若進場為小紅K(漲幅<3.5%，沿用R-CANDLE-21門檻)，改用收盤下跌5%為停損。"""
+    if entry_open is None or pd.isna(entry_open) or entry_open == 0:
+        return entry_low
     gain_pct = (entry_close - entry_open) / entry_open
     if gain_pct < MID_BODY_PCT:
         return entry_close * 0.95
@@ -266,6 +268,8 @@ def ma_tangle_breakdown_short_entry(close: pd.Series, volume: pd.Series, was_con
 @implements_rule("R-MA-18")
 def ma_tangle_breakdown_stop_loss_short(entry_open: float, entry_close: float, entry_high: float) -> float:
     """停損：進場K線最高點；若進場為小黑K(跌幅<3.5%)，改用收盤反彈5%為停損。"""
+    if entry_open is None or pd.isna(entry_open) or entry_open == 0:
+        return entry_high
     loss_pct = (entry_open - entry_close) / entry_open
     if loss_pct < MID_BODY_PCT:
         return entry_close * 1.05
