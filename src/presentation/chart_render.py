@@ -332,11 +332,19 @@ def render_chart_html(
     var macdAnnotationIdx = findAnnotationIndex('macd-hover-value');
     var kdAnnotationIdx = findAnnotationIndex('kd-hover-value');
 
+    // 2026-08-14修正：使用者反映左上角DIF/MACD/OSC、K/D數值文字顏色沒有跟圖上線條顏色
+    // 對應——這裡的色碼要跟chart_data.py build_candlestick_figure()裡DIF/MACD/K/D
+    // trace的line.color、OSC的正紅負綠判斷保持一致(hover時動態更新的文字內容，跟
+    // 靜態初始文字是同一份視覺語意，兩處色碼手動同步)。
     function fmtMacd(d) {{
-        return 'DIF ' + d[1].toFixed(2) + '\\u3000MACD ' + d[2].toFixed(2) + '\\u3000OSC ' + d[3].toFixed(2);
+        var oscColor = d[3] >= 0 ? '#c0392b' : '#27ae60';
+        return '<span style="color:#e74c3c">DIF ' + d[1].toFixed(2) + '</span>\\u3000'
+            + '<span style="color:#2980b9">MACD ' + d[2].toFixed(2) + '</span>\\u3000'
+            + '<span style="color:' + oscColor + '">OSC ' + d[3].toFixed(2) + '</span>';
     }}
     function fmtKd(d) {{
-        return 'K ' + d[1].toFixed(1) + '\\u3000D ' + d[2].toFixed(1);
+        return '<span style="color:#8e44ad">K ' + d[1].toFixed(1) + '</span>\\u3000'
+            + '<span style="color:#f39c12">D ' + d[2].toFixed(1) + '</span>';
     }}
 
     // 預設(未hover時)顯示最後一天的數值

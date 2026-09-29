@@ -24,6 +24,17 @@ from src.patterns import chart_overlays
 
 _CONFIDENCE_PATTERN = re.compile(r"（(\d+)%）")
 
+_STOCK_UNIVERSE_COLUMNS = [
+    "stock_id", "name", "industry", "listing_type", "signal_name", "close", "entry_price", "stop_loss",
+    "pct_change", "volume", "sar_value", "sar_status", "sar_distance_pct",
+]
+
+
+def _empty_stock_universe() -> pd.DataFrame:
+    df = pd.DataFrame(columns=_STOCK_UNIVERSE_COLUMNS)
+    df["volume"] = pd.Series(dtype="float64")
+    return df
+
 MA_COLORS = {
     5: "#2e86de", 10: "#e67e22", 20: "#8e44ad",
     60: "#16a085", 120: "#7f8c8d", 240: "#b8860b",
@@ -686,8 +697,14 @@ def apply_candidate_filters(
 
 
 def list_candidate_dates(conn) -> list[str]:
-    """回傳daily_candidates裡所有有紀錄的日期，由新到舊排序，供候選清單的日期選單使用。"""
-    cur = conn.execute("SELECT DISTINCT date FROM daily_candidates ORDER BY date DESC")
+    """回傳同時有候選紀錄與股價資料的日期，由新到舊排序，供候選清單日期選單使用。"""
+    cur = conn.execute(
+        """
+        SELECT DISTINCT dc.date FROM daily_candidates dc
+        WHERE EXISTS (SELECT 1 FROM stock_prices sp WHERE sp.date = dc.date)
+        ORDER BY dc.date DESC
+        """
+    )
     return [row[0] for row in cur.fetchall()]
 
 
@@ -793,7 +810,7 @@ def load_stock_universe_for_date(
     if target_date is None:
         target_date = conn.execute("SELECT MAX(date) FROM daily_candidates").fetchone()[0]
         if target_date is None:
-            return pd.DataFrame(), None, False
+            return _empty_stock_universe(), None, False
 
     status_row = conn.execute("SELECT is_intraday FROM daily_data_status WHERE date = ?", (target_date,)).fetchone()
     is_intraday = bool(status_row[0]) if status_row is not None else False
@@ -830,7 +847,7 @@ def load_stock_universe_for_date(
     columns = [d[0] for d in cur.description]
     raw_df = pd.DataFrame(cur.fetchall(), columns=columns)
     if raw_df.empty:
-        return raw_df, target_date, is_intraday
+        return _empty_stock_universe(), target_date, is_intraday
 
     raw_df["pct_change"] = (raw_df["today_close"] - raw_df["prev_close"]) / raw_df["prev_close"] * 100
 
@@ -869,10 +886,7 @@ def load_stock_universe_for_date(
         })
     universe_df = pd.DataFrame(
         rows,
-        columns=[
-            "stock_id", "name", "industry", "listing_type", "signal_name", "close", "entry_price", "stop_loss",
-            "pct_change", "volume", "sar_value", "sar_status", "sar_distance_pct", "_confidence_sum",
-        ],
+        columns=[*_STOCK_UNIVERSE_COLUMNS, "_confidence_sum"],
     )
     # 預設排序：信心分數加總→SAR距離%→成交量，皆由高到低；同分時再退回股票代號排序，
     # 確保結果穩定、可重現。2026-08-03改版：使用者要求排序依據除了信心分數加總，還要
@@ -1340,13 +1354,22 @@ def build_candlestick_figure(
         # OSC正值紅柱(多方動能)/負值綠柱(空方動能)是書中原文定義的顏色，跟K棒是兩套獨立
         # 配色慣例(見src/indicators/macd.py docstring)——2026-08-02K棒陰線改成同一種
         # 綠色(#27ae60)後兩者剛好用同一組色碼，純屬巧合，語意上仍是各自獨立判斷。
+        dif_color, macd_line_color = "#e74c3c", "#2980b9"
         osc_colors = ["#c0392b" if v >= 0 else "#27ae60" for v in df["OSC"].fillna(0)]
         fig.add_trace(go.Bar(x=df.index, y=df["OSC"], marker_color=osc_colors, name="OSC", showlegend=False), row=macd_row, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["DIF"], mode="lines", name="DIF", line=dict(color="#e74c3c", width=1.2)), row=macd_row, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], mode="lines", name="MACD訊號線", line=dict(color="#2980b9", width=1.2)), row=macd_row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["DIF"], mode="lines", name="DIF", line=dict(color=dif_color, width=1.2)), row=macd_row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], mode="lines", name="MACD訊號線", line=dict(color=macd_line_color, width=1.2)), row=macd_row, col=1)
 
         macd_suffix = _axis_ref_suffix(macd_row)
         last = df.iloc[-1]
+        # 2026-08-14修正：使用者反映左上角DIF/MACD/OSC數值文字統一用同一種灰色，跟
+        # 圖上實際的線條顏色對不起來，要用同一組色碼——DIF/MACD訊號線固定紅/藍(跟
+        # 上面trace定義同一組變數，不會兩處各自寫一份走鐘)，OSC沿用正紅負綠的既有
+        # 判斷(osc_colors同一套邏輯，只取「今天」這一天)。Plotly的annotation text
+        # 支援<span style="color:...">這種偽HTML語法(跟fmtMa()等既有hover文字用法
+        # 一致)，可以在同一則annotation裡分段上色，不需要拆成三個獨立annotation。
+        last_osc = last["OSC"] if pd.notna(last["OSC"]) else 0
+        osc_color = "#c0392b" if last_osc >= 0 else "#27ae60"
         annotations.append(dict(
             xref=f"x{macd_suffix} domain", x=1, yref=f"y{macd_suffix} domain", y=1,
             xanchor="right", yanchor="top", showarrow=False, font=dict(size=11, color="#666666"),
@@ -1354,14 +1377,19 @@ def build_candlestick_figure(
         ))
         annotations.append(dict(
             xref=f"x{macd_suffix} domain", x=0, yref=f"y{macd_suffix} domain", y=1,
-            xanchor="left", yanchor="top", showarrow=False, font=dict(size=11, color="#333333"),
-            text=f"DIF {last['DIF']:.2f}　MACD {last['MACD']:.2f}　OSC {last['OSC']:.2f}",
+            xanchor="left", yanchor="top", showarrow=False, font=dict(size=11),
+            text=(
+                f"<span style='color:{dif_color}'>DIF {last['DIF']:.2f}</span>　"
+                f"<span style='color:{macd_line_color}'>MACD {last['MACD']:.2f}</span>　"
+                f"<span style='color:{osc_color}'>OSC {last['OSC']:.2f}</span>"
+            ),
             name="macd-hover-value",
         ))
 
     if kd_row is not None and {"K", "D"}.issubset(df.columns):
-        fig.add_trace(go.Scatter(x=df.index, y=df["K"], mode="lines", name="K", line=dict(color="#8e44ad", width=1.3)), row=kd_row, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["D"], mode="lines", name="D", line=dict(color="#f39c12", width=1.3)), row=kd_row, col=1)
+        k_color, d_color = "#8e44ad", "#f39c12"
+        fig.add_trace(go.Scatter(x=df.index, y=df["K"], mode="lines", name="K", line=dict(color=k_color, width=1.3)), row=kd_row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["D"], mode="lines", name="D", line=dict(color=d_color, width=1.3)), row=kd_row, col=1)
         fig.add_hline(y=80, line=dict(color="#999999", width=1, dash="dot"), row=kd_row, col=1)
         fig.add_hline(y=20, line=dict(color="#999999", width=1, dash="dot"), row=kd_row, col=1)
 
@@ -1374,8 +1402,11 @@ def build_candlestick_figure(
         ))
         annotations.append(dict(
             xref=f"x{kd_suffix} domain", x=0, yref=f"y{kd_suffix} domain", y=1,
-            xanchor="left", yanchor="top", showarrow=False, font=dict(size=11, color="#333333"),
-            text=f"K {last['K']:.1f}　D {last['D']:.1f}",
+            xanchor="left", yanchor="top", showarrow=False, font=dict(size=11),
+            text=(
+                f"<span style='color:{k_color}'>K {last['K']:.1f}</span>　"
+                f"<span style='color:{d_color}'>D {last['D']:.1f}</span>"
+            ),
             name="kd-hover-value",
         ))
 
@@ -1413,7 +1444,10 @@ def build_candlestick_figure(
     if macd_row is not None:
         fig.update_yaxes(title_text="MACD", row=macd_row, col=1)
     if kd_row is not None:
-        fig.update_yaxes(title_text="KD", range=[0, 100], row=kd_row, col=1)
+        # 2026-08-14修正：使用者反映K/D值貼近0或100時線條直接貼在子圖最上/最下緣，
+        # 不好辨識——range改成留一點邊界空間(不是[0,100])，80/20參考線的視覺位置
+        # (fig.add_hline)不受影響，只是子圖上下多留白，不代表KD實際數值範圍變了。
+        fig.update_yaxes(title_text="KD", range=[-5, 105], row=kd_row, col=1)
 
     rangebreaks = [dict(bounds=["sat", "mon"])]
     if holidays:

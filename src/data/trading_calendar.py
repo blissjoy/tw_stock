@@ -1,6 +1,5 @@
-"""台股交易日曆：只用來取得TWSE公告的休市日清單，供圖表畫K線圖時的x軸rangebreaks使用
-（讓週末/國定假日不要在圖上留白），不是給資料抓取判斷交易日用——那部分已經用「直接嘗試
-抓取，TWSE回應空就跳過」的更簡單方式處理（見 scripts/backfill_history.py 的說明）。
+"""台股交易日曆：取得TWSE公告的休市日清單，供圖表畫K線圖時的x軸rangebreaks使用
+（讓週末/國定假日不要在圖上留白），也供每日pipeline在抓取資料前辨識官方公告休市日。
 
 fetch/parse 刻意分離，比照 src/data/twse_client.py 的既有慣例：parse_holiday_csv() 是
 純函式（輸入已解碼成字串的CSV內容，輸出YYYY-MM-DD清單），可以用手造樣本測試，不需要打網路。

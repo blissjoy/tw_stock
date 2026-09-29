@@ -84,6 +84,9 @@ def test_load_stock_universe_for_date_returns_empty_when_no_records():
     conn = _fresh_conn()
     df, latest_date, is_intraday = load_stock_universe_for_date(conn)
     assert df.empty
+    assert "volume" in df.columns
+    assert "signal_name" in df.columns
+    assert (df["volume"] >= 10_000).empty
     assert latest_date is None
     assert is_intraday is False
 
@@ -301,6 +304,8 @@ def test_load_stock_universe_for_date_returns_empty_but_echoes_date_when_no_pric
     df, returned_date, _ = load_stock_universe_for_date(conn, target_date="2026-07-23")
 
     assert df.empty
+    assert "volume" in df.columns
+    assert "signal_name" in df.columns
     assert returned_date == "2026-07-23"  # 使用者選的日期本身仍要回傳，不是None
 
 
@@ -666,6 +671,11 @@ def test_format_stock_label_falls_back_to_stock_id_when_name_missing():
 def test_list_candidate_dates_returns_dates_descending():
     conn = _fresh_conn()
     upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": day, "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None}
+        for day in ("2026-07-21", "2026-07-22", "2026-07-23")
+    ])
     upsert_daily_candidates(conn, [
         {"date": "2026-07-21", "stock_id": "2330", "signal_name": "A", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-21T18:00:00"},
         {"date": "2026-07-23", "stock_id": "2330", "signal_name": "B", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-23T18:00:00"},
@@ -673,6 +683,21 @@ def test_list_candidate_dates_returns_dates_descending():
     ])
 
     assert list_candidate_dates(conn) == ["2026-07-23", "2026-07-22", "2026-07-21"]
+
+
+def test_list_candidate_dates_ignores_dates_without_stock_prices():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": None, "updated_at": "2026-07-22"}])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-07-22", "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0,
+         "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_candidates(conn, [
+        {"date": "2026-07-21", "stock_id": "2330", "signal_name": "舊訊號", "entry_price": 100.0, "stop_loss": 95.0, "note": None, "created_at": "2026-07-21T18:00:00"},
+        {"date": "2026-07-22", "stock_id": "2330", "signal_name": "有效訊號", "entry_price": 104.0, "stop_loss": 99.0, "note": None, "created_at": "2026-07-22T18:00:00"},
+    ])
+
+    assert list_candidate_dates(conn) == ["2026-07-22"]
 
 
 def test_load_price_history_returns_ascending_order_and_respects_limit():

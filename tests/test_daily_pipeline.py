@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 
 import pandas as pd
@@ -64,6 +65,7 @@ def _no_real_taiex_network_calls(monkeypatch, tmp_path):
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda *args, **kwargs: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_volume", lambda *args, **kwargs: {})
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *args, **kwargs: {})
+    monkeypatch.setattr(daily_pipeline.trading_calendar, "get_holidays", lambda year: [])
     monkeypatch.setattr(daily_pipeline.data_fetch_log, "LOG_PATH", tmp_path / "data_fetch_log.jsonl")
 
 
@@ -74,6 +76,42 @@ def test_run_daily_pipeline_skips_when_twse_has_no_data(monkeypatch):
 
     candidates = daily_pipeline.run_daily_pipeline(conn, date_str="20260101", dry_run=True, skip_tpex=True)
     assert candidates == []
+
+
+def test_run_daily_pipeline_skips_official_holidays_and_logs_them(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(daily_pipeline.data_fetch_log, "LOG_PATH", tmp_path / "fetch_log.jsonl")
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.trading_calendar, "get_holidays", lambda year: ["2026-09-25"])
+
+    def _unexpected_fetch(*args, **kwargs):
+        pytest.fail("休市日不應呼叫股價資料來源")
+
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", _unexpected_fetch)
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", _unexpected_fetch)
+    conn = _fresh_conn()
+
+    assert daily_pipeline.run_daily_pipeline(conn, date_str="20260925", dry_run=True, skip_tpex=True) == []
+    assert daily_pipeline.pipeline_status.read_status()["note"] == "非交易日"
+    log_entry = json.loads((tmp_path / "fetch_log.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert log_entry["status"] == "skipped"
+    assert log_entry["date_range"] == "2026-09-25"
+
+
+def test_fetch_today_twse_uses_price_sources_when_holiday_calendar_fails(monkeypatch):
+    def _raise(year):
+        raise RuntimeError("模擬休市日曆暫時無法連線")
+
+    monkeypatch.setattr(daily_pipeline.trading_calendar, "get_holidays", _raise)
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+
+    result = daily_pipeline.fetch_today_twse(
+        _fresh_conn(), "20260722", {"2330": {"name": "台積電", "industry": "半導體", "market": "TWSE"}},
+    )
+
+    assert result == (True, False)
 
 
 def test_run_daily_pipeline_writes_candidates_and_skips_notify_on_dry_run(monkeypatch):

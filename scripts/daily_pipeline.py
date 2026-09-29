@@ -40,7 +40,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.data import finmind_client, holder_shares_sync, storage, tpex_client, twse_client, yfinance_client  # noqa: E402
+from src.data import finmind_client, holder_shares_sync, storage, tpex_client, trading_calendar, twse_client, yfinance_client  # noqa: E402
 from src.data.connection import get_default_portfolio_connection  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
@@ -55,8 +55,8 @@ def fetch_today_twse(
     failed_stock_ids: list[dict] | None = None,
 ) -> tuple[bool, bool]:
     """抓TWSE當天股價並寫入conn。回傳(is_trading_day, is_intraday)：
-    - is_trading_day：是否抓到任何股價資料(不論是否已收盤)，False代表非交易日或兩個
-      來源都失敗。
+        - is_trading_day：是否為交易日且抓到任何股價資料(不論是否已收盤)；TWSE年度休市
+            日曆明列的日期會在呼叫資料來源前直接回傳False，其他日期則依官方與yfinance結果判斷。
     - is_intraday：True代表這批股價來自yfinance的盤中即時價備援，還不是官方最終收盤價。
 
     優先嘗試TWSE官方「每日收盤行情」(MI_INDEX)端點——這是收盤後才會公布的最終定案數字，
@@ -79,6 +79,16 @@ def fetch_today_twse(
     主控台，使用者反映排程沒人盯著主控台看，日誌分頁應該也要看得到「哪些股票下載
     失敗」，不是只看到成功寫入的筆數。
     """
+    iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    try:
+        holidays = trading_calendar.get_holidays(int(date_str[:4]))
+    except Exception as exc:  # noqa: BLE001 - 假日日曆暫時不可用時仍保留原有資料源判斷
+        print(f"[TWSE休市日曆] 查詢{date_str[:4]}年休市日期失敗，改用資料來源判斷：{exc}")
+    else:
+        if iso_date in holidays:
+            print(f"[TWSE休市日曆] {iso_date}為官方公告休市日，跳過TWSE股價抓取。")
+            return False, False
+
     prices = twse_client.fetch_stock_prices(date_str)
     is_intraday = False
 
@@ -507,7 +517,7 @@ def run_daily_pipeline(
             failed_stock_ids=twse_failed_stock_ids,
         )
         if not is_trading_day:
-            print(f"{iso_date} TWSE官方收盤資料與yfinance盤中備援都查無資料，判定為非交易日，跳過選股與通知。")
+            print(f"{iso_date}判定為非交易日，跳過選股與通知。")
             pipeline_status.write_status("done", date=iso_date, candidate_count=0, note="非交易日")
             data_fetch_log.record_fetch_run(
                 conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="skipped",
