@@ -20,10 +20,23 @@ from pathlib import Path
 
 import markdown
 import pandas as pd
-from PySide6.QtCore import QDate, QEvent, QRect, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QDate, QEvent, QPointF, QRect, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QPolygonF,
+    QShortcut,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -51,6 +64,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStyle,
     QStyleOptionButton,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -68,12 +82,12 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from src.data import finmind_client, portfolio_storage, storage
 from src.data.connection import get_default_connection, get_default_portfolio_connection
 from src.data.yfinance_client import TAIEX_STOCK_ID
-from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL
+from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL, classify_five_day_flow
 from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
 from src.indicators.moving_average import FULL_PERIODS
 from src.patterns import chart_overlays, latest_day_summary
 from src import rule_docs
-from src.presentation import chart_data, data_fetch_log, huang_chip_data, pipeline_status, portfolio_data, q3_analysis, stock_detail_data
+from src.presentation import chart_data, data_fetch_log, huang_chip_data, industry_groups, pipeline_status, portfolio_data, q3_analysis, stock_detail_data
 from src.presentation.chart_render import render_chart_html
 from src.screener import q3_patterns
 from src.screener.daily_screener import (
@@ -159,18 +173,36 @@ _WATCHLIST_CHIP_GROUP_LABELS: list[tuple[str, str, list[int]]] = [
 
 # 庫存清單改用QTreeWidget(彙總父列+可展開的批次明細子列，見_populate_inventory_
 # tree())的欄位結構——父列/子列共用同一組欄，欄位語意見_build_inventory_tab()。
+# 2026-08-17改版：使用者要求拿掉「批次數」「備註」這兩欄(展開/收合改用工具列的
+# 「全部展開」/「全部收合」按鈕+原生展開箭頭，不再需要靠「批次數」欄位當點擊熱區；
+# 備註本身還是存在DB、編輯對話框也還能填，只是不再佔用表格版面)，換成黃豐凱籌碼
+# 分析法的「5日外資」「5日投信」(近5日累計買賣超張數，見src/presentation/
+# huang_chip_data.py)。2026-08-18再改版：使用者反映看數字要自己判斷正負號還要
+# 想一下，要求改成「外資近5日力道」「投信近5日力道」，直接顯示「持續買進」/
+# 「持續賣出」文字(見src.indicators.huang_chip_signals.classify_five_day_flow())，
+# 不再顯示原始張數。
 _INVENTORY_TREE_HEADERS = [
     "股票代號", "名稱", "買入日期", "現價", "漲跌幅(%)", "成本價", "持股數",
-    "手續費", "市值", "預估賣出成本", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%", "批次數", "備註",
+    "手續費", "市值", "賣出成本", "帳面損益", "報酬率(%)", "SAR狀態", "SAR距離%",
+    "外資近5日力道", "投信近5日力道",
 ]
 _INVENTORY_TREE_NUMERIC_COLUMNS = {
     _INVENTORY_TREE_HEADERS.index(h)
     for h in [
-        "現價", "漲跌幅(%)", "成本價", "持股數", "手續費", "市值", "預估賣出成本",
-        "帳面損益", "報酬率(%)", "SAR距離%", "批次數",
+        "現價", "漲跌幅(%)", "成本價", "持股數", "手續費", "市值", "賣出成本",
+        "帳面損益", "報酬率(%)", "SAR距離%",
     ]
 }
-_INVENTORY_TREE_LOT_COUNT_COLUMN = _INVENTORY_TREE_HEADERS.index("批次數")
+# 帳面損益/報酬率(%)這兩欄依正負號上色(台股慣例紅漲綠跌，跟COLOR_BUY/COLOR_SELL
+# 同一套配色)：2026-08-14先加上報酬率<0(虧損)綠色粗體，2026-08-17使用者再要求
+# 補上>=0紅字，見_style_inventory_profit_columns()。
+_INVENTORY_TREE_PROFIT_COLUMN = _INVENTORY_TREE_HEADERS.index("帳面損益")
+_INVENTORY_TREE_RETURN_PCT_COLUMN = _INVENTORY_TREE_HEADERS.index("報酬率(%)")
+# 外資/投信近5日力道文字依方向上色，見_style_inventory_flow_columns()——這兩欄
+# 顯示的是「持續買進」/「持續賣出」文字，不是數字，不放進_INVENTORY_TREE_NUMERIC_
+# COLUMNS(那組是給右對齊+數值排序用的，文字欄跟SAR狀態一樣維持左對齊+字串排序)。
+_INVENTORY_TREE_FOREIGN_5D_COLUMN = _INVENTORY_TREE_HEADERS.index("外資近5日力道")
+_INVENTORY_TREE_INVEST_5D_COLUMN = _INVENTORY_TREE_HEADERS.index("投信近5日力道")
 
 # 「產業輪動」分頁改用QTreeWidget(2026-08-06新增，母子列結構跟_INVENTORY_TREE_
 # HEADERS同一個精神，見_build_industry_rotation_tab())的欄位結構：父列(產業彙總)
@@ -430,9 +462,17 @@ class _CheckableComboBox(QComboBox):
     `ALL_LABEL`("全部")，跟其他項目互斥：勾選"全部"會自動取消其他所有項目；勾選任何
     其他項目會自動取消"全部"。使用者把最後一個具體項目取消勾選、變成完全沒有勾選時，
     自動退回勾選"全部"，避免「什麼都沒勾」被誤解成「篩出0筆」的空結果狀態。
+
+    2026-08-19新增`set_items_grouped()`：支援兩層分組(大分類+底下細項)，勾大分類
+    會連動勾選/取消底下所有細項，勾/取消任一細項也會回頭更新所屬大分類的勾選狀態
+    (是否全部細項都勾了)——供「選股」分頁的產業別篩選使用(見src/presentation/
+    industry_groups.py)，細項太多(50幾種)一個一個勾很麻煩，改成先勾大分類。跟
+    `set_items()`(純平面清單，不分組)是兩個獨立的建構方式，共用底下的勾選/顯示
+    邏輯，呼叫端依需求擇一使用。
     """
 
     ALL_LABEL = "全部"
+    _GROUP_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -440,51 +480,250 @@ class _CheckableComboBox(QComboBox):
         self.setEditable(True)
         self.lineEdit().setReadOnly(True)
         self.view().pressed.connect(self._on_item_pressed)
+        # 2026-08-19新增：cascade(大分類↔細項連動)/「全部」互斥邏輯統一交給
+        # itemChanged訊號處理(見_on_item_changed())，不管checkbox是被_on_item_
+        # pressed()手動toggle、還是使用者直接點中Qt原生checkbox圖示觸發的toggle，
+        # 兩種來源都會走到同一套cascade邏輯，不會各自維護一份、也不會因為兩種來源
+        # 都各自嘗試cascade而雙重觸發(見_on_item_changed()的說明)。
+        self.model().itemChanged.connect(self._on_item_changed)
+        # group_name -> 該大分類header列在model裡的row index；leaf_group_of[細項
+        # 文字] -> 所屬大分類名稱。純平面模式(set_items())下兩者都是空dict，
+        # _on_item_changed()判斷item是否為group header時查不到就當作一般leaf處理，
+        # 兩種模式可以共用同一套勾選邏輯。
+        self._group_rows: dict[str, int] = {}
+        self._leaf_group_of: dict[str, str] = {}
+        # cascade邏輯本身會呼叫setCheckState()去改其他列，這也會觸發itemChanged
+        # (遞迴)——這個旗標避免遞迴重新跑一次cascade(見_on_item_changed()開頭的
+        # 防呆)，也用於set_items()/set_items_grouped()建構清單時暫時關閉cascade
+        # (建構過程中每個appendRow()都會觸發itemChanged，不需要在還沒建完整份
+        # 清單時就跑cascade邏輯)。
+        self._syncing = False
+        # 2026-08-19三度修正：使用者反映「點選單以外空白處還是關不掉，只有Esc有效」
+        # ——這個限制是先前(同一天稍早)刻意退回的已知狀態(見hidePopup()的說明，當時
+        # 曾經在hidePopup()裡有條件呼叫super().hidePopup()想順便修這個，結果造成
+        # 整個視窗卡住，緊急退回)。這次改用完全不同的路徑：裝一個app-wide的event
+        # filter，監聽全域的滑鼠按下事件，偵測到點在選單(view)、combobox本身以外
+        # 的地方時，直接呼叫QComboBox.hidePopup(self)(繞過self.hidePopup()/
+        # super()這條虛擬分派路徑，直接執行QComboBox基底類別的C++實作)——這個呼叫
+        # 發生在一個全新、獨立的事件處理堆疊(event filter攔截到的新mouse press
+        # 事件)，不是像上次那樣「在Qt自己正在處理popup關閉流程的callback『裡面』
+        # 又呼叫一次」，理論上不會重蹈覆轍。已經用真實視窗反覆測試過(見下面
+        # eventFilter()的說明)。
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        """全域滑鼠按下事件監聽——只做一件事：選單開著、而且這次按下的位置不在
+        選單(view)也不在combobox本身範圍內時，視為「使用者點了選單外面」，直接
+        呼叫`QComboBox.hidePopup(self)`關閉選單(理由見__init__()裡安裝這個
+        event filter的說明)。點combobox本身要排除在外，不然點下拉箭頭本身
+        「開啟」選單的那次按下也會被這裡誤判成「點外面」，開了又立刻被關掉。
+        """
+        if event.type() == QEvent.Type.MouseButtonPress:
+            view = self.view()
+            if view.isVisible():
+                global_pos = event.globalPosition().toPoint()
+                view_rect = QRect(view.mapToGlobal(view.rect().topLeft()), view.rect().size())
+                combo_rect = QRect(self.mapToGlobal(self.rect().topLeft()), self.rect().size())
+                if not view_rect.contains(global_pos) and not combo_rect.contains(global_pos):
+                    QComboBox.hidePopup(self)
+        return super().eventFilter(watched, event)
 
     def hidePopup(self) -> None:
         # 攔截QComboBox內建「點了任一項目就收合下拉選單」的預設行為，讓使用者能連續
-        # 勾選多個項目不用重複點開；選單本身仍是獨立的popup視窗，點擊選單以外的地方
-        # 還是會透過視窗系統自己的失焦機制關閉，不受這裡覆寫影響。
+        # 勾選多個項目不用重複點開。
+        #
+        # ⚠️ 2026-08-19：曾經改成呼叫當下用QCursor.pos()判斷滑鼠是否還在view範圍內、
+        # 範圍外才呼叫super().hidePopup()關閉選單(想順便讓「點選單以外空白處」也能
+        # 關閉，不是只有Esc有效)——使用者實測發現這個版本會讓整個視窗卡住、選單裡的
+        # checkbox點了完全沒反應，懷疑是super().hidePopup()在Qt內部popup關閉流程
+        # 「進行中」時被重新呼叫(re-entrant)，跟Qt自己的popup grab/關閉時序衝突。
+        # 已經退回這個完全no-op、不呼叫super()的版本(2026-08-02起就這樣寫、穩定
+        # 可用)，「點選單以外空白處關不掉，只有Esc有效」的既有限制先恢復，之後如果
+        # 要處理要用更保守的方式(例如另外裝event filter、完全不碰hidePopup本身這條
+        # 路徑)，不要再嘗試在hidePopup()裡有條件呼叫super()。選單本身仍是獨立的
+        # popup視窗，這裡的no-op只影響「item點擊觸發的關閉」，不影響其他關閉管道
+        # (Esc)。
         pass
 
     def set_items(self, items: list[str]) -> None:
-        self.model().clear()
-        all_item = QStandardItem(self.ALL_LABEL)
-        all_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
-        all_item.setData(Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
-        self.model().appendRow(all_item)
-        for text in items:
-            item = QStandardItem(text)
-            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-            self.model().appendRow(item)
+        self._syncing = True  # 建構過程中每個appendRow()都會觸發itemChanged，先關閉cascade
+        try:
+            self.model().clear()
+            self._group_rows = {}
+            self._leaf_group_of = {}
+            all_item = QStandardItem(self.ALL_LABEL)
+            all_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            all_item.setData(Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
+            self.model().appendRow(all_item)
+            for text in items:
+                item = QStandardItem(text)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+                self.model().appendRow(item)
+        finally:
+            self._syncing = False
         self._refresh_display_text()
 
+    def set_items_grouped(self, groups: dict[str, list[str]], ungrouped: list[str] | None = None) -> None:
+        """groups：{大分類名稱: [細項...]}，依dict既有順序建構(呼叫端已排好順序)。
+        ungrouped：沒被任何大分類收錄的細項(見industry_groups.group_industries())，
+        平鋪接在所有分組後面，不會漏掉沒分類到的股票篩選機會。"""
+        self._syncing = True  # 建構過程中每個appendRow()都會觸發itemChanged，先關閉cascade
+        try:
+            self.model().clear()
+            self._group_rows = {}
+            self._leaf_group_of = {}
+            all_item = QStandardItem(self.ALL_LABEL)
+            all_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            all_item.setData(Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
+            self.model().appendRow(all_item)
+            for group_name, members in groups.items():
+                group_item = QStandardItem(group_name)
+                group_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                group_item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+                group_item.setData(True, self._GROUP_ROLE)
+                font = QFont()
+                font.setBold(True)
+                group_item.setFont(font)
+                self._group_rows[group_name] = self.model().rowCount()
+                self.model().appendRow(group_item)
+                for text in members:
+                    item = QStandardItem(f"　{text}")  # 全形空白縮排，視覺上表示隸屬於上面的大分類
+                    item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+                    item.setData(text, Qt.ItemDataRole.UserRole)  # 不含縮排的原始文字，checked_items()讀這個
+                    self._leaf_group_of[text] = group_name
+                    self.model().appendRow(item)
+            for text in ungrouped or []:
+                item = QStandardItem(text)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+                self.model().appendRow(item)
+        finally:
+            self._syncing = False
+        self._refresh_display_text()
+
+    @staticmethod
+    def _item_value(item: QStandardItem) -> str:
+        """leaf item的「實際值」——分組模式下是UserRole存的原始文字(不含縮排全形
+        空白)，平面模式/群組header沒有設這個role時就直接用顯示文字。"""
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return value if value is not None else item.text()
+
     def checked_items(self) -> list[str]:
-        """回傳目前勾選的具體項目清單(不含"全部")；勾選"全部"或什麼都沒勾時回傳空list，
-        代表「不限制」，呼叫端看到空list就不用套用這個篩選條件。"""
+        """回傳目前勾選的具體項目清單(不含"全部"、不含大分類header)；勾選"全部"
+        或什麼都沒勾時回傳空list，代表「不限制」，呼叫端看到空list就不用套用這個
+        篩選條件。"""
         items = []
         for row in range(1, self.model().rowCount()):
             item = self.model().item(row)
+            if item.data(self._GROUP_ROLE):
+                continue
             if item.checkState() == Qt.CheckState.Checked:
-                items.append(item.text())
+                items.append(self._item_value(item))
         return items
 
     def _on_item_pressed(self, index) -> None:
+        """點選單裡任一列都能切換打勾狀態，不是只能精準點中checkbox圖示本身——
+        比照Excel欄位篩選「整列可點」的習慣，這是這個class存在的原因(見class
+        docstring)。
+
+        ⚠️ 2026-08-19修正：使用者實測回報「只點checkbox本身的話，只有大分類
+        打勾、底下細項都不會勾」——根因是Qt原生的item delegate本來就會處理
+        「精準點中checkbox圖示」這個情境的打勾切換(見QStyledItemDelegate::
+        editorEvent()的checkbox toggle行為，setData()直接改model)，這裡原本
+        不分青紅皂白對「這一列的按下事件」都手動toggle一次，點在checkbox圖示
+        上時就跟Qt原生toggle兩邊搶著改同一個model data、互相干擾，導致cascade
+        邏輯(當時還寫在這個method裡)算出跟預期不符的結果。
+
+        修法：先用style()算出checkbox圖示實際的命中範圍，滑鼠這次按下的位置
+        如果就在這個範圍內，代表Qt原生toggle機制會自己處理，這裡完全不插手
+        (避免雙重觸發)；沒命中(點在文字或列的其他地方)才由這裡手動toggle。
+        不管是哪一種來源觸發的打勾狀態改變，最後都會走到_on_item_changed()
+        (itemChanged訊號)統一處理cascade，不會有兩條分岔的cascade邏輯要維護。
+        """
         item = self.model().itemFromIndex(index)
-        new_state = (
-            Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked
-            else Qt.CheckState.Checked
+        if item is None:
+            return
+        view = self.view()
+        option = QStyleOptionViewItem()
+        view.initViewItemOption(option)  # QAbstractItemView.viewOptions()已在Qt6棄用，改用這個
+        # 只有initViewItemOption()還不夠算出checkbox範圍——那只填視圖層級的通用
+        # 選項(字型/調色盤/裝飾位置等)，「這一格是不是checkbox、目前打勾狀態」
+        # 這種逐item的資訊要靠delegate的initStyleOption()才會補上(option.features
+        # 加上HasCheckIndicator、option.checkState設成目前狀態)，subElementRect()
+        # 才算得出正確的checkbox範圍，不然會拿到一個(0,0,0,0)的無效矩形。
+        delegate = view.itemDelegateForIndex(index)
+        if delegate is not None:
+            delegate.initStyleOption(option, index)
+        option.rect = view.visualRect(index)
+        checkbox_rect = view.style().subElementRect(
+            QStyle.SubElement.SE_ItemViewItemCheckIndicator, option, view,
         )
-        item.setCheckState(new_state)
-        if item.text() == self.ALL_LABEL:
-            if new_state == Qt.CheckState.Checked:
+        local_pos = view.viewport().mapFromGlobal(QCursor.pos())
+        if checkbox_rect.isValid() and checkbox_rect.contains(local_pos):
+            return
+        item.setCheckState(
+            Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked
+            else Qt.CheckState.Checked,
+        )
+
+    def _on_item_changed(self, item: QStandardItem) -> None:
+        """任一item的打勾狀態改變時觸發(不管是_on_item_pressed()手動toggle、還是
+        使用者直接點中Qt原生checkbox圖示觸發的toggle，兩種來源都會走到這裡)，
+        統一處理「全部」互斥、大分類↔細項cascade——2026-08-19改版，取代原本
+        分散在_on_item_pressed()裡的邏輯(理由見該method的說明)。
+
+        `self._syncing`防止這裡呼叫setCheckState()改其他列觸發的itemChanged
+        又遞迴重新跑一次cascade；`set_items()`/`set_items_grouped()`建構清單
+        時也會借用同一個旗標暫時關閉cascade(建構過程中還沒有意義可以cascade)。
+        """
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            state = item.checkState()
+            if item.text() == self.ALL_LABEL:
+                if state == Qt.CheckState.Checked:
+                    for row in range(1, self.model().rowCount()):
+                        self.model().item(row).setCheckState(Qt.CheckState.Unchecked)
+            elif item.data(self._GROUP_ROLE):
+                # 勾/取消大分類header：連動底下所有細項跟著變成同一個狀態。不假設
+                # 細項一定緊接在header後面的連續row範圍，直接用_leaf_group_of
+                # 逐列比對所屬大分類是否相符——邏輯簡單、資料量小(50幾種細項)，
+                # 不用在意多掃幾次model的效能。
+                group_name = item.text()
                 for row in range(1, self.model().rowCount()):
-                    self.model().item(row).setCheckState(Qt.CheckState.Unchecked)
-        elif new_state == Qt.CheckState.Checked:
-            self.model().item(0).setCheckState(Qt.CheckState.Unchecked)
-        elif not self.checked_items():
-            self.model().item(0).setCheckState(Qt.CheckState.Checked)
+                    child = self.model().item(row)
+                    if child.data(self._GROUP_ROLE):
+                        continue
+                    if self._leaf_group_of.get(self._item_value(child)) == group_name:
+                        child.setCheckState(state)
+                if state == Qt.CheckState.Checked:
+                    self.model().item(0).setCheckState(Qt.CheckState.Unchecked)
+                elif not self.checked_items():
+                    self.model().item(0).setCheckState(Qt.CheckState.Checked)
+            else:
+                # 勾/取消單一細項：回頭檢查所屬大分類是否「底下細項全部都勾了」，
+                # 同步更新大分類header的勾選狀態(不做部分勾選的視覺樣式，只有
+                # 全勾/沒全勾兩種狀態，維持跟其他項目一致的簡單checkbox語意)。
+                group_name = self._leaf_group_of.get(self._item_value(item))
+                if group_name is not None:
+                    group_row = self._group_rows[group_name]
+                    siblings_checked = [
+                        self.model().item(r).checkState() == Qt.CheckState.Checked
+                        for r in range(1, self.model().rowCount())
+                        if self._leaf_group_of.get(self._item_value(self.model().item(r))) == group_name
+                    ]
+                    self.model().item(group_row).setCheckState(
+                        Qt.CheckState.Checked if siblings_checked and all(siblings_checked) else Qt.CheckState.Unchecked,
+                    )
+                if state == Qt.CheckState.Checked:
+                    self.model().item(0).setCheckState(Qt.CheckState.Unchecked)
+                elif not self.checked_items():
+                    self.model().item(0).setCheckState(Qt.CheckState.Checked)
+        finally:
+            self._syncing = False
         self._refresh_display_text()
 
     def _refresh_display_text(self) -> None:
@@ -690,7 +929,7 @@ class _StockEditDialog(QDialog):
         """這裡只估算買進手續費(計入成本基礎，見estimate_buy_fee())——「如果現在
         賣出」要另外付的手續費+證交稅(estimate_sell_cost())會隨現價每天變動，不是
         買入當下就能決定的固定數字，不在這個新增/編輯批次的對話框估算，而是列表
-        畫面「預估賣出成本」欄位即時算給使用者看(見_merge_holdings_with_
+        畫面「賣出成本」欄位即時算給使用者看(見_merge_holdings_with_
         snapshot())。2026-08-12改版：`fee_input`是可編輯欄位，這裡只在使用者還沒
         手動改過(`_fee_manually_edited`為False)時才把算出來的估算值寫回`fee_
         input`，`fee_estimate_label`則不管有沒有手動改過都持續顯示系統估算值，
@@ -1176,10 +1415,16 @@ class MainWindow(QMainWindow):
         market_industry_bar.addWidget(QLabel("產業別："))
         # 產業別可能同時符合好幾個想一起看的分類(使用者要求比照Excel欄位篩選的複選
         # 方式)，改用_CheckableComboBox取代單選的QComboBox，見該類別的docstring。
+        # 2026-08-19改版：使用者反映細項產業別太多(50幾種)一個一個勾很麻煩，改用
+        # set_items_grouped()分成「電子類/傳產製造類/生技醫療類/金融類/服務消費類/
+        # 基金憑證類」幾個大分類(見src/presentation/industry_groups.py)，勾大分類
+        # 就自動勾好底下所有細項。
         self.industry_filter_combo = _CheckableComboBox()
         self.industry_filter_combo.setMinimumWidth(160)
         if self.conn is not None:
-            self.industry_filter_combo.set_items(chart_data.list_industries(self.conn))
+            all_industries = chart_data.list_industries(self.conn)
+            grouped, ungrouped = industry_groups.group_industries(all_industries)
+            self.industry_filter_combo.set_items_grouped(grouped, ungrouped)
         market_industry_bar.addWidget(self.industry_filter_combo)
         market_industry_bar.addSpacing(20)
         # 2026-08-04新增：使用者要求候選清單能篩掉成交量太小、流動性不足的股票——跟
@@ -1852,9 +2097,11 @@ class MainWindow(QMainWindow):
         self._navigate_to_stock_detail(stock_id)
 
     def _on_industry_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        """點「股票數」欄位文字也能展開/收合——不是只能點原生箭頭那個小三角，跟庫存
-        清單「批次數」欄位的既有慣例一致。實際補資料/套底色的邏輯統一交給itemExpanded/
-        itemCollapsed訊號處理(見_on_industry_tree_item_expanded())，這裡只負責觸發
+        """點「股票數」欄位文字也能展開/收合——不是只能點原生箭頭那個小三角(庫存清單
+        原本也有這個「批次數」欄位點擊熱區的慣例，2026-08-17改成工具列「全部展開/
+        收合」按鈕後拿掉了，這裡的產業輪動樹狀表格維持不動)。實際補資料/套底色的
+        邏輯統一交給itemExpanded/itemCollapsed訊號處理(見_on_industry_tree_item_
+        expanded())，這裡只負責觸發
         setExpanded()狀態切換本身，不管是點這裡還是點原生箭頭，最後都會走到同一套
         訊號處理，不會有兩份邏輯要維護。
         """
@@ -2068,10 +2315,17 @@ class MainWindow(QMainWindow):
 
         ⚠️ 2026-08-02第三次改版：使用者反映上一輪「明細／彙總」下拉切換的操作
         方式麻煩，改成用`QTreeWidget`(樹狀表格)：每檔股票一個父列(彙總後的加權
-        平均成本/總損益)，預設全部收合；點父列的「批次數」欄位或原生展開箭頭，
-        才會展開底下每一筆批次(lot)各自的明細子列。這是QTreeWidget的原生用途
-        (master-detail)，不用再自己維護「兩個表格+QStackedWidget+下拉選單」。
+        平均成本/總損益)，預設全部收合；點父列前面的原生展開箭頭(或工具列
+        「全部展開」/「全部收合」按鈕，2026-08-17新增)，才會展開底下每一筆批次
+        (lot)各自的明細子列。這是QTreeWidget的原生用途(master-detail)，不用
+        再自己維護「兩個表格+QStackedWidget+下拉選單」。
         """
+        # 2026-08-18新增：逃命示警圖示改成QIcon(理由見_format_inventory_row()的
+        # 說明)，兩個尺寸相同的icon(有警示/無警示)在這裡建一次快取起來，
+        # _populate_inventory_tree()每次重新整理表格時直接重用，不用每次重建。
+        self._inventory_escape_icon = self._build_inventory_escape_icon(escaped=True)
+        self._inventory_no_escape_icon = self._build_inventory_escape_icon(escaped=False)
+
         inventory_scroll = QScrollArea()
         inventory_scroll.setWidgetResizable(True)
         self.tabs.addTab(inventory_scroll, "庫存清單")
@@ -2084,7 +2338,9 @@ class MainWindow(QMainWindow):
         inventory_layout.addWidget(self.inventory_summary_label)
 
         toolbar = QHBoxLayout()
-        add_btn = QPushButton("新增")
+        # 2026-08-19新增：按鈕標籤加上「(F2)」提示——F2快捷鍵見下面inventory_
+        # edit_shortcut的說明，會依目前有沒有選取列動態切換「新增」/「編輯選取」。
+        add_btn = QPushButton("新增(F2)")
         add_btn.clicked.connect(self._on_inventory_add)
         edit_btn = QPushButton("編輯選取")
         edit_btn.clicked.connect(self._on_inventory_edit_selected)
@@ -2092,9 +2348,19 @@ class MainWindow(QMainWindow):
         delete_btn.clicked.connect(self._on_inventory_delete_selected)
         watchlist_btn = QPushButton("加入觀察清單")
         watchlist_btn.clicked.connect(self._on_inventory_add_to_watchlist)
+        # 2026-08-17新增：使用者要求庫存清單(股票彙總父列/批次明細子列的樹狀結構，
+        # 見_populate_inventory_tree())能一次展開/收合全部股票，不用逐檔點——QTreeWidget
+        # 原生就有expandAll()/collapseAll()，不需要自己走訪節點。跟「重新整理」重建
+        # 表格時「保留原本已展開的股票」那套機制(_populate_inventory_tree()裡的
+        # expanded_stock_ids)不衝突：全部展開/收合後每個父列的isExpanded()狀態
+        # 就是True/False，重新整理時一樣會逐項讀到、正確保留。
+        expand_all_btn = QPushButton("全部展開")
+        expand_all_btn.clicked.connect(lambda: self.inventory_tree.expandAll())
+        collapse_all_btn = QPushButton("全部收合")
+        collapse_all_btn.clicked.connect(lambda: self.inventory_tree.collapseAll())
         refresh_btn = QPushButton("🔄 重新整理")
         refresh_btn.clicked.connect(self._refresh_inventory_tab)
-        for btn in (add_btn, edit_btn, delete_btn, watchlist_btn, refresh_btn):
+        for btn in (add_btn, edit_btn, delete_btn, watchlist_btn, expand_all_btn, collapse_all_btn, refresh_btn):
             toolbar.addWidget(btn)
         toolbar.addStretch()
         inventory_layout.addLayout(toolbar)
@@ -2105,26 +2371,50 @@ class MainWindow(QMainWindow):
         self.inventory_tree.setStyleSheet("QTreeWidget::item { padding-right: 10px; }")
         header = self.inventory_tree.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(_INVENTORY_TREE_HEADERS.index("備註"), QHeaderView.ResizeMode.Stretch)
+        # 2026-08-17改版：「備註」欄拿掉了(見_INVENTORY_TREE_HEADERS的說明)，改讓
+        # 「名稱」欄伸縮吃掉剩餘寬度，避免表格右側留一大片空白。
+        header.setSectionResizeMode(_INVENTORY_TREE_HEADERS.index("名稱"), QHeaderView.ResizeMode.Stretch)
+        # 2026-08-18新增：使用者反映「手續費」「漲跌幅(%)」「SAR狀態」「SAR距離%」
+        # 這幾欄用ResizeToContents撐出來的寬度比實際內容需要的還寬(欄名本身比欄位
+        # 內容長，例如「SAR狀態」4個字但內容只有「多頭」/「空頭」2個字)，擠壓到
+        # 「名稱」欄可以伸縮的空間——改成Fixed模式手動給比較窄的寬度，比照候選清單
+        # 「訊號」欄旁邊checkbox欄(_CANDIDATE_CHECKBOX_COLUMN)同樣的做法，讓出來的
+        # 空間全部進到「名稱」欄的Stretch裡。
+        for header_text, width in (
+            ("漲跌幅(%)", 65), ("手續費", 55), ("SAR狀態", 60), ("SAR距離%", 70),
+        ):
+            col_idx = _INVENTORY_TREE_HEADERS.index(header_text)
+            header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Fixed)
+            self.inventory_tree.setColumnWidth(col_idx, width)
+        # 2026-08-19新增：「成本價」欄改顯示含買入手續費的每股有效成本(見
+        # _format_inventory_row()的說明)，不是使用者輸入的原始每股價格——欄名
+        # 維持簡短的「成本價」不加長(避免又擠壓到其他欄的空間)，改用header
+        # tooltip說明這個變化，滑鼠移到欄名上就看得到。
+        self.inventory_tree.headerItem().setToolTip(
+            _INVENTORY_TREE_HEADERS.index("成本價"), "已計入買入手續費(每股攤算)，不是原始輸入的每股價格",
+        )
         self.inventory_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.inventory_tree.setAllColumnsShowFocus(True)  # 整列反白選取，不是只有第0欄
         self.inventory_tree.setSortingEnabled(True)
-        # 點「批次數」欄位的數字展開/收合該股票明細——原生展開箭頭(點第0欄前面的
-        # 小三角)還是照常可以用，這是額外多一個可以點的地方，不是取代原生行為。
-        self.inventory_tree.itemClicked.connect(self._on_inventory_tree_item_clicked)
         # 2026-08-07新增：雙擊任一列(父列或子列皆可)跳轉「個股資訊」分頁，比照候選
         # 清單_navigate_to_candidate_row()的雙擊模式——單擊只選取(給編輯/刪除選取
-        # 用)，雙擊才跳轉，兩者不衝突，也跟上面「點批次數欄展開/收合」的單擊行為不衝突
-        # (單擊/雙擊是Qt各自獨立的訊號)。
+        # 用)，雙擊才跳轉，兩者不衝突。2026-08-17拿掉「備註」欄後原本「點批次數欄
+        # 展開/收合」的單擊行為也一併移除(改用工具列「全部展開」/「全部收合」按鈕+
+        # 原生展開箭頭)，itemClicked不再需要接自訂handler。
         self.inventory_tree.itemDoubleClicked.connect(self._on_inventory_tree_item_double_clicked)
-        # F2編輯/Delete刪除快捷鍵：2026-08-04新增，比照ref-project(ui/widgets/
-        # inventory_list.py)的既有慣例，直接重用「編輯選取」/「刪除選取」按鈕
-        # 同一組handler，不是另外寫一套邏輯。綁在inventory_tree這個widget本身
-        # (不是self/MainWindow)、context設WidgetShortcut，只有這個表格有focus
-        # (使用者點過某一列)時按鍵才生效，不會跟其他分頁的表格互相干擾。
+        # F2新增/編輯、Delete刪除快捷鍵：2026-08-04新增F2編輯，比照ref-project
+        # (ui/widgets/inventory_list.py)的既有慣例，重用「編輯選取」按鈕的
+        # handler。2026-08-19改版：使用者要求F2也能觸發「新增」，改接
+        # _on_inventory_f2_pressed()這個小dispatcher——沒有選取任何列時觸發
+        # 「新增」(原本按F2只會跳出「請先選取一筆要編輯的批次」，對使用者沒有
+        # 幫助)，有選取列時維持原本「編輯選取」的行為不變(多選時一樣由
+        # _on_inventory_edit_selected()自己擋下並提示只能選一筆)。綁在
+        # inventory_tree這個widget本身(不是self/MainWindow)、context設
+        # WidgetShortcut，只有這個表格有focus(使用者點過某一列或表格本身)時
+        # 按鍵才生效，不會跟其他分頁的表格互相干擾。
         self.inventory_edit_shortcut = QShortcut(QKeySequence("F2"), self.inventory_tree)
         self.inventory_edit_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-        self.inventory_edit_shortcut.activated.connect(self._on_inventory_edit_selected)
+        self.inventory_edit_shortcut.activated.connect(self._on_inventory_f2_pressed)
         self.inventory_delete_shortcut = QShortcut(QKeySequence("Delete"), self.inventory_tree)
         self.inventory_delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
         self.inventory_delete_shortcut.activated.connect(self._on_inventory_delete_selected)
@@ -2146,9 +2436,30 @@ class MainWindow(QMainWindow):
         table.setSortingEnabled(True)
         return table
 
-    def _on_inventory_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        if column == _INVENTORY_TREE_LOT_COUNT_COLUMN and item.childCount() > 0:
-            item.setExpanded(not item.isExpanded())
+    @staticmethod
+    def _build_inventory_escape_icon(escaped: bool) -> QIcon:
+        """庫存清單「名稱」欄逃命示警圖示——2026-08-18改版：使用者反映舊寫法直接把
+        🔺emoji字元混進名稱文字前面(`f"🔺 {name}"`)，造成沒有警示的股票名稱因為
+        少了🔺的寬度、起始位置跟有警示的股票對不齊，很難閱讀。改成畫成固定16x16
+        的QIcon：有警示畫一個紅色實心三角形，沒有警示回傳同尺寸但完全透明的icon
+        ——兩者尺寸一致，QTreeWidget才會幫每一列的名稱欄保留同樣寬度的icon版位，
+        文字一律從icon後面同一個x座標開始，不管有沒有警示都對齊。
+
+        用QPainter手繪三角形、不直接複用🔺emoji字元繪成圖片，是刻意避開字型
+        相依性——emoji的實際繪製結果因作業系統/字型設定而異(也是造成本專案偵測
+        offscreen測試環境完全沒有安裝任何字型、螢幕截圖看不到中文字的同一類
+        問題)，向量繪圖不依賴字型，任何環境下大小/顏色都保證一致。
+        """
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        if escaped:
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#CC0000"))
+            painter.drawPolygon(QPolygonF([QPointF(8, 1), QPointF(15, 14), QPointF(1, 14)]))
+            painter.end()
+        return QIcon(pixmap)
 
     def _on_inventory_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         """雙擊庫存清單樹狀列(父列=股票彙總、子列=個別批次皆可)，把該股票帶入
@@ -2160,24 +2471,35 @@ class MainWindow(QMainWindow):
         self._navigate_to_stock_detail(stock_id)
 
     @staticmethod
-    def _format_inventory_row(row: pd.Series, is_lot: bool, has_escape: bool = False) -> list[str]:
+    def _format_inventory_row(row: pd.Series, is_lot: bool) -> list[str]:
         """組出一列(父列或子列)要顯示的文字，父列/子列共用同一組欄位結構(見
         _INVENTORY_TREE_HEADERS)，只是彼此留空的欄位不同——父列沒有單一的買入
-        日期/備註，子列則不重複顯示股票代號/名稱/現價/漲跌幅/SAR(樹狀縮排本身
-        已經表達了從屬關係，不需要每個子列重複一次)。
+        日期，子列則不重複顯示股票代號/名稱/現價/漲跌幅/SAR/外資近5日力道/投信
+        近5日力道(樹狀縮排本身已經表達了從屬關係，不需要每個子列重複一次；這是
+        股票層級的法人籌碼資料，個別批次沒有各自獨立的方向可言)。
 
-        has_escape(2026-08-12新增)：這檔股票目前有逃命示警時，在父列名稱前面
-        加上🔺(紅色三角警示符號，unicode本身自帶紅色，不需要另外setForeground)
-        ——只標父列(is_lot=False)，子列(個別批次)本來就不重複顯示名稱，沒有
-        對應可以標記的位置。
+        ⚠️ 2026-08-18改版：逃命示警的🔺警示不再用純文字前綴(`f"🔺 {name}"`)混
+        進這裡的名稱字串——使用者反映沒有警示的股票名稱因此少了🔺的寬度、跟有
+        警示的股票對不齊，很難閱讀。改成用QIcon佔位(見_populate_inventory_
+        tree()呼叫setIcon()那段)：每一列的名稱欄一律設一個同尺寸的icon(有警示
+        畫紅色三角形、沒有畫全透明)，不管有沒有警示，名稱文字都從同一個icon版位
+        後面開始，才能真正對齊；這裡因此不再需要`has_escape`參數，回傳的名稱
+        文字永遠是乾淨的公司名稱本身。
+
+        ⚠️ 2026-08-19改版：「成本價」欄改顯示含買入手續費的每股有效成本(見
+        portfolio_data.effective_cost_price())，不是使用者輸入的原始每股價格
+        ——使用者反映「成本」應該要含手續費，帳面損益/報酬率的計算本來就已經
+        把手續費算進成本基礎，這裡只是讓「成本價」這個顯示欄位也套用同一個
+        概念，方便直接跟現價比較。父列(股票彙總)/子列(個別批次)都適用，各自
+        用自己那一列的cost_price/shares/fee算。
         """
         def fmt(key: str, spec: str = "{:.2f}") -> str:
             value = row.get(key)
             return spec.format(value) if pd.notna(value) else "-"
 
         name_text = "" if is_lot else (row["name"] if pd.notna(row["name"]) else "-")
-        if not is_lot and has_escape:
-            name_text = f"🔺 {name_text}"
+        effective_cost = portfolio_data.effective_cost_price(row.get("cost_price"), row.get("shares"), row.get("fee"))
+        cost_price_text = f"{effective_cost:.2f}" if effective_cost is not None else "-"
 
         return [
             "" if is_lot else row["stock_id"],
@@ -2185,7 +2507,7 @@ class MainWindow(QMainWindow):
             (row["buy_date"] if pd.notna(row["buy_date"]) and row["buy_date"] else "-") if is_lot else "",
             "" if is_lot else fmt("close"),
             "" if is_lot else fmt("pct_change", "{:+.2f}"),
-            fmt("cost_price"),
+            cost_price_text,
             fmt("shares", "{:,.0f}"),
             fmt("fee", "{:,.0f}"),
             fmt("market_value", "{:,.0f}"),
@@ -2194,9 +2516,45 @@ class MainWindow(QMainWindow):
             fmt("return_pct", "{:+.2f}"),
             "" if is_lot else (row["sar_status"] if pd.notna(row["sar_status"]) else "-"),
             "" if is_lot else fmt("sar_distance_pct", "{:+.2f}"),
-            str(int(row["lot_count"])) if (not is_lot and "lot_count" in row and pd.notna(row.get("lot_count"))) else "",
-            (row["note"] if pd.notna(row["note"]) and row["note"] else "") if is_lot else "",
+            "" if is_lot else (classify_five_day_flow(row.get("foreign_5d")).get("text") or "-"),
+            "" if is_lot else (classify_five_day_flow(row.get("invest_5d")).get("text") or "-"),
         ]
+
+    @staticmethod
+    def _style_inventory_profit_columns(item: QTreeWidgetItem, row: pd.Series) -> None:
+        """帳面損益／報酬率(%)依正負號上色(台股慣例紅漲綠跌)：報酬率<0(虧損)標綠色
+        粗體，方便使用者一眼掃到目前虧損的批次/股票(2026-08-14新增)；報酬率>=0
+        (含打平)2026-08-17使用者要求一併補上紅字——只有虧損才加粗特別提醒，>=0
+        的紅字不加粗，維持一般文字粗細。缺值(還沒填成本價/股數，算不出報酬率)
+        維持預設樣式，不上色。"""
+        return_pct = row.get("return_pct")
+        if not pd.notna(return_pct):
+            return
+        is_loss = return_pct < 0
+        color = COLOR_SELL if is_loss else COLOR_BUY
+        for col_idx in (_INVENTORY_TREE_PROFIT_COLUMN, _INVENTORY_TREE_RETURN_PCT_COLUMN):
+            item.setForeground(col_idx, QColor(color))
+            if is_loss:
+                font = QFont()
+                font.setBold(True)
+                item.setFont(col_idx, font)
+
+    @staticmethod
+    def _style_inventory_flow_columns(item: QTreeWidgetItem, row: pd.Series) -> None:
+        """外資近5日力道／投信近5日力道這兩欄依classify_five_day_flow()判定的方向
+        上色(>=0「持續買進」紅字，<0「持續賣出」綠字，跟顯示文字用同一個函式算出來
+        的顏色，不會兩處各自判斷正負號走鐘)。2026-08-17新增，2026-08-18改成呼叫
+        classify_five_day_flow()。只有父列(股票彙總)才有這兩欄的資料(來自黃豐凱
+        籌碼分析法的flow_5d，是股票層級、不是批次層級的數字)，子列的row沒有這兩個
+        欄位，`row.get()`拿到None，classify_five_day_flow()回傳空text，直接跳過
+        不上色，不會出錯。"""
+        for col_idx, key in (
+            (_INVENTORY_TREE_FOREIGN_5D_COLUMN, "foreign_5d"),
+            (_INVENTORY_TREE_INVEST_5D_COLUMN, "invest_5d"),
+        ):
+            label = classify_five_day_flow(row.get(key))
+            if label["text"]:
+                item.setForeground(col_idx, QColor(label["color"]))
 
     def _populate_inventory_tree(
         self, summary_df: pd.DataFrame, lots_df: pd.DataFrame,
@@ -2209,9 +2567,16 @@ class MainWindow(QMainWindow):
         很差。
 
         escape_signals(2026-08-12新增，見portfolio_data.load_escape_signals_
-        for_stocks())：{股票代號: 逃命示警清單}，有訊號的股票父列名稱前面標🔺，
-        並在名稱欄setToolTip列出實際觸發的規則(規則編號/標題/日期)，滑鼠移過去
+        for_stocks())：{股票代號: 逃命示警清單}，有訊號的股票父列名稱欄設紅色
+        三角形icon(2026-08-18改版，見_build_inventory_escape_icon())，並在
+        名稱欄setToolTip列出實際觸發的規則(規則編號/標題/日期)，滑鼠移過去
         才看得到細節，不佔用表格版面。
+
+        summary_df預期已經(在_refresh_inventory_tab()裡)合併好foreign_5d/
+        invest_5d這兩欄(2026-08-17新增，來自huang_chip_data.load_huang_chip_
+        rows_batch()的flow_5d)，這裡只負責讀取顯示，不查資料——查無資料時這兩欄
+        是NaN，_format_inventory_row()/_style_inventory_flow_columns()都用
+        pd.notna()防呆，顯示"-"、不上色，不會crash。
         """
         tree = self.inventory_tree
         escape_signals = escape_signals or {}
@@ -2228,10 +2593,16 @@ class MainWindow(QMainWindow):
         for _, row in summary_df.reset_index(drop=True).iterrows():
             stock_escapes = escape_signals.get(row["stock_id"]) or []
             parent_item = _NumericTreeWidgetItem()
-            for col_idx, value in enumerate(self._format_inventory_row(row, is_lot=False, has_escape=bool(stock_escapes))):
+            for col_idx, value in enumerate(self._format_inventory_row(row, is_lot=False)):
                 parent_item.setText(col_idx, value)
                 if col_idx in _INVENTORY_TREE_NUMERIC_COLUMNS:
                     parent_item.setTextAlignment(col_idx, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            # 2026-08-18改版：不管有沒有逃命示警都設icon(有警示畫紅色三角形/沒有
+            # 是透明佔位圖，見_build_inventory_escape_icon())，讓「名稱」欄文字
+            # 對齊，理由見_format_inventory_row()的說明。
+            parent_item.setIcon(name_col, self._inventory_escape_icon if stock_escapes else self._inventory_no_escape_icon)
+            self._style_inventory_profit_columns(parent_item, row)
+            self._style_inventory_flow_columns(parent_item, row)
             if stock_escapes:
                 parent_item.setToolTip(name_col, "\n".join(
                     f"{m['rule_id']} {m.get('title', '')}（{m.get('date') or '-'}）" for m in stock_escapes
@@ -2245,6 +2616,7 @@ class MainWindow(QMainWindow):
                     child_item.setText(col_idx, value)
                     if col_idx in _INVENTORY_TREE_NUMERIC_COLUMNS:
                         child_item.setTextAlignment(col_idx, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self._style_inventory_profit_columns(child_item, lot_row)
                 child_item.setData(0, Qt.ItemDataRole.UserRole, row["stock_id"])
                 child_item.setData(0, Qt.ItemDataRole.UserRole + 1, int(lot_row["id"]))
                 parent_item.addChild(child_item)
@@ -2277,6 +2649,20 @@ class MainWindow(QMainWindow):
         lots_df = portfolio_data.load_inventory_lots(self.conn, self.portfolio_conn)
         summary_df = portfolio_data.load_inventory_summary(self.conn, self.portfolio_conn)
         escape_signals = portfolio_data.load_escape_signals_for_stocks(self.conn, list(summary_df["stock_id"]))
+        # 2026-08-17新增：黃豐凱籌碼分析法的5日外資/投信累計買賣超(flow_5d)，跟觀察
+        # 清單既有的「5日外資」「5日投信」欄位同一份資料來源(見huang_chip_data.
+        # load_huang_chip_rows_batch())——合併進summary_df讓_populate_inventory_
+        # tree()/_format_inventory_row()可以直接當成一般欄位讀取，不用另外傳一個
+        # 字典參數穿過好幾層函式(跟escape_signals那種「每檔股票對應一份清單」的
+        # 資料形狀不同，這裡是「每檔股票對應一個數字」，更適合直接併進summary_df)。
+        chip_rows_by_stock = huang_chip_data.load_huang_chip_rows_batch(self.conn, list(summary_df["stock_id"]))
+
+        def _flow_value(stock_id: str, key: str) -> float | None:
+            flow = chip_rows_by_stock.get(stock_id, {}).get("flow")
+            return flow[key] if flow else None
+
+        summary_df["foreign_5d"] = summary_df["stock_id"].map(lambda sid: _flow_value(sid, "foreign_5d"))
+        summary_df["invest_5d"] = summary_df["stock_id"].map(lambda sid: _flow_value(sid, "invest_5d"))
         self._populate_inventory_tree(summary_df, lots_df, escape_signals)
         self.inventory_summary_label.setText(
             self._portfolio_summary_text(lots_df, "總持股成本", "總市值", "累積總損益"),
@@ -2290,6 +2676,18 @@ class MainWindow(QMainWindow):
         tab_bar = self.tabs.tabBar()
         tab_bar.setTabTextColor(TAB_INVENTORY, QColor("#C0392B") if has_any_escape else QColor())
         self.tabs.setTabText(TAB_INVENTORY, ("🚨 庫存清單" if has_any_escape else "庫存清單"))
+
+    def _on_inventory_f2_pressed(self) -> None:
+        """F2快捷鍵的dispatcher(2026-08-19新增，見inventory_edit_shortcut綁定處
+        的說明)：完全沒有選取任何列(不管父列/子列)時觸發「新增」，避免使用者
+        在還沒點任何一列的情況下按F2，只換來一句「請先選取」卻沒有實際幫助；
+        已經選取列時維持原本「編輯選取」的行為(包含選到父列、或選了不只一筆
+        批次時各自的提示訊息，都由_on_inventory_edit_selected()自己處理，這裡
+        不重複判斷)。"""
+        if not self.inventory_tree.selectedItems():
+            self._on_inventory_add()
+        else:
+            self._on_inventory_edit_selected()
 
     def _on_inventory_add(self) -> None:
         if self.portfolio_conn is None:

@@ -73,6 +73,21 @@ def test_estimate_buy_fee_applies_minimum_fee_floor():
     assert portfolio_data.estimate_buy_fee(1.0, 1) == portfolio_data.MIN_COMMISSION_FEE
 
 
+def test_effective_cost_price_adds_amortized_fee_per_share():
+    # 鴻海：成本價235.76、210股、手續費24元 -> 235.76 + 24/210
+    assert portfolio_data.effective_cost_price(235.76, 210, 24) == 235.76 + 24 / 210
+
+
+def test_effective_cost_price_none_when_any_input_missing():
+    assert portfolio_data.effective_cost_price(None, 100, 10) is None
+    assert portfolio_data.effective_cost_price(100.0, None, 10) is None
+    assert portfolio_data.effective_cost_price(100.0, 100, None) is None
+
+
+def test_effective_cost_price_none_when_shares_zero():
+    assert portfolio_data.effective_cost_price(100.0, 0, 10) is None
+
+
 def test_estimate_sell_cost_combines_commission_and_transaction_tax():
     """使用者糾正：「21元」是券商app顯示的『以目前現價賣出』預估手續費，不是買入
     手續費加總——賣出手續費用跟買進同一個折扣(3折)，但另外要加計只課賣方、不能

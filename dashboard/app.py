@@ -30,7 +30,7 @@ from src import rule_docs  # noqa: E402
 from src.data.yfinance_client import TAIEX_STOCK_ID  # noqa: E402
 from src.indicators.moving_average import FULL_PERIODS  # noqa: E402
 from src.patterns import chart_overlays, latest_day_summary  # noqa: E402
-from src.presentation import chart_data, portfolio_data, q3_analysis, stock_detail_data  # noqa: E402
+from src.presentation import chart_data, industry_groups, portfolio_data, q3_analysis, stock_detail_data  # noqa: E402
 from src.screener import q3_patterns  # noqa: E402
 from src.presentation.chart_data import (  # noqa: E402
     CANDIDATE_FILTER_DEFAULTS,
@@ -132,7 +132,7 @@ def main() -> None:
     from src.data.config import get_admin_access_code
     from src.data.connection import get_default_connection, get_default_portfolio_connection
     from src.data.trading_calendar import holidays_between
-    from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL
+    from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL, classify_five_day_flow
     from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
     from src.presentation import huang_chip_data
     from src.screener.daily_screener import (
@@ -1540,9 +1540,44 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
     def _style_name_by_listing_type_row(row: pd.Series) -> list[str]:
         """依上市/上櫃/興櫃上色「名稱」欄位——跟選股分頁candidates_df用的_style_name_
         by_listing_type()同一套邏輯，這裡獨立一份是因為欄位集合(index)不同，无法直接
-        共用同一個closure(選股那份綁定在選股分頁的區塊內)。"""
+        共用同一個closure(選股那份綁定在選股分頁的區塊內)。帳面損益/報酬率(%)這兩欄
+        依正負號上色(台股慣例紅漲綠跌，跟_style_watchlist_row()籌碼流向欄同一套配色)：
+        2026-08-14新增報酬率<0(虧損)綠色粗體，方便使用者一眼掃到目前虧損的持股；
+        2026-08-17使用者再要求補上>=0紅字——只有虧損才加粗特別提醒，>=0的紅字不
+        加粗。用格式化後的字串判斷正負號——_fmt_or_dash()負值一定帶"-"開頭，缺值
+        固定是單一"-"字元，用`not in ("", "-")`排除掉，缺值不上色。外資/投信近5日
+        力道(2026-08-17新增取代拿掉的「批次數」欄，2026-08-18改成classify_five_
+        day_flow()算出的「持續買進」/「持續賣出」方向文字，不再是數字)改用文字內容
+        直接對應顏色，不能沿用「看開頭是不是'-'」那套判斷正負號的寫法。"""
+        def _sign_color(text: str) -> str:
+            if text in ("", "-"):
+                return ""
+            return f"color: {COLOR_SELL}; font-weight: bold" if text.startswith("-") else f"color: {COLOR_BUY}"
+
+        def _flow_color(text: str) -> str:
+            if text == "持續買進":
+                return f"color: {COLOR_BUY}"
+            if text == "持續賣出":
+                return f"color: {COLOR_SELL}"
+            return ""
+
         color = portfolio_data.listing_type_color(row.get("listing_type"))
-        return [f"color: {color}" if col == "name" else "" for col in row.index]
+        return_pct_color = _sign_color(str(row.get("return_pct", "")))
+        flow_colors = {
+            col: _flow_color(str(row.get(col, "")))
+            for col in ("foreign_5d", "invest_5d")
+        }
+        styles = []
+        for col in row.index:
+            if col == "name":
+                styles.append(f"color: {color}")
+            elif col in ("profit", "return_pct"):
+                styles.append(return_pct_color)
+            elif col in flow_colors:
+                styles.append(flow_colors[col])
+            else:
+                styles.append("")
+        return styles
 
     @st.dialog("庫存批次")
     def _inventory_lot_dialog(initial: dict | None) -> None:
@@ -1692,25 +1727,56 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
                         st.markdown(f"- {m['rule_id']} {m.get('title', '')}（{m.get('date') or '-'}）")
 
         st.subheader("庫存總覽")
+        # 2026-08-17新增：黃豐凱籌碼分析法的5日外資/投信累計買賣超(flow_5d)，跟觀察
+        # 清單既有的「5日外資」「5日投信」欄位同一份資料來源(見huang_chip_data.
+        # load_huang_chip_rows_batch())，取代拿掉的「批次數」欄——桌面版
+        # (desktop/main_window.py的_refresh_inventory_tab())同一天同步改版，這裡
+        # 是網頁版對應的部分。
+        chip_rows_by_stock = huang_chip_data.load_huang_chip_rows_batch(conn, list(summary_df["stock_id"]))
+
+        def _flow_value(stock_id: str, key: str):
+            flow = chip_rows_by_stock.get(stock_id, {}).get("flow")
+            return flow[key] if flow else None
+
+        summary_df["foreign_5d"] = summary_df["stock_id"].map(lambda sid: _flow_value(sid, "foreign_5d"))
+        summary_df["invest_5d"] = summary_df["stock_id"].map(lambda sid: _flow_value(sid, "invest_5d"))
+
         # ⚠️ 數字欄位先轉成「已格式化好的字串」("-"代表缺值)，不依賴column_config.
         # NumberColumn自動格式化——見_fmt_or_dash()的說明，一整欄全部是None時
         # column_config對object dtype的None會顯示"None"字面字串。summary_df(含
         # listing_type等其他欄位)保留給後面selection查詢用，只有display版本套用
         # 字串轉換。
         summary_display = summary_df.copy()
-        summary_display["name"] = summary_df.apply(
-            lambda r: ("🔺 " if r["stock_id"] in stocks_with_escape else "") + (r["name"] if pd.notna(r["name"]) else "-"),
-            axis=1,
-        )
+        # 2026-08-18改版：使用者反映「名稱」欄沒對齊——舊寫法把🔺直接當文字前綴
+        # 混進名稱字串(`"🔺 " + name`)，沒有警示的股票名稱因此少了🔺+空白的寬度，
+        # 起始位置跟有警示的對不上，很難閱讀(跟桌面版desktop/main_window.py同一天
+        # 修的問題同一個成因)。桌面版改用QIcon佔位解決，但st.dataframe(glide-
+        # data-grid)沒有那種「文字前面留icon版位」的機制——改成拆成獨立的
+        # 「escape_flag」欄放在「名稱」欄前面，每個儲存格各自獨立對齊(表格本來就是
+        # 逐欄對齊)，「名稱」欄永遠是乾淨的公司名稱，不再混雜🔺。
+        summary_display["escape_flag"] = summary_df["stock_id"].apply(lambda sid: "🔺" if sid in stocks_with_escape else "")
+        summary_display["name"] = summary_df["name"].apply(lambda v: v if pd.notna(v) else "-")
         summary_display["close"] = summary_df["close"].apply(lambda v: _fmt_or_dash(v, 2))
         summary_display["pct_change"] = summary_df["pct_change"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
-        summary_display["cost_price"] = summary_df["cost_price"].apply(lambda v: _fmt_or_dash(v, 2))
+        # 2026-08-19改版：「成本價」改顯示含買入手續費的每股有效成本(portfolio_
+        # data.effective_cost_price())，不是使用者輸入的原始每股價格——跟桌面版
+        # desktop/main_window.py同一天同步改版，理由見該處_format_inventory_
+        # row()的說明：帳面損益/報酬率本來就已經把手續費算進成本基礎，這裡讓
+        # 「成本價」這個顯示欄位也套用同一個概念。
+        summary_display["cost_price"] = summary_df.apply(
+            lambda r: _fmt_or_dash(portfolio_data.effective_cost_price(r["cost_price"], r["shares"], r["fee"]), 2),
+            axis=1,
+        )
         summary_display["shares"] = summary_df["shares"].apply(lambda v: _fmt_or_dash(v, 0))
         summary_display["market_value"] = summary_df["market_value"].apply(lambda v: _fmt_or_dash(v, 0))
         summary_display["profit"] = summary_df["profit"].apply(lambda v: _fmt_or_dash(v, 0, signed=True))
         summary_display["return_pct"] = summary_df["return_pct"].apply(lambda v: _fmt_or_dash(v, 2, signed=True, suffix="%"))
         summary_display["sar_distance_pct"] = summary_df["sar_distance_pct"].apply(lambda v: _fmt_or_dash(v, 2, suffix="%"))
-        summary_display["lot_count"] = summary_df["lot_count"].apply(lambda v: _fmt_or_dash(v, 0))
+        # 2026-08-18改版：使用者反映看數字要自己判斷正負號還要想一下，要求改成直接
+        # 顯示「持續買進」/「持續賣出」方向文字(classify_five_day_flow()，跟桌面版
+        # desktop/main_window.py同一天同步改版)，不再顯示原始張數。
+        summary_display["foreign_5d"] = summary_df["foreign_5d"].apply(lambda v: classify_five_day_flow(v)["text"] or "-")
+        summary_display["invest_5d"] = summary_df["invest_5d"].apply(lambda v: classify_five_day_flow(v)["text"] or "-")
         # 2026-08-07新增：selection_mode混用single-row(點列選取，展開下方批次明細，
         # 既有行為不變)+single-cell(判斷有沒有點到「名稱」欄，點到就跳轉個股資訊)，
         # 邏輯跟選股分頁候選清單表格一致(見TAB_SCREENER分支的說明)。點「名稱」欄
@@ -1721,12 +1787,15 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             summary_display.style.apply(_style_name_by_listing_type_row, axis=1),
             use_container_width=True, hide_index=True,
             on_select="rerun", selection_mode=["single-row", "single-cell"], key="inventory_summary_table",
-            column_order=["stock_id", "name", "close", "pct_change", "cost_price", "shares", "market_value", "profit", "return_pct", "sar_status", "sar_distance_pct", "lot_count"],
+            column_order=["stock_id", "escape_flag", "name", "close", "pct_change", "cost_price", "shares", "market_value", "profit", "return_pct", "sar_status", "sar_distance_pct", "foreign_5d", "invest_5d"],
             column_config={
-                "stock_id": "股票代號", "name": "名稱", "close": "現價", "pct_change": "漲跌幅(%)",
-                "cost_price": "成本價", "shares": "持股數", "market_value": "市值",
+                "stock_id": "股票代號",
+                "escape_flag": st.column_config.Column(" ", width="small"),
+                "name": "名稱", "close": "現價", "pct_change": "漲跌幅(%)",
+                "cost_price": st.column_config.Column("成本價", help="已計入買入手續費(每股攤算)，不是原始輸入的每股價格"),
+                "shares": "持股數", "market_value": "市值",
                 "profit": "帳面損益", "return_pct": "報酬率(%)", "sar_status": "SAR狀態",
-                "sar_distance_pct": "SAR距離%", "lot_count": "批次數",
+                "sar_distance_pct": "SAR距離%", "foreign_5d": "外資近5日力道", "invest_5d": "投信近5日力道",
             },
         )
         name_clicked_row = next(
@@ -1756,18 +1825,25 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
 
         stock_lots_df = lots_df[lots_df["stock_id"] == selected_stock_id].reset_index(drop=True)
         lots_display = stock_lots_df.copy()
-        lots_display["cost_price"] = stock_lots_df["cost_price"].apply(lambda v: _fmt_or_dash(v, 2))
+        # 2026-08-19改版：跟上面「庫存總覽」的「成本價」欄同步，改顯示含買入
+        # 手續費的每股有效成本(見portfolio_data.effective_cost_price())。
+        lots_display["cost_price"] = stock_lots_df.apply(
+            lambda r: _fmt_or_dash(portfolio_data.effective_cost_price(r["cost_price"], r["shares"], r["fee"]), 2),
+            axis=1,
+        )
         lots_display["shares"] = stock_lots_df["shares"].apply(lambda v: _fmt_or_dash(v, 0))
         lots_display["fee"] = stock_lots_df["fee"].apply(lambda v: _fmt_or_dash(v, 0))
         lots_display["market_value"] = stock_lots_df["market_value"].apply(lambda v: _fmt_or_dash(v, 0))
         lots_display["profit"] = stock_lots_df["profit"].apply(lambda v: _fmt_or_dash(v, 0, signed=True))
         lots_display["return_pct"] = stock_lots_df["return_pct"].apply(lambda v: _fmt_or_dash(v, 2, signed=True, suffix="%"))
         lots_event = st.dataframe(
-            lots_display, use_container_width=True, hide_index=True,
+            lots_display.style.apply(_style_name_by_listing_type_row, axis=1), use_container_width=True, hide_index=True,
             on_select="rerun", selection_mode="multi-row", key="inventory_lots_table",
             column_order=["buy_date", "cost_price", "shares", "fee", "market_value", "profit", "return_pct", "note"],
             column_config={
-                "buy_date": "買入日期", "cost_price": "成本價", "shares": "持股數",
+                "buy_date": "買入日期",
+                "cost_price": st.column_config.Column("成本價", help="已計入買入手續費(每股攤算)，不是原始輸入的每股價格"),
+                "shares": "持股數",
                 "fee": "手續費", "market_value": "市值", "profit": "帳面損益", "return_pct": "報酬率(%)",
                 "note": "備註",
             },
@@ -2427,6 +2503,31 @@ h3 {{ font-size: 13px; color: #2980b9; margin-top: 20px; }}
             # 照抄桌面版desktop/main_window.py的market_filter_combo/industry_filter_combo/
             # volume_filter_spin(main_window.py:2911-2928)。
             st.caption("候選股票池範圍（市場/產業別/成交量門檻，同樣要按「套用篩選」才會生效）：")
+            # 2026-08-19新增：使用者反映「產業別」細項太多(50幾種TWSE/TPEx分類)要
+            # 一個一個勾很麻煩，改用「大產業別」快速勾選(見src/presentation/
+            # industry_groups.py，桌面版desktop/main_window.py同一天改成
+            # _CheckableComboBox.set_items_grouped()的樹狀勾選)。web版沒有現成的
+            # 樹狀元件，改成popover裡放一個「大分類」多選框，選了就把底下所有細項
+            # 一次加進下面的「產業別」多選框——只做「新增」方向，不會自動移除，使用者
+            # 仍可以在「產業別」裡個別取消不想要的細項，避免這個快速勾選工具反而蓋掉
+            # 使用者手動做的微調。
+            def _apply_industry_group_quick_select() -> None:
+                selected_groups = st.session_state.get("filter_industry_groups", [])
+                if not selected_groups:
+                    return
+                grouped, _ungrouped = industry_groups.group_industries(list_industries(conn))
+                to_add: set[str] = set()
+                for g in selected_groups:
+                    to_add.update(grouped.get(g, []))
+                current = set(st.session_state.get("filter_industries", []))
+                st.session_state["filter_industries"] = sorted(current | to_add)
+
+            with st.popover("📂 依大產業別快速勾選"):
+                st.multiselect(
+                    "大產業別", list(industry_groups.INDUSTRY_GROUPS.keys()),
+                    key="filter_industry_groups", on_change=_apply_industry_group_quick_select,
+                )
+                st.caption("勾選後會把底下所有細項加進下面的「產業別」，不會自動移除；可以再到「產業別」取消不要的細項。")
             # 2026-08-06改版：label跟下拉/輸入框改成同一列的緊湊排法(見_inline_field()
             # 的說明)，取代原本Streamlit預設label在上、widget在下、又滿版拉寬的排版。
             pool_col1, pool_col2, pool_col3 = st.columns([1, 1.6, 1])

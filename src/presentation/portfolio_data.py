@@ -69,6 +69,29 @@ def estimate_buy_fee(cost_price: float | None, shares: int | None) -> int | None
     return max(round(raw_fee), MIN_COMMISSION_FEE)
 
 
+def effective_cost_price(cost_price: float | None, shares: int | None, fee: float | None) -> float | None:
+    """庫存清單「成本價」欄顯示用：把買入手續費攤進每股成本(cost_price + fee /
+    shares)，不是只顯示使用者輸入的原始每股價格。2026-08-19新增，使用者反映
+    「成本」應該要含買入手續費——`_merge_holdings_with_snapshot()`算帳面損益/
+    報酬率時本來就已經把手續費計入成本基礎(total_cost = cost_price*shares+fee，
+    見該函式docstring)，這裡只是把同一個概念也套用到「成本價」這個顯示欄位，
+    讓使用者不用自己心算「每股到底花了多少錢」，跟現價比較時更直覺。
+
+    ⚠️ 這裡刻意只影響「顯示」：新增/編輯批次的對話框(desktop/main_window.py的
+    _StockEditDialog)讀寫的是原始cost_price，不是這裡算出來的有效成本，避免
+    使用者編輯時看到一個「跟自己輸入的數字對不起來」的成本價，也避免每次編輯
+    都要先反推回原始價格才能改。
+
+    cost_price/shares/fee任一缺值(None或NaN)或shares為0都回傳None，呼叫端
+    沿用「缺值顯示-」的既有慣例，不強行拼湊出誤導的數字。
+    """
+    if cost_price is None or shares is None or fee is None:
+        return None
+    if pd.isna(cost_price) or pd.isna(shares) or pd.isna(fee) or shares == 0:
+        return None
+    return cost_price + fee / shares
+
+
 def estimate_sell_cost(market_value: float | None) -> int | None:
     """估算「以目前市值賣出」要付出的總成本(手續費+證券交易稅，四捨五入到整數元
     後加總)——`_merge_holdings_with_snapshot()`算「帳面損益/報酬率」時，本來就是
