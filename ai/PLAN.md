@@ -9825,3 +9825,597 @@ inventory_escape_signals_into_line_message`改寫成驗證新格式(含真實
 會查到Turso上完全不同(甚至可能是空)的庫存清單，這個bug可能已經
 存在好幾天沒被發現，直到今天使用者實際注意到「怎麼沒有庫存警示」
 才浮現。
+
+## 庫存清單報酬率<0時，帳面損益/報酬率(%)標成綠色粗體（2026-08-14）
+
+使用者要求：庫存清單裡報酬率<0(虧損)的列，「帳面損益」「報酬率(%)」
+這兩欄要標成綠色粗體，方便一眼掃到目前虧損的持股(台股慣例綠色代表
+下跌/虧損、紅色代表上漲/獲利，沿用既有`COLOR_BUY`/`COLOR_SELL`配色，
+不虧損維持預設樣式，不特別處理)。
+
+桌面版(`desktop/main_window.py`)：`_populate_inventory_tree()`裡
+父列(股票彙總)/子列(個別批次)都各自呼叫新增的靜態方法
+`_style_inventory_loss_columns(item, row)`，用該列的`return_pct`
+判斷，<0時對`_INVENTORY_TREE_PROFIT_COLUMN`/`_INVENTORY_TREE_RETURN_
+PCT_COLUMN`這兩欄setForeground(COLOR_SELL)+setFont(粗體)。
+
+網頁版(`dashboard/app.py`)：`_style_name_by_listing_type_row()`(原本
+只依上市/上櫃/興櫃幫「名稱」欄上色)一併擴充，用格式化後的`return_pct`
+字串判斷正負號(`_fmt_or_dash()`負值一定帶"-"開頭，缺值固定是單一"-"
+字元，用`not in ("", "-")`排除掉避免誤判)，是負值就把`profit`/
+`return_pct`兩欄加上`color: {COLOR_SELL}; font-weight: bold`。這個
+style函式原本只套用在庫存總覽表(`summary_display`)，這次也一併套到
+批次明細表(`lots_display`)，兩層表格都會標示，跟桌面版父列+子列都
+標示的行為一致。
+
+`python -c "import ast; ast.parse(...)"`確認兩個檔案語法正確，尚未
+實際啟動桌面版/網頁版用真實虧損持股肉眼驗證顏色效果。
+
+## 圖表MACD/KD左上角數值文字改用對應線色＋KD子圖上下留白（2026-08-14）
+
+使用者回報兩個圖表細節：①MACD子圖左上角的DIF/MACD/OSC數值文字統一灰色，
+跟圖上實際線條顏色(DIF紅/MACD訊號線藍/OSC正紅負綠)對不起來，KD子圖左上角
+的K/D數值文字也一樣；②KD子圖y軸range是`[0, 100]`，K/D值貼近0或100時線條
+直接貼在子圖最上/最下緣不好辨識。
+
+`src/presentation/chart_data.py`的`build_candlestick_figure()`：兩處
+annotation的`text`改用`<span style='color:...'>`分段上色(Plotly annotation
+text支援這種偽HTML語法，跟既有`fmtMa()`hover文字上色手法一致)，色碼直接
+沿用該trace的`line.color`(DIF/MACD/K/D)或OSC既有的正紅負綠判斷邏輯，不是
+另外定義一套新色碼。KD子圖range改成`[-5, 105]`留邊界空間，80/20參考線
+(`fig.add_hline`)位置不受影響。
+
+`src/presentation/chart_render.py`的`fmtMacd()`/`fmtKd()`(滑鼠hover時
+動態更新同一則annotation文字的JS)手動同步改成一樣的色碼——這兩處色碼是
+分別寫在Python/JS兩份程式碼裡、沒有共用來源，之後如果改動線條顏色要記得
+兩邊一起改。
+
+驗證：直接呼叫桌面版實際使用的同一套`build_candlestick_figure()`+
+`render_chart_html()`產生8028昇陽半的圖表HTML，用Playwright headless
+Chromium截圖確認DIF/MACD/OSC/K/D文字顏色跟線條一致、KD子圖上下有留白，
+截圖看完即刪除(不留在repo/scratchpad裡)。`pytest tests/test_chart_data.py
+tests/test_chart_render.py -q`131+9個測試全過。
+
+⚠️ 使用者同時回報「昇陽半庫存顯示8/14出現KD死亡交叉，應該是8/13」——
+查證(書中3日加總簡化式+業界平滑公式兩種KD算法都算過一次、也放大最近18
+交易日的K/D線圖仔細看)後確認8/14才是實際交叉日：8/12已經有一次死亡交叉，
+8/13 K值反彈回D之上(黃金交叉)，8/14 K值又急跌破D形成新的死亡交叉，數學
+跟視覺化圖表都吻合，不是bug。已回報使用者確認的過程，尚待使用者說明
+「應該是8/13」的判斷依據(對照哪個畫面/平台)以便進一步排查，如果沒有下文
+視為使用者自行確認無誤。
+
+## 庫存清單新增「全部展開/收合」（2026-08-17）
+
+使用者要求庫存清單樹狀表格(股票彙總父列+批次明細子列，見
+`_populate_inventory_tree()`)能一次展開/收合全部股票，不用逐檔點父列前面
+的小三角或「批次數」欄位。`_build_inventory_tab()`工具列新增「全部展開」/
+「全部收合」兩顆按鈕，直接呼叫`QTreeWidget`原生的`expandAll()`/
+`collapseAll()`，不用自己走訪節點。
+
+跟「重新整理」重建表格時「保留原本已展開的股票」那套既有機制
+(`_populate_inventory_tree()`裡讀`isExpanded()`存進`expanded_stock_ids`
+再重建後還原)完全不衝突：全部展開/收合後每個父列的`isExpanded()`狀態
+就是True/False，重新整理時一樣會逐項讀到、正確保留，不需要額外處理。
+只加在桌面版——網頁版(`dashboard/app.py`)的庫存清單是「點一列選取才顯示
+下方批次明細」的單選模式，不是樹狀多節點展開/收合，沒有對應的「全部展開」
+概念可以套用。
+
+## 庫存清單帳面損益/報酬率補上「>=0紅字」（2026-08-17）
+
+延續8/14「報酬率<0標綠色粗體」那次改版，使用者這次要求報酬率>=0(含打平)
+時，帳面損益/報酬率(%)這兩欄也要標紅字(台股慣例紅漲綠跌)——只有虧損
+(<0)才加粗特別提醒，>=0的紅字維持一般粗細，不跟著加粗。
+
+桌面版：`_style_inventory_profit_columns()`(原本叫`_style_inventory_
+loss_columns`，這次順便改名反映「盈虧都上色」而不是只處理虧損)判斷式從
+「只在<0時上色」改成「有值就上色，<0用COLOR_SELL(綠)+粗體，>=0用COLOR_
+BUY(紅)、不加粗」，缺值(還沒填成本價/股數)維持不上色。
+
+網頁版：`_style_name_by_listing_type_row()`同步改法，用`return_pct`格式化
+後的字串判斷("-"開頭且非純"-"缺值標記才算虧損)，>=0時加`color: {COLOR_
+BUY}`(不帶font-weight)。
+
+驗證：offscreen模式(`QT_QPA_PLATFORM=offscreen`+手動設定`LOCAL_DB_PATH`/
+`PORTFOLIO_DB_PATH`指向本機檔案，避開Turso)實際建構MainWindow，對
+`_style_inventory_profit_columns()`跑負值/0/正值/None四種分支都沒有
+crash；`pytest tests/ -k "inventory or portfolio" -q`52個測試全過。
+
+## 庫存清單拿掉批次數/備註欄，換成5日外資/投信買賣超（2026-08-17）
+
+使用者要求庫存清單樹狀表格拿掉「批次數」「備註」這兩欄，換成外資/投信
+近5日累計買賣超力道(紅字=買超、綠字=賣超，台股慣例紅漲綠跌)。
+
+`_INVENTORY_TREE_HEADERS`(桌面版`desktop/main_window.py`)欄位結構改成
+`[...,"SAR距離%","5日外資","5日投信"]`，拿掉`批次數`/`備註`：①「批次數」
+欄位原本兼作「點文字展開/收合該股票批次明細」的點擊熱區，拿掉後改成
+上次(8/17稍早)才新增的工具列「全部展開」/「全部收合」按鈕+原生展開箭頭
+取代，`_on_inventory_tree_item_clicked()`這個handler跟著移除，
+`itemClicked`訊號不再接自訂邏輯；②「備註」欄位本身的資料/編輯功能沒有
+拿掉(DB欄位、`_StockEditDialog`的備註輸入框都還在)，只是不再顯示成表格
+欄位；③表格stretch欄位從已經拿掉的「備註」改成「名稱」，避免右側留白。
+
+新欄位「5日外資」「5日投信」直接重用`src/presentation/huang_chip_data.py`
+的`load_huang_chip_rows_batch()`(黃豐凱籌碼分析法，docstring本來就寫明
+「之後若要擴充到庫存清單，直接重用這裡的函式即可」)，取`flow`字典裡的
+`foreign_5d`/`invest_5d`(近5日累計買賣超張數)，跟觀察清單既有的「5日
+外資」「5日投信」欄位同一份資料來源，只是庫存清單只顯示5日這一組(不像
+觀察清單有40/20/10/5日四組)。`_refresh_inventory_tab()`額外查一次
+`load_huang_chip_rows_batch()`，把兩個數字合併進`summary_df`當成一般
+欄位，新增的`_style_inventory_flow_columns()`依正負號上色(>=0紅字、
+<0綠字，跟`COLOR_BUY`/`COLOR_SELL`同一套配色)；批次子列沒有這兩欄的
+資料(是股票層級、不是批次層級的數字)，`_format_inventory_row()`固定
+留空。
+
+驗證：offscreen模式實際建構MainWindow，讀真實本機庫存(5檔股票)確認
+表頭正確顯示「5日外資」「5日投信」、數字跟顏色符合正負號(例如8028
+外資近5日+2,094張顯示紅字、投信-3,430張顯示綠字)；`pytest tests/ -k
+"inventory or portfolio or huang_chip" -q`100個測試全過。這次先只改
+桌面版，問過使用者後確認網頁版也要同步，見下一則記錄。
+
+### 網頁版同步（同日）
+
+使用者確認網頁版(Streamlit)庫存清單「庫存總覽」表格也要套用同樣的
+改動。`dashboard/app.py`的`render_inventory_tab()`：拿掉`lot_count`
+(批次數)欄，改成呼叫`huang_chip_data.load_huang_chip_rows_batch()`
+(跟桌面版同一份資料來源)合併`foreign_5d`/`invest_5d`兩欄進`summary_
+df`，`column_order`/`column_config`同步調整標籤為「5日外資」「5日
+投信」。`_style_name_by_listing_type_row()`拆出`_sign_color()`小
+helper，讓「帳面損益/報酬率(%)」(維持虧損才加粗)跟「5日外資/5日投信」
+(一律不加粗)可以共用同一套「依格式化字串正負號決定顏色」的判斷邏輯，
+不用各自重複寫一份if/else。
+
+⚠️ 網頁版的「批次明細」是獨立於「庫存總覽」的第二層表格(點一列選取才
+顯示該股票的批次清單，見`lots_display`)，這次沒有拿掉「備註」欄——
+使用者的原始需求(桌面版)是針對合併成單一樹狀表格的畫面，網頁版的批次
+明細本來就是使用者主動點開、看單一股票的批次時才會看到，不算是庫存
+總覽畫面的版面雜訊，跟桌面版拿掉「備註」欄的動機(單一樹狀表格塞太多
+欄位)不完全對應，這裡刻意不比照拿掉。
+
+驗證：本機啟動一個Streamlit測試伺服器(`LOCAL_DB_PATH`/`PORTFOLIO_DB_
+PATH`指向本機檔案)，用Playwright實際截圖庫存清單分頁——「批次數」欄
+不見了，「5日外資」「5日投信」兩欄顏色/數字都跟桌面版offscreen驗證
+的結果完全一致(同一批真實本機庫存資料)，帳面損益/報酬率(%)的顏色也
+如預期(虧損綠色粗體、獲利紅色不加粗)。截圖看完即刪除，測試伺服器
+驗證完也立刻關閉，不留在背景執行。`pytest tests/ -k "inventory or
+portfolio or huang_chip" -q`100個測試全過。
+
+## 「5日外資/投信」改成「近5日力道」方向文字（2026-08-18）
+
+使用者反映「5日外資/投信」顯示的原始累計張數(昨天才剛加的)還要自己看
+正負號才知道是買超還賣超，要求改成直接顯示「持續買進」/「持續賣出」
+文字，欄名也跟著改成「外資近5日力道」「投信近5日力道」。
+
+新增`src.indicators.huang_chip_signals.classify_five_day_flow(value)`：
+純函式，>=0回傳{"text":"持續買進","color":COLOR_BUY}，<0回傳{"text":
+"持續賣出","color":COLOR_SELL}，None/NaN回傳空字串(呼叫端顯示"-")。
+跟既有的`classify_institutional_streak()`(逐日方向連續天數狀態機，
+連買N天/連N賣後轉買...)是兩套不同邏輯——這裡只看「5天加總起來」這一個
+數字的正負號，是更簡化的判讀，刻意保持函式短小不跟streak那套狀態機
+共用。⚠️ 這裡的NaN判斷用`value != value`(不import math/pandas)，不是
+只判斷`value is None`：呼叫端是把None透過`pandas.Series.map()`合併進
+DataFrame欄位，混著其他int值時pandas會把整欄自動轉成float64、None
+變成NaN，不會維持原本的None，只判斷None會漏掉NaN這個實際會發生的
+案例(已用`tests/test_huang_chip_signals.py`的NaN測試案例覆蓋，及早
+補上，沒有讓這個bug流出去)。
+
+桌面版(`desktop/main_window.py`)：`_INVENTORY_TREE_HEADERS`欄名改成
+「外資近5日力道」「投信近5日力道」，從`_INVENTORY_TREE_NUMERIC_
+COLUMNS`移除(改成顯示文字，不是數字，比照SAR狀態欄左對齊+字串排序，
+不再右對齊)。`_format_inventory_row()`/`_style_inventory_flow_
+columns()`都改呼叫`classify_five_day_flow()`，顏色/文字同一個函式
+算出來，不會兩處各自判斷正負號走鐘。
+
+網頁版(`dashboard/app.py`)：`summary_display["foreign_5d"/"invest_
+5d"]`改用`classify_five_day_flow(v)["text"]`；`_style_name_by_
+listing_type_row()`原本靠「格式化字串開頭是不是'-'」判斷正負號的
+`_sign_color()`不再適用(文字內容變成中文方向詞，不是數字)，改成
+`_flow_color()`直接比對「持續買進」/「持續賣出」字面文字對應顏色。
+
+驗證：①`pytest tests/test_huang_chip_signals.py`新增4個測試(None/
+NaN回傳空、正值/0算買進、負值算賣出)全過；②offscreen模式讀真實本機
+庫存確認桌面版表頭正確顯示「外資近5日力道」「投信近5日力道」、文字
+跟顏色符合原始張數正負號(例如8028外資近5日原本+2,094張，這次改版後
+顯示「持續買進」紅字)；③本機Streamlit測試伺服器+Playwright截圖確認
+網頁版同步顯示一致(同一批真實資料、同樣的文字/顏色)，截圖看完即刪除、
+測試伺服器驗證完也立刻關閉。`pytest tests/ -k "inventory or portfolio
+or huang_chip" -q`105個測試全過。
+
+## 庫存清單表格欄寬調整＋「預估賣出成本」改名（2026-08-18）
+
+使用者要求庫存清單樹狀表格：①「名稱」欄要夠長；②「手續費」欄可以
+縮小；③「預估賣出成本」改名成「賣出成本」；④「SAR狀態」「SAR距離%」
+「漲跌幅(%)」欄寬縮小。只影響桌面版(`desktop/main_window.py`)——
+網頁版庫存清單目前沒有「預估賣出成本」這個欄位，不受影響。
+
+`_INVENTORY_TREE_HEADERS`的「預估賣出成本」直接改成「賣出成本」(連帶
+`_StockEditDialog._update_fee_estimate()`docstring裡提到這個欄位名稱
+的地方也一併改)。`_build_inventory_tab()`裡原本全部欄位一律
+`ResizeToContents`(依內容自動撐開寬度)＋「名稱」欄`Stretch`(吃剩餘
+空間)——問題出在「SAR狀態」「漲跌幅(%)」等幾欄的欄名本身比實際內容
+還長(例如「SAR狀態」4個字但內容只有「多頭」/「空頭」2個字)，
+`ResizeToContents`撐出來的寬度比需要的寬，擠壓到「名稱」欄能伸縮的
+空間。改法：比照候選清單checkbox欄(`_CANDIDATE_CHECKBOX_COLUMN`)
+既有的做法，把「漲跌幅(%)」(65px)、「手續費」(55px)、「SAR狀態」
+(60px)、「SAR距離%」(70px)這4欄改成`Fixed`模式+手動`setColumnWidth()`
+給比較窄的固定寬度，讓出來的空間全部進到「名稱」欄的`Stretch`——不用
+特別再把「名稱」欄設最小寬度，其他欄縮小後它自然會變寬，同時滿足
+使用者「名稱要夠長」的要求。
+
+驗證：offscreen模式讀真實本機庫存，用`header.sectionResizeMode(i)`
+逐欄檢查——確認「名稱」是`Stretch`，「漲跌幅(%)」「手續費」「SAR狀態」
+「SAR距離%」是`Fixed`且`columnWidth()`剛好是設定的65/55/60/70px；
+`grep`確認codebase沒有殘留的「預估賣出成本」字樣。offscreen環境缺
+中文字型、`grab()`截圖看不出中文文字內容，改用讀欄寬/resize mode
+數值驗證，比截圖更精確。`pytest tests/ -k "inventory or portfolio or
+huang_chip" -q`105個測試全過(欄寬調整不影響底層資料/測試邏輯)。
+
+## 修正庫存清單「名稱」欄逃命示警圖示造成沒對齊（2026-08-18）
+
+使用者反映庫存清單「名稱」欄沒對齊：有逃命示警的股票名稱前面有🔺，
+沒有的股票名稱直接從欄位最左邊開始，兩種名稱起始位置對不上，難閱讀。
+要求先截圖確認理解、再動手修。
+
+診斷：先嘗試offscreen模式截圖，才發現這個sandbox的offscreen QPA
+plugin完全没有載入任何字型(`QFontDatabase.families()`回傳空清單)，
+中文字全部變成方框(tofu)，看不出實際排版——改成不加`QT_QPA_PLATFORM=
+offscreen`直接跑(這台機器本身是有真實桌面work session的Windows
+環境，不是純無頭容器)，`MainWindow().grab()`就能拿到有正常中文字型
+的真實截圖。第一張截圖清楚重現使用者說的問題：6173信昌電沒有🔺、
+名稱從欄位最左邊開始，其餘4檔("🔺 昇陽半導體"等)名稱因為🔺+空白
+佔位而往右移，五列名稱起始x座標明顯不對齊。
+
+根因：舊寫法是`_format_inventory_row()`直接把🔺emoji字元當純文字
+前綴混進名稱字串(`f"🔺 {name}"`)，有沒有這個前綴會讓字串本身的視覺
+起始位置不同，純文字沒有辦法讓「沒有前綴」的那些列自動補齊等寬的
+空白(emoji的字寬跟一般空白字元對不上，用手動補空格字元也很難精確
+比對emoji的實際渲染寬度)。
+
+修法：改用`QIcon`佔位，不再把🔺混進文字裡。新增`_build_inventory_
+escape_icon(escaped: bool) -> QIcon`：用`QPainter`手繪一個16x16的
+紅色實心三角形(escaped=True)或完全透明的同尺寸空白圖(escaped=False)
+——兩者尺寸一致，`QTreeWidgetItem.setIcon()`後QTreeWidget會幫每一列
+的名稱欄保留同樣寬度的icon版位，文字永遠從icon後面同一個x座標開始，
+不管有沒有警示都對齊。刻意手繪三角形、不直接把🔺emoji畫成圖片，是
+避開字型相依性(emoji實際渲染結果因作業系統/字型設定而異，跟前面
+offscreen環境完全沒字型是同一類「不能依賴字型」的教訓)，向量繪圖
+保證任何環境下大小/顏色一致。兩個icon在`_build_inventory_tab()`
+建一次快取起來(`self._inventory_escape_icon`/`self._inventory_no_
+escape_icon`)，`_populate_inventory_tree()`每次重新整理表格時直接
+重用，不用每次重建pixmap。`_format_inventory_row()`拿掉`has_escape`
+參數，回傳的名稱文字永遠是乾淨的公司名稱本身，不再混雜emoji。
+
+驗證：改完後用同一支截圖腳本(真實視窗、不是offscreen)重新截一次，
+5列名稱("昇陽半導體"/"飛捷"/"信昌電"/"亞翔"/"鴻海")起始x座標完全
+對齊，紅色三角形本身視覺上也正常(實心紅色、跟原本emoji的觀感接近)。
+兩張截圖看完都立刻刪除。`pytest tests/ -k "inventory or portfolio or
+huang_chip" -q`105個測試全過(這次改動只影響顯示層，不影響底層資料)。
+只改桌面版——網頁版(`dashboard/app.py`)的庫存總覽表格用同一招
+`"🔺 " if ... else ""`字串前綴也有一模一樣的對齊問題，但使用者這次
+沒提到網頁版，先不動，之後如果要處理再問。問過使用者後確認網頁版也
+要同步，見下一則記錄。
+
+### 網頁版同步（同日）
+
+使用者確認網頁版也要修。`st.dataframe`(glide-data-grid)沒有桌面版
+QIcon那種「文字前面留icon版位」的機制，改用另一招同樣能保證對齊的
+做法：把🔺拆成獨立的`escape_flag`欄放在「名稱」欄前面，不再混進
+「名稱」欄的文字裡——表格本來就是逐欄各自對齊，獨立欄天生保證每一列
+的「名稱」欄都從同一個x座標起始，不需要模擬emoji的實際渲染寬度(那
+種模擬寬度的做法在瀏覽器環境更不可靠，字型/縮放比例都會讓對齊跑掉)。
+
+`render_inventory_tab()`：`summary_display["escape_flag"]`是新欄，
+有警示的股票值是`"🔺"`、沒有的是空字串；`summary_display["name"]`
+改回單純的公司名稱，不再有`"🔺 " + name`那段字串串接。`column_order`
+在`"stock_id"`跟`"name"`中間插入`"escape_flag"`，`column_config`用
+`st.column_config.Column(" ", width="small")`給它一個空白表頭+最窄
+寬度(不佔用太多版面，純粹當icon列使用)。點「名稱」欄跳轉個股資訊的
+既有邏輯(`col == "name"`)不受影響——新欄的column key是`"escape_flag"`，
+不會被誤判成名稱欄。
+
+驗證：本機Streamlit測試伺服器+Playwright截圖，5列名稱(鴻海/亞翔/
+信昌電/飛捷/昇陽半導體)的「名稱」欄文字起始x座標完全對齊，🔺獨立
+顯示在自己的窄欄裡，跟桌面版視覺效果一致。截圖看完即刪除，測試伺服器
+驗證完也立刻關閉。`pytest tests/ -k "inventory or portfolio or huang_
+chip" -q`105個測試全過(這次改動只影響顯示層)。
+
+## 庫存「成本價」改含買入手續費＋F2快捷鍵改成「新增/編輯」dispatcher（2026-08-19）
+
+使用者提兩個需求：①庫存的成本應該要含買入手續費；②按F2可以新增，
+「新增」按鈕要加上「(F2)」提示。
+
+**成本價含手續費**：追查後發現「帳面損益/報酬率」的計算
+(`_merge_holdings_with_snapshot()`)其實早就把買入手續費算進成本基礎
+了(`total_cost = cost_price*shares+fee`，2026-08-02第二次修正就加上
+了)，實際數字也對得起來(鴻海成本價235.76×210股+手續費24=49,534，跟
+損益+2,577吻合)——问过使用者後確認缺口在「成本價」這個**顯示欄位**
+本身：目前只顯示使用者輸入的原始每股價格，沒有把手續費攤進去，跟
+現價比較時看不出真正的落差。
+
+新增`src.presentation.portfolio_data.effective_cost_price(cost_price,
+shares, fee)`：純函式，回傳`cost_price + fee/shares`(手續費攤到每股)，
+三者任一缺值或shares=0回傳None(呼叫端顯示"-")。⚠️ 刻意只改「顯示」：
+新增/編輯批次的對話框(桌面版`_StockEditDialog`/網頁版`_inventory_lot_
+dialog()`)讀寫的都還是原始`cost_price`(直接查DB，不經過這個函式)，
+編輯時看到的、要改的都還是自己當初輸入的數字，不會被迫先反推回原始
+價格才能編輯。
+
+桌面版(`desktop/main_window.py`)：`_format_inventory_row()`的「成本價」
+欄改用`effective_cost_price()`算出來的值，父列/子列都適用；欄名維持
+簡短的「成本價」不加長，改用`headerItem().setToolTip()`加說明文字。
+網頁版(`dashboard/app.py`)：`summary_display`/`lots_display`的
+`cost_price`欄同步改法，`column_config`用`st.column_config.Column(
+"成本價", help="...")`加同樣的說明tooltip。
+
+**F2快捷鍵**：F2從2026-08-04起就綁定「編輯選取」(比照ref-project慣例)，
+沒有選取任何列時按F2只會跳出「請先選取一筆要編輯的批次」，對使用者
+沒有幫助。改成`_on_inventory_f2_pressed()`這個小dispatcher：完全沒有
+選取任何列(`inventory_tree.selectedItems()`為空)時觸發「新增」，已經
+選取列時維持原本「編輯選取」的行為不變(選到父列、或選了不只一筆的
+提示訊息都還是由`_on_inventory_edit_selected()`自己處理)——不是把F2
+從「編輯」整個換成「新增」，是兩者依情境並存，向下相容原本已經在用
+F2編輯的習慣。「新增」按鈕文字改成「新增(F2)」。只改桌面版，網頁版
+沒有作業系統層級的鍵盤快捷鍵機制，這次沒有對應的網頁版需求。
+
+驗證：①`pytest tests/test_portfolio_data.py`新增3個`effective_cost_
+price()`測試(正常計算/任一缺值回傳None/shares=0回傳None)全過；②真實
+桌面視窗截圖(不是offscreen，見8/18那次「offscreen沒有字型」的教訓，
+這次直接沿用同一招)確認「成本價」欄數字正確(例如8028：260.25+5/40=
+260.375顯示260.38)、「新增(F2)」按鈕文字正確、`hasattr(w, "_on_
+inventory_f2_pressed")`跟`selectedItems()`空清單狀態都確認無誤；
+③本機Streamlit測試伺服器+Playwright截圖確認網頁版「成本價」數字
+(235.88/801.40/208.60/155.06/260.38)跟桌面版完全一致。截圖看完即
+刪除、測試伺服器驗證完也立刻關閉。`pytest tests/ -q`整套1199個測試
+全過。
+
+## 選股「產業別」改成大分類樹狀勾選（2026-08-19）
+
+使用者反映選股分頁的「產業別」篩選細項太多(TWSE/TPEx共50幾種)，一個
+一個勾很麻煩，想要類似樹狀選取的效果——勾大分類(例如「電子類」)就
+自動勾好底下所有相關細項。查證後確認本專案(含`ref-project/`參考專案)
+完全沒有現成的大產業別對照表，FinMind的`industry_category`欄位本身
+也只有細項分類，沒有更上層的分組欄位可用，只能手工歸類。跟使用者
+確認過完整草案(51種細項分成電子類/傳產製造類/生技醫療類/金融類/
+服務消費類/基金憑證類共6組)後拍板實作。
+
+新增`src/presentation/industry_groups.py`：`INDUSTRY_GROUPS`(dict，
+{大分類: [細項...]})純資料表，手工歸類、非官方來源，之後DB出現新的
+細項產業別名稱要手動補進這份清單。`group_industries(all_industries)`
+把`chart_data.list_industries()`查到的實際細項清單依這份分類切開，
+回傳(分組後的dict, 沒被任何分類收錄的細項清單)，用真實本機DB驗證過
+目前51種細項全部有被涵蓋(ungrouped為空)。⚠️ TWSE/TPEx對同一種產業別
+常有些微不同命名(例如上市「其他電子業」/上櫃「其他電子類」)，這裡
+兩種寫法都各自列出來，不強行合併，避免跟`stocks.industry`欄位裡的
+原始字串比對失敗。
+
+桌面版(`desktop/main_window.py`)：`_CheckableComboBox`新增
+`set_items_grouped()`，支援兩層分組——大分類header(粗體字，可勾選)
+底下接著縮排(全形空白前綴)的細項，勾大分類會連動勾選/取消底下所有
+細項，勾/取消任一細項也會回頭更新所屬大分類header是否該顯示為勾選
+(細項全勾才算大分類勾選，不做部分勾選的視覺樣式)。`checked_items()`
+跳過大分類header列，只回傳實際細項(用`UserRole`存的原始文字，不含
+縮排全形空白，確保跟`df["industry"]`比對/顯示摘要文字都是乾淨的
+產業別名稱)。`industry_filter_combo`建構時改呼叫`set_items_grouped()`
+取代`set_items()`。
+
+網頁版(`dashboard/app.py`)：Streamlit的`st.multiselect`沒有原生樹狀
+元件，改成`st.popover("📂 依大產業別快速勾選")`裡放一個「大產業別」
+多選框，`on_change`回呼把選到的大分類底下所有細項合併進既有的
+`filter_industries`(「產業別」多選框的session_state)——⚠️ 刻意只做
+「新增」方向，不會因為在快速勾選裡取消大分類就自動移除「產業別」裡
+已經勾的細項，避免使用者用「產業別」多選框手動微調後，被這個快速
+勾選工具的移除邏輯蓋掉；使用者仍可以隨時到「產業別」多選框裡個別
+取消不要的細項。
+
+驗證：①`pytest tests/test_industry_groups.py`新增4個測試(分組無重複
+歸屬/正確切分已知未知細項/沒有匹配的分類不出現在結果/空輸入)全過；
+②offscreen模式對`_CheckableComboBox`直接呼叫`_on_item_pressed()`
+模擬點擊，驗證勾大分類連動細項、取消大分類連動取消、勾單一細項後
+大分類正確保持未勾選(部分勾選)、勾滿所有細項後大分類自動變勾選、
+未分類項目(ungrouped)正常運作；③用`QTest.mouseClick()`模擬真實滑鼠
+點擊(不是直接呼叫internal method)驗證端對端事件流程正確；④真實桌面
+視窗截圖確認下拉選單視覺呈現(全形空白縮排+粗體大分類header)符合
+預期；⑤本機Streamlit測試伺服器+Playwright實際點選「電子類」，確認
+「產業別」多選框正確被自動填入光電業/其他電子業/其他電子類/半導體業/
+數位雲端/數位雲端類/資訊服務業/通信網路業/電子工業等細項。截圖看完
+即刪除、測試伺服器驗證完也立刻關閉。`pytest tests/ -q`整套1203個
+測試全過。
+
+## 修正_CheckableComboBox點選單外空白處關不掉（2026-08-19）
+
+使用者實測上面那次改版後的「產業別」下拉選單，發現點選單以外的空白
+處完全沒反應，只有按Esc才關得掉。查`_CheckableComboBox.hidePopup()`
+(桌面版desktop/main_window.py，2026-08-02就存在的既有覆寫，這次
+產業別改成樹狀分組沒有動到這段邏輯)，發現原本的docstring寫「選單
+本身仍是獨立的popup視窗，點擊選單以外的地方還是會透過視窗系統自己的
+失焦機制關閉，不受這裡覆寫影響」——這個假設是錯的：`hidePopup()`
+被整個no-op掉(`pass`)，完全沒呼叫`super().hidePopup()`，不管是「點
+選單裡的項目」還是「點選單外面」都會觸發同一個`hidePopup()`呼叫，
+純no-op沒辦法分辨這兩種情況，兩者都被攔住關不掉；Esc之所以還有效，
+是Qt的popup視窗(`Qt.Popup`旗標)收到Escape鍵時會直接關閉視窗本身，
+不經過combobox的`hidePopup()`這條路徑，沒被攔到。
+
+修法：`hidePopup()`呼叫當下用`QCursor.pos()`判斷滑鼠目前是否還在
+下拉選單(`view()`)的範圍內——點選單項目那一刻，滑鼠一定還停在剛點的
+項目上(在view範圍內)，維持原本「保持開啟」的行為；點選單以外的地方
+觸發`hidePopup()`時，滑鼠位置已經在view範圍外，這時才真的呼叫
+`super().hidePopup()`關閉選單。不用額外的旗標或event filter，直接
+用滑鼠當下位置判斷，邏輯簡單。
+
+驗證：真實桌面視窗(不是offscreen)+`QCursor.setPos()`模擬兩種情境——
+①滑鼠位置設在view範圍內時呼叫`hidePopup()`，選單維持開啟；②滑鼠
+位置設在view範圍外時呼叫`hidePopup()`，選單正確關閉。另外用
+`QTest.mouseClick()`模擬真實點擊「電子類」大分類項目，確認選單維持
+開啟(不會點一個項目就整個關掉)、且checked_items()正確回傳該分類底下
+全部12種細項——修正沒有破壞原本「點項目不關閉選單」的既有行為。
+`pytest tests/ -q`整套1203個測試全過(這次改動是純UI互動邏輯，不影響
+任何有測試覆蓋的資料/篩選邏輯)。
+
+## 緊急退回上面的hidePopup()修正：造成選單卡住＋checkbox點了沒反應（2026-08-19）
+
+使用者實測上一則的修正後，回報兩個嚴重問題：①點「產業別」下拉選單會
+卡住；②選單裡的checkbox點了沒作用。這比原本「只有Esc能關閉」的小
+不便嚴重得多(選單卡死等於整個篩選功能不能用)，立刻查證+退回。
+
+推測根因：`hidePopup()`原本是完全no-op(2026-08-02起穩定可用)，上一則
+改成有條件呼叫`super().hidePopup()`(滑鼠在view範圍外才真的關閉)——這個
+`super().hidePopup()`很可能是在Qt內部「popup正在關閉」的事件處理流程
+「進行中」被重新呼叫(re-entrant)：使用者點選單裡任一項目時，Qt自己
+內部的mouse press/release處理鏈本來就會呼叫`hidePopup()`一次，我們的
+覆寫在這個呼叫「還沒處理完」的當下又呼叫`super().hidePopup()`，跟Qt
+自己的popup grab/關閉時序衝突，導致整個事件迴圈卡住。⚠️ 這個推測沒有
+100%確認底層機制(PySide6/Qt原始碼沒有深入追蹤)，但「退回舊版就恢復
+正常」這個事實本身已經足以確認問題出在那次修改，不需要先百分之百查清
+機制才能動手退回。
+
+處理：`hidePopup()`退回成2026-08-02的原始版本(完全no-op、不呼叫
+`super()`)，拿掉先前新增的`QCursor` import(不再使用)。「點選單以外
+空白處關不掉，只有Esc有效」的既有限制因此恢復——這是已知、可接受的
+限制，優先度遠低於「選單卡死」這種功能性regression。docstring裡明確
+記錄這次的教訓：之後如果還要處理「點外面關閉」，要用更保守的方式
+(例如另外裝event filter，完全不碰`hidePopup()`這條路徑本身)，不要
+再嘗試在`hidePopup()`裡有條件呼叫`super()`。
+
+驗證：真實桌面視窗(不是offscreen)+`QTest.mouseClick()`模擬真實點擊——
+①點「電子類」大分類checkbox，選單維持開啟、正確勾選底下12種細項；
+②接著點單一細項「光電業」的checkbox取消勾選，選單依然維持開啟、
+`checked_items()`正確反映少了光電業(其餘11種還在)——確認兩層(大分類/
+細項)的checkbox點擊都正常運作、選單不會卡住。`pytest tests/ -q`
+整套1203個測試全過。
+
+⚠️ **這次驗證的盲點(緊接著下一則記錄修正)**：上面的`QTest.mouseClick()`
+座標用的是`rect.center()`(整列置中)，checkbox圖示實際畫在列的最左側、
+跟置中位置差了一大截——等於這次驗證從頭到尾都只點到「文字區域」，沒有
+真的點過checkbox圖示本身，沒發現「精準點在checkbox上」是完全不同的
+互動路徑，才會有下一則記錄使用者實測回報的bug。教訓：驗證checkbox類
+UI互動時，要對「點文字/點整列」跟「精準點中checkbox圖示本身」分開
+驗證，不能假設兩者行為一致。
+
+## 修正：精準點checkbox圖示時，大分類只有自己打勾、細項不會連動（2026-08-19）
+
+使用者實測上一則的樹狀勾選，發現「直接只點checkbox的話，只有parent
+打勾，細項都不會勾」——用文字區域點擊測試時完全正常，只有精準點在
+checkbox圖示本身時才會這樣，這正是上一則記錄結尾補記的驗證盲點。
+
+根因：`_on_item_pressed()`(綁在`view().pressed`訊號，任何點擊row的
+按下事件都會觸發)原本無條件手動`toggle`打勾狀態、再执行cascade邏輯。
+但Qt原生的item delegate(`QStyledItemDelegate::editorEvent()`)本來就
+會處理「精準點中checkbox圖示」這個情境，自己呼叫`model->setData()`
+切換打勾狀態——兩邊搶著改同一個model data：我們的手動toggle先把
+大分類+底下細項都設成Checked(cascade跑過一次)，Qt原生的checkbox
+toggle機制隨後又直接對大分類這一格呼叫一次`setData()`(它不知道
+cascade這回事，只是單純把这一格的狀態再切一次)，兩者互相干擾，
+最終結果就是細項的cascade結果被「大分類這一格Qt原生又切了一次」的
+效果蓋掉/搞亂，兜不出正確結果。
+
+修法(兩處改動)：
+①`_on_item_pressed()`改成先用`view.style().subElementRect(SE_
+ItemViewItemCheckIndicator, ...)`(搭配`delegate.initStyleOption()`
+把「這一格是checkbox、目前打勾狀態」的資訊補進option，光靠`view.
+initViewItemOption()`不夠，算出來的checkbox矩形會是無效的(0,0,0,0)）
+算出checkbox圖示的實際命中範圍，滑鼠這次按下的位置如果就在這個範圍
+內，代表Qt原生toggle機制會自己處理，這裡完全不插手，避免雙重觸發；
+沒命中(點在文字或列的其他地方)才由這裡手動`setCheckState()`切換。
+②cascade(大分類↔細項連動)/「全部」互斥邏輯整個搬出`_on_item_
+pressed()`，改成監聽`model().itemChanged`訊號(新增`_on_item_
+changed()`)——不管是`_on_item_pressed()`手動切換、還是Qt原生checkbox
+點擊觸發的切換，兩種來源最終都會走到同一個`itemChanged`訊號，統一
+處理cascade，不用去猜/處理兩種觸發來源各自的時序，也不會有兩條分岔
+邏輯要維護。用`self._syncing`旗標防止cascade呼叫`setCheckState()`
+改其他列時觸發的`itemChanged`又遞迴重新跑一次；`set_items()`/`set_
+items_grouped()`建構清單時也借用同一個旗標暫時關閉cascade。
+
+驗證：真實桌面視窗+`QTest.mouseClick()`，這次特別針對「精準點中
+checkbox圖示本身」(用`subElementRect()`實際算出checkbox的中心點座標，
+不是用`rect.center()`)——①點「電子類」大分類的checkbox，正確勾選
+底下全部12種細項；②接著精準點單一細項「光電業」的checkbox取消勾選，
+剩11種、大分類checkbox正確變回未勾選(部分勾選狀態)；③再點一次「光電業」
+checkbox補勾回去，滿12種、大分類checkbox正確變回已勾選；④再點一次
+「電子類」checkbox取消，全部清空、「全部」自動變回勾選——全程選單
+都維持開啟，沒有卡住。另外用文字區域點擊(不是checkbox)重新測過一次，
+確認兩種點擊方式都正常。純平面模式(`set_items()`，目前app裡實際上沒有任何呼叫端在用、只是
+保留通用API)也額外用真實流程測過「全部」互斥邏輯正常。
+`pytest tests/ -q`整套1203個測試全過。
+
+## 補回「點選單以外空白處關閉」，這次用event filter而不是動hidePopup()（2026-08-19）
+
+使用者測完上面兩則checkbox修正後，回報「產業別的下拉選單打開後還是
+一樣收不回去」，語氣明顯不耐——查證後確認這是先前(同一天稍早)已知、
+刻意保留的限制：「點選單以外空白處關不掉，只有Esc有效」，因為原本
+嘗試的修法(在`hidePopup()`裡有條件呼叫`super().hidePopup()`)會讓
+整個視窗卡住而緊急退回，退回時只在`ai/PLAN.md`記錄、沒有在回覆使用者
+的訊息裡講清楚「這個限制會繼續存在，是刻意的取捨」，導致使用者以為
+是還沒修好/沒驗證，這次的溝通缺口要記取。
+
+這次改用完全不同的路徑，不再嘗試碰`hidePopup()`本身：`__init__()`裡
+對`QApplication.instance()`裝一個app-wide的`eventFilter`，監聽全域的
+`QEvent.Type.MouseButtonPress`——選單開著、且這次按下的位置不在選單
+(`view()`)也不在combobox本身範圍內時(要排除combobox本身，不然點下拉
+箭頭「開啟」選單那次按下也會被誤判成「點外面」)，直接呼叫`QComboBox.
+hidePopup(self)`(明確指定基底類別、繞過`self.hidePopup()`的虛擬分派，
+不會又跑回我們自己覆寫的no-op版本)關閉選單。這個呼叫發生在event
+filter攔截到的一個全新mouse press事件、獨立的呼叫堆疊裡，不是像先前
+那次「在Qt自己正在處理popup關閉流程的callback『裡面』又呼叫一次」，
+避開了先前造成卡死的re-entrant場景。
+
+驗證這次特別加碼，不只測「一次成功」，還測「重複多次不會慢慢累積出
+問題」：真實桌面視窗(不是offscreen)、`QTest`模擬——①開啟→點選單外
+空白處→確認關閉、視窗沒卡住、後續事件處理正常；②重新開啟→點選單裡
+的項目(cascade邏輯)→確認選單維持開啟、checkbox正確連動(跟前一則
+checkbox修正共同運作正常，不會互相干擾)；③再次點外面關閉；④重新
+開啟→按Esc關閉(確認沒有破壞既有的Esc關閉路徑)；⑤點combobox本身
+(不是選單外)確認不會被誤判成「點外面」而立刻關掉剛開啟的選單；
+⑥額外做20次「開啟→點外面關閉」的壓力測試迴圈，全程7.85秒完成、
+每一輪都正確開關、沒有隨著次數增加而變慢或卡住(排除「一開始正常、
+用久了才卡」這種延遲性問題)。`pytest tests/ -q`整套1203個測試全過。
+
+這次的經驗教訓：①先前的hidePopup()改壞事故已經知道「有條件呼叫
+super().hidePopup()」這條路徑有re-entrant風險，這次改用完全不同的
+機制(event filter，不碰hidePopup本身)才敢重新嘗試同一個功能需求；
+②除了自動化測試，這次做了20輪重複壓力測試，不是只驗證單次成功就
+結案；③退回/保留已知限制時，要在回覆使用者的訊息裡明講「這個限制
+會繼續存在」，不能只寫進PLAN.md，避免使用者誤以為是還沒處理好。
+
+## 桌面版啟動時成交量欄位 KeyError：連假候選日期沒有股價資料（2026-09-28）
+
+使用者執行`python desktop/main.py`時，`MainWindow.__init__()`呼叫
+`_reload_candidates()`，在成交量篩選`df["volume"]`處收到
+`KeyError: 'volume'`。使用者指出9/25~9/28是中秋連假、台灣沒有開市；查詢
+本機`data/tw_stock.db`確認這個時間點的候選資料日期確實比股價資料多一天：
+`daily_candidates`最新日期是2026-09-25(1,971筆)，但`stock_prices`最新日期
+是2026-09-24(2,251筆)，9/25沒有任何股價列。這與連假期間出現非交易日候選
+日期的推測吻合；候選資料為何會在無當日股價時仍寫入，尚未追查到產生端。
+
+崩潰的直接原因已由資料與程式路徑確認：候選日期清單以`daily_candidates`
+為來源，啟動時會選到最新日期；`load_stock_universe_for_date()`以當日
+`stock_prices`做INNER JOIN，查無資料便提早回傳空的`raw_df`，欄位只有SQL查詢
+的`today_volume`等名稱，還沒有正常結果整理後的`volume`欄。桌面版的成交量
+門檻預設為10張，因此空DataFrame仍會執行`df["volume"]`篩選，造成啟動失敗。
+正常有資料的路徑會把`today_volume`整理成`volume`，所以不是一般股價列缺少
+成交量，也不是資料庫schema問題。
+
+首次調查時尚未修正。後續修正與驗證記錄如下。
+
+## 休市日曆接入pipeline並修正空候選清單啟動錯誤（2026-09-28）
+
+使用者指出9/25~9/28是中秋連假，並提醒專案已有TWSE休市日期來源。確認
+`src/data/trading_calendar.py`會解析TWSE官方`holidaySchedule`年度休市日曆，原先
+只供K線圖的x軸略過假日使用；`fetch_today_twse()`沒有查這份清單，只靠官方股價端點與
+yfinance備援都沒有資料才判定非交易日。本機DB另確認`daily_candidates`最新日期為
+2026-09-25(1,971筆)，而`stock_prices`最新日期為2026-09-24(2,251筆)，9/25沒有
+任何股價列。
+
+- `scripts/daily_pipeline.py`：`fetch_today_twse()`在呼叫TWSE/yfinance前先查該年度
+  官方休市日清單。日期命中時回傳`(False, False)`，不抓價量/法人/資券資料；呼叫端沿用
+  既有非交易日流程，寫入pipeline狀態並將資料抓取日誌標成`skipped`。若官方日曆暫時
+  查詢失敗，印出警告並退回原有資料來源判斷，避免日曆API故障阻斷正常交易日更新。
+- `src/data/trading_calendar.py`：更新模組用途說明，標明年度官方休市日曆也供每日pipeline
+  使用；日期由TWSE官方年度資料動態取得，不硬編單一年度/單一假日。
+- `src/presentation/chart_data.py`：沒有候選日期、或目標日期沒有任何股價時，都回傳與正常
+  結果一致的欄位集合，包含`volume`/`signal_name`等欄位；正常結果也重用同一欄位定義。
+  這修復既有DB最新候選日沒有同日股價時桌面版啟動即`KeyError: 'volume'`的問題，
+  不需要刪改使用者資料庫。`list_candidate_dates()`也改成只列出同日確有股價資料的日期，
+  因此既有的9/25孤立候選紀錄不會成為啟動預設，日期選單會預設回到9/24有效交易日。
+- 測試：`tests/test_daily_pipeline.py`驗證命中休市日不呼叫TWSE/yfinance、pipeline狀態與
+  資料抓取日誌正確標成`skipped`，以及日曆API失敗時會回退；`tests/test_chart_data.py`
+  驗證兩種空結果仍含標準欄位且成交量門檻可正常套用，日期選單會排除完全沒有股價的
+  日期。`tests/test_daily_pipeline.py`65項、`tests/test_chart_data.py`132項皆通過。
