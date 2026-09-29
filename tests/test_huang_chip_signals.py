@@ -5,6 +5,7 @@ from src.indicators.huang_chip_signals import (
     COLOR_DEFAULT,
     COLOR_GRAY,
     COLOR_SELL,
+    classify_five_day_flow,
     classify_holder_change,
     classify_institutional_streak,
     classify_ma_price_position,
@@ -88,6 +89,33 @@ def test_sum_institutional_flow_lots_rounds_half_up_like_js_math_round():
 
 def test_sum_institutional_flow_lots_only_uses_first_n_days():
     assert sum_institutional_flow_lots([100000, 999999999], 1) == 100
+
+
+# ============================================================
+# classify_five_day_flow（庫存清單「近5日力道」欄，2026-08-18新增）
+# ============================================================
+
+
+def test_classify_five_day_flow_none_returns_blank():
+    assert classify_five_day_flow(None) == {"text": "", "color": COLOR_DEFAULT}
+
+
+def test_classify_five_day_flow_nan_returns_blank():
+    """呼叫端常把None透過pandas合併進DataFrame欄位，混著int值時會被轉成NaN而不是
+    維持None(見classify_five_day_flow()的說明)，這裡確認NaN也視為查無資料。"""
+    assert classify_five_day_flow(float("nan")) == {"text": "", "color": COLOR_DEFAULT}
+
+
+def test_classify_five_day_flow_positive_is_buying():
+    assert classify_five_day_flow(100) == {"text": "持續買進", "color": COLOR_BUY}
+
+
+def test_classify_five_day_flow_zero_is_buying():
+    assert classify_five_day_flow(0) == {"text": "持續買進", "color": COLOR_BUY}
+
+
+def test_classify_five_day_flow_negative_is_selling():
+    assert classify_five_day_flow(-1) == {"text": "持續賣出", "color": COLOR_SELL}
 
 
 # ============================================================

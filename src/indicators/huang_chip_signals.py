@@ -132,6 +132,28 @@ def sum_institutional_flow_lots(net_values_desc: list[float], n: int) -> int:
     return _js_round(sum(net_values_desc[:n]) / 1000)
 
 
+def classify_five_day_flow(value: float | None) -> dict:
+    """近5日累計買賣超力道(sum_institutional_flow_lots(net, 5)算出的數字)簡化成
+    方向文字：>=0(累計淨買超)「持續買進」、<0(累計淨賣超)「持續賣出」。
+
+    ⚠️ 跟classify_institutional_streak()是兩套不同邏輯：那個是逐日方向的連續天數
+    狀態機(連買N天/連N賣後轉買...)，這裡只看「5天加總起來」這一個數字的正負號，
+    是更簡化的判讀——2026-08-18新增，使用者要求庫存清單的「5日外資/投信」欄從
+    顯示累計張數改成顯示這種簡化方向文字，原始張數不再顯示。
+
+    value為None或NaN(查無資料，例如這檔股票近期完全沒有法人買賣超紀錄)回傳空
+    字串，比照其餘classify_*函式「查無資料回傳空字串」的既有慣例，呼叫端顯示
+    "-"。⚠️ 這裡刻意也接受NaN(不是只判斷None)：呼叫端(desktop/main_window.py的
+    _refresh_inventory_tab()/dashboard/app.py的render_inventory_tab())是把
+    None透過pandas.Series.map()合併進DataFrame欄位，混著其他int值時pandas會把
+    整欄自動轉成float64、None變成NaN，不會維持原本的None，用`value != value`
+    (NaN不等於自己，是不依賴math/pandas import的NaN判斷寫法)一併擋掉。
+    """
+    if value is None or value != value:
+        return {"text": "", "color": COLOR_DEFAULT}
+    return {"text": "持續買進", "color": COLOR_BUY} if value >= 0 else {"text": "持續賣出", "color": COLOR_SELL}
+
+
 def _format_price_like_js(value: float) -> str:
     """JS的字串串接(number + "")對整數值不會顯示".0"(例如698.0顯示成"698")，Python的
     str(698.0)則會是"698.0"——這裡讓整數值的收盤價顯示格式跟原JS一致。
