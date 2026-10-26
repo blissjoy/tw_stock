@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-from src.data import portfolio_storage, storage, turso_client
+from src.data import portfolio_storage, sar_simulation_storage, storage, turso_client
 
 
 def get_default_connection(local_db_path: str | None = None):
@@ -49,3 +50,11 @@ def get_default_portfolio_connection(local_db_path: str | None = None):
     if local_db_path:
         return portfolio_storage.init_portfolio_db(local_db_path, check_same_thread=False)
     return turso_client.get_portfolio_connection()
+
+
+def get_default_sar_simulation_connection(local_db_path: str | None = None):
+    """Return a local-only database connection isolated from real portfolio data."""
+    local_db_path = local_db_path or os.environ.get("SAR_SIMULATION_DB_PATH")
+    if local_db_path is None:
+        local_db_path = Path(__file__).resolve().parents[2] / "data" / "sar_simulation.db"
+    return sar_simulation_storage.init_sar_simulation_db(local_db_path, check_same_thread=False)

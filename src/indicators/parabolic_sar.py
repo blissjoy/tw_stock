@@ -46,18 +46,20 @@ def compute_sar(
     資料筆數(n)少於2天時回傳兩個空Series；剛好2天時用第2天是否創高判斷多空、SAR數值留NaN
     (第一天SAR還沒有計算基礎)。
     """
-    n = len(high)
+    high_values = high.to_numpy(dtype=float)
+    low_values = low.to_numpy(dtype=float)
+    n = len(high_values)
     if n < 2:
         return pd.Series(dtype=bool), pd.Series(dtype=float, index=high.index)
     if n == 2:
-        bull = bool(high.iloc[1] >= high.iloc[0])
+        bull = bool(high_values[1] >= high_values[0])
         sar_values = pd.Series([np.nan, np.nan], index=high.index)
         return pd.Series([bull, bull], index=high.index), sar_values
 
     sar = np.zeros(n)
-    hp = float(max(high.iloc[0], high.iloc[1]))
-    lp = float(min(low.iloc[0], low.iloc[1]))
-    bull = bool(high.iloc[1] >= high.iloc[0])
+    hp = float(max(high_values[0], high_values[1]))
+    lp = float(min(low_values[0], low_values[1]))
+    bull = bool(high_values[1] >= high_values[0])
     if bull:
         sar[0] = sar[1] = lp
     else:
@@ -65,8 +67,8 @@ def compute_sar(
     af = start
 
     for i in range(2, n):
-        current_high = float(high.iloc[i])
-        current_low = float(low.iloc[i])
+        current_high = high_values[i]
+        current_low = low_values[i]
         prev_sar = sar[i - 1]
         if bull:
             sar_i = prev_sar + af * (hp - prev_sar)
@@ -94,8 +96,8 @@ def compute_sar(
                     af = min(af + inc, max_af)
 
     sar_values = pd.Series(sar, index=high.index)
-    sar_bull_list = [bool(sar_values.loc[idx] <= float(low.loc[idx])) for idx in sar_values.index]
-    return pd.Series(sar_bull_list, index=high.index, dtype=bool), sar_values
+    sar_bull = sar_values.to_numpy() <= low_values
+    return pd.Series(sar_bull, index=high.index, dtype=bool), sar_values
 
 
 def sar_flip_days_ago(sar_bull: pd.Series) -> int | None:

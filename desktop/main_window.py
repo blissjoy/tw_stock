@@ -15,6 +15,7 @@ import re
 import sqlite3
 import tempfile
 import urllib.parse
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -79,9 +81,36 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
-from src.data import finmind_client, portfolio_storage, storage
-from src.data.connection import get_default_connection, get_default_portfolio_connection
+from src.data import finmind_client, portfolio_storage, sar_simulation_storage, storage, trading_calendar
+from src.data.connection import (
+    get_default_connection,
+    get_default_portfolio_connection,
+    get_default_sar_simulation_connection,
+)
 from src.data.yfinance_client import TAIEX_STOCK_ID
+from src.backtest.sar_portfolio import (
+    ADD_BUDGET,
+    BUY_FEE_RATE,
+    ENTRY_BUDGET,
+    INITIAL_CAPITAL,
+    MINIMUM_FEE,
+    SAR_STRATEGY_VERSION,
+    SELL_FEE_RATE,
+    SELL_TAX_RATE,
+    ExcludedStalePosition,
+    SarSimulationResult,
+    SarStrategyParams,
+    exclude_stale_positions,
+    load_sar_market_data,
+    load_sar_market_data_with_recomputed_indicators,
+    run_sar_portfolio_simulation,
+)
+from src.backtest.sar_validation import HistoricalValidationResult, run_sar_historical_validation
+from src.backtest.sar_scenario import (
+    ForwardScenarioResult,
+    run_sar_historical_path_scenarios,
+    select_historical_scenario_windows,
+)
 from src.indicators.huang_chip_signals import COLOR_BUY, COLOR_SELL, classify_five_day_flow
 from src.indicators.institutional_flow import INSTITUTIONAL_STREAK_THRESHOLD
 from src.indicators.moving_average import FULL_PERIODS
@@ -101,15 +130,16 @@ from src.screener.daily_screener import (
 TAIEX_DISPLAY_NAME = "台股加權指數"
 
 # 分頁索引，對應_build_ui()裡addTab()的呼叫順序：大盤/選股/個股資訊/產業輪動/庫存清單/
-# 觀察清單/回補資料/日誌。
+# 觀察清單/實戰模擬/回補資料/日誌。
 TAB_MARKET = 0
 TAB_SCREENER = 1
 TAB_STOCK_DETAIL = 2
 TAB_INDUSTRY_ROTATION = 3
 TAB_INVENTORY = 4
 TAB_WATCHLIST = 5
-TAB_BACKFILL = 6
-TAB_LOG = 7
+TAB_SAR_SIMULATION = 6
+TAB_BACKFILL = 7
+TAB_LOG = 8
 
 # 「選股」分頁「市場：」下拉選單顯示文字對應chart_data.load_stock_universe_for_date()
 # 的market參數值；"全部"不在這裡，get()查不到就是None(不限制)。
@@ -1263,6 +1293,235 @@ class StockInfoRefreshWorker(QThread):
                 conn.close()
 
 
+class SarSimulationWorker(QThread):
+    """Run the full-market historical simulation off the UI thread."""
+
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        start_date: str,
+        end_date: str,
+        initial_capital: float,
+        params: SarStrategyParams,
+    ) -> None:
+        super().__init__()
+        self._start_date = start_date
+        self._end_date = end_date
+        self._initial_capital = initial_capital
+        self._params = params
+
+    def run(self) -> None:
+        market_conn = None
+        simulation_conn = None
+        try:
+            market_conn = get_default_connection()
+            market_data = load_sar_market_data(market_conn, self._start_date, self._end_date)
+            result = run_sar_portfolio_simulation(
+                market_data, self._start_date, self._end_date,
+                initial_capital=self._initial_capital,
+                params=self._params,
+            )
+
+            simulation_conn = get_default_sar_simulation_connection()
+            sar_simulation_storage.save_simulation_result(
+                simulation_conn,
+                result,
+                strategy_params={
+                    "version": SAR_STRATEGY_VERSION,
+                    "initial_capital": self._initial_capital,
+                    "entry_budget": ENTRY_BUDGET,
+                    "add_budget": ADD_BUDGET,
+                    "buy_fee_rate": BUY_FEE_RATE,
+                    "sell_fee_rate": SELL_FEE_RATE,
+                    "minimum_fee": MINIMUM_FEE,
+                    "sell_tax_rate": SELL_TAX_RATE,
+                    **asdict(self._params),
+                },
+            )
+            self.finished_ok.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            if market_conn is not None:
+                market_conn.close()
+            if simulation_conn is not None:
+                simulation_conn.close()
+
+
+class SarValidationWorker(QThread):
+    """Recompute historical indicators and run a chronological holdout validation."""
+
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        reference_start: str,
+        reference_end: str,
+        holdout_start: str,
+        holdout_end: str,
+        initial_capital: float,
+        params: SarStrategyParams,
+    ) -> None:
+        super().__init__()
+        self._reference_start = reference_start
+        self._reference_end = reference_end
+        self._holdout_start = holdout_start
+        self._holdout_end = holdout_end
+        self._initial_capital = initial_capital
+        self._params = params
+
+    def run(self) -> None:
+        market_conn = None
+        simulation_conn = None
+        try:
+            market_conn = get_default_connection()
+            market_data = load_sar_market_data_with_recomputed_indicators(
+                market_conn, self._holdout_end,
+            )
+            result = run_sar_historical_validation(
+                market_data,
+                self._reference_start,
+                self._reference_end,
+                self._holdout_start,
+                self._holdout_end,
+                self._initial_capital,
+                self._params,
+            )
+            simulation_conn = get_default_sar_simulation_connection()
+            sar_simulation_storage.save_historical_validation(simulation_conn, result)
+            self.finished_ok.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            if market_conn is not None:
+                market_conn.close()
+            if simulation_conn is not None:
+                simulation_conn.close()
+
+
+class SarScenarioWorker(QThread):
+    """Continue the latest strategy portfolio along one selected historical path."""
+
+    finished_ok = Signal(object)
+    failed = Signal(str)
+    status = Signal(str)
+
+    def __init__(self, horizon_days: int, scenario_name: str) -> None:
+        super().__init__()
+        self._horizon_days = horizon_days
+        self._scenario_name = scenario_name
+
+    def run(self) -> None:
+        market_conn = None
+        simulation_conn = None
+        try:
+            simulation_conn = get_default_sar_simulation_connection()
+            base_result = sar_simulation_storage.load_simulation_result(simulation_conn)
+            if base_result is None:
+                raise ValueError("請先在「策略模擬」執行並保存一次模擬，才能接續推演。")
+            if base_result.strategy_version != SAR_STRATEGY_VERSION:
+                raise ValueError(
+                    f"最近一次策略模擬使用版本 {base_result.strategy_version}，"
+                    f"目前策略版本為 {SAR_STRATEGY_VERSION}；請先重新執行策略模擬。"
+                )
+
+            market_conn = get_default_connection()
+            self.status.emit(f"正在挑選「{self._scenario_name}」歷史行情...")
+            index_rows = market_conn.execute(
+                """
+                SELECT date, close
+                FROM stock_prices
+                WHERE stock_id = ? AND date <= ?
+                ORDER BY date
+                """,
+                (TAIEX_STOCK_ID, base_result.end_date),
+            ).fetchall()
+            index_data = pd.DataFrame(index_rows, columns=["date", "close"])
+            windows = select_historical_scenario_windows(
+                index_data,
+                base_result.end_date,
+                self._horizon_days,
+            )
+            windows = [window for window in windows if window.name == self._scenario_name]
+            if not windows:
+                raise ValueError(f"找不到所選情境「{self._scenario_name}」的可用行情。")
+
+            current_quotes = pd.DataFrame(
+                market_conn.execute(
+                    """
+                    SELECT s.stock_id, s.name, sp.close, sp.date AS quote_date
+                    FROM stocks s
+                    JOIN stock_prices sp
+                      ON sp.stock_id = s.stock_id
+                     AND sp.date = (
+                        SELECT MAX(current_price.date)
+                        FROM stock_prices current_price
+                        WHERE current_price.stock_id = s.stock_id
+                          AND current_price.date <= ?
+                     )
+                    WHERE s.market IN ('TWSE', 'TPEx')
+                    """,
+                    (base_result.end_date,),
+                ).fetchall(),
+                columns=["stock_id", "name", "close", "quote_date"],
+            )
+
+            source_market_data: dict[tuple[str, str], pd.DataFrame] = {}
+            for window in windows:
+                self.status.emit(
+                    f"正在載入「{window.name}」歷史行情（{window.start_date}～{window.end_date}）..."
+                )
+                rows = market_conn.execute(
+                    """
+                    SELECT sp.date, sp.stock_id, s.name, sp.open, sp.high, sp.low,
+                           sp.close, sp.volume
+                    FROM stock_prices sp
+                    JOIN stocks s ON s.stock_id = sp.stock_id
+                    WHERE sp.date BETWEEN ? AND ?
+                      AND s.market IN ('TWSE', 'TPEx')
+                    ORDER BY sp.stock_id, sp.date
+                    """,
+                    (window.warmup_start_date, window.end_date),
+                ).fetchall()
+                source_market_data[(window.start_date, window.end_date)] = pd.DataFrame(
+                    rows,
+                    columns=[
+                        "date", "stock_id", "name", "open", "high", "low", "close", "volume",
+                    ],
+                )
+
+            self.status.emit(f"正在推演「{self._scenario_name}」並執行策略規則...")
+            calendar_end = pd.bdate_range(
+                pd.Timestamp(base_result.end_date) + pd.Timedelta(days=1),
+                periods=self._horizon_days + 30,
+            )[-1]
+            holidays = set(trading_calendar.holidays_between(
+                pd.Timestamp(base_result.end_date).year,
+                calendar_end.year,
+            ))
+            result = run_sar_historical_path_scenarios(
+                index_data,
+                source_market_data,
+                current_quotes,
+                base_result,
+                self._horizon_days,
+                holidays=holidays,
+                selected_scenario=self._scenario_name,
+            )
+            sar_simulation_storage.save_forward_scenario_result(simulation_conn, result)
+            self.finished_ok.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            if market_conn is not None:
+                market_conn.close()
+            if simulation_conn is not None:
+                simulation_conn.close()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1284,10 +1543,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "庫存清單資料庫連線失敗", str(exc))
 
+        self.sar_simulation_conn = None
+        try:
+            self.sar_simulation_conn = get_default_sar_simulation_connection()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "實戰模擬資料庫連線失敗", str(exc))
+
         self._pipeline_worker: PipelineWorker | None = None
         self._watchlist_export_worker: WatchlistExportWorker | None = None
         self._backfill_worker: BackfillWorker | None = None
         self._stock_info_worker: StockInfoRefreshWorker | None = None
+        self._sar_simulation_worker: SarSimulationWorker | None = None
+        self._sar_validation_worker: SarValidationWorker | None = None
+        self._sar_scenario_worker: SarScenarioWorker | None = None
         self._current_stock_id: str | None = None
         # 目前「個股資訊」分頁顯示的股票是從候選清單哪一天的選股策略點進來的("YYYY-MM-DD"
         # 字串)；手動查詢時設為None，右上角的來源標籤(self.stock_source_label)就不顯示
@@ -1353,8 +1621,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # 八個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+
-        # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單、⑦回補資料、⑧日誌——原本候選
+        # 九個分頁：①大盤、②選股(候選清單篩選+清單本身)、③個股資訊(個股查詢+K線圖+
+        # 個股分析)、④產業輪動、⑤庫存清單、⑥觀察清單、⑦實戰模擬、⑧回補資料、⑨日誌——原本候選
         # 清單跟個股圖表擠在同一個分頁，使用者反映畫面太擁擠，拆開後候選清單雙擊任一列
         # 會自動切到③並代入該股票資料(見_navigate_to_candidate_row())。①跟③都用同一
         # 套規則比對邏輯(_build_analysis_sections_html())，只是分析對象(大盤/個股)不同，
@@ -1371,6 +1639,7 @@ class MainWindow(QMainWindow):
         self._build_industry_rotation_tab()
         self._build_inventory_tab()
         self._build_watchlist_tab()
+        self._build_sar_simulation_tab()
         self._build_backfill_tab()
         self._build_log_tab()
         # ⚠️ 分頁還沒被切換過去顯示之前，分頁裡的QTextEdit/QWebEngineView實際上沒有
@@ -3189,6 +3458,862 @@ class MainWindow(QMainWindow):
         table.setSortingEnabled(True)
         table.resizeRowsToContents()
 
+    def _build_sar_simulation_tab(self) -> None:
+        """建立 SAR 策略模擬與跨期間績效比較分頁。"""
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        self.sar_sim_analysis_tabs = QTabWidget()
+        strategy_page = QWidget()
+        layout = QVBoxLayout(strategy_page)
+        self.sar_sim_analysis_tabs.addTab(strategy_page, "策略模擬")
+        validation_page = self._build_sar_validation_tab()
+        self.sar_sim_analysis_tabs.addTab(validation_page, "歷史回測")
+        scenario_page = self._build_sar_scenario_tab()
+        self.sar_sim_analysis_tabs.addTab(scenario_page, "未來情境推演")
+        content_layout.addWidget(self.sar_sim_analysis_tabs)
+        self.tabs.addTab(content, "實戰模擬")
+
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("模擬起日"))
+        self.sar_sim_start_date = QDateEdit()
+        self.sar_sim_start_date.setCalendarPopup(True)
+        self.sar_sim_start_date.setDisplayFormat("yyyy-MM-dd")
+        toolbar.addWidget(self.sar_sim_start_date)
+        toolbar.addWidget(QLabel("迄日"))
+        self.sar_sim_end_date = QDateEdit()
+        self.sar_sim_end_date.setCalendarPopup(True)
+        self.sar_sim_end_date.setDisplayFormat("yyyy-MM-dd")
+        toolbar.addWidget(self.sar_sim_end_date)
+        self.sar_sim_run_button = QPushButton("▶ 執行模擬")
+        self.sar_sim_run_button.clicked.connect(self._run_sar_simulation)
+        toolbar.addWidget(self.sar_sim_run_button)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        settings_bar = QHBoxLayout()
+        settings_bar.addWidget(QLabel("模擬本金"))
+        self.sar_sim_initial_capital = QDoubleSpinBox()
+        self.sar_sim_initial_capital.setRange(1, 1_000_000_000)
+        self.sar_sim_initial_capital.setDecimals(0)
+        self.sar_sim_initial_capital.setSingleStep(10_000)
+        self.sar_sim_initial_capital.setValue(INITIAL_CAPITAL)
+        self.sar_sim_initial_capital.setPrefix("NT$")
+        settings_bar.addWidget(self.sar_sim_initial_capital)
+        settings_bar.addWidget(QLabel("選股收盤價上限"))
+        self.sar_sim_max_close_price = QDoubleSpinBox()
+        self.sar_sim_max_close_price.setRange(0.01, 1_000_000)
+        self.sar_sim_max_close_price.setDecimals(2)
+        self.sar_sim_max_close_price.setSingleStep(1)
+        self.sar_sim_max_close_price.setValue(SarStrategyParams().max_close_price)
+        self.sar_sim_max_close_price.setPrefix("NT$")
+        settings_bar.addWidget(self.sar_sim_max_close_price)
+        self.sar_sim_odd_lot_radio = QRadioButton("零股")
+        self.sar_sim_whole_lot_radio = QRadioButton("整張")
+        self.sar_sim_odd_lot_radio.setToolTip("每次依固定金額買進，股數取整數股。")
+        self.sar_sim_whole_lot_radio.setToolTip("每次進場 1 張，觸發加碼時再買 1 張；現金不足則跳過。")
+        self.sar_sim_odd_lot_radio.setChecked(True)
+        self.sar_sim_lot_mode_group = QButtonGroup(self)
+        self.sar_sim_lot_mode_group.addButton(self.sar_sim_odd_lot_radio)
+        self.sar_sim_lot_mode_group.addButton(self.sar_sim_whole_lot_radio)
+        settings_bar.addWidget(self.sar_sim_odd_lot_radio)
+        settings_bar.addWidget(self.sar_sim_whole_lot_radio)
+        settings_bar.addStretch()
+        layout.addLayout(settings_bar)
+
+        if self.conn is not None:
+            first_date, latest_date = self.conn.execute(
+                "SELECT MIN(date), MAX(date) FROM stock_prices"
+            ).fetchone()
+        else:
+            first_date, latest_date = None, None
+        minimum = QDate.fromString(first_date, "yyyy-MM-dd") if first_date else QDate.currentDate().addYears(-10)
+        maximum = QDate.fromString(latest_date, "yyyy-MM-dd") if latest_date else QDate.currentDate()
+        default_start = maximum.addYears(-1)
+        if default_start < minimum:
+            default_start = minimum
+        for date_input in (self.sar_sim_start_date, self.sar_sim_end_date):
+            date_input.setMinimumDate(minimum)
+            date_input.setMaximumDate(maximum)
+        self.sar_sim_start_date.setDate(default_start)
+        self.sar_sim_end_date.setDate(maximum)
+
+        self.sar_sim_summary_label = QLabel("請選擇模擬區間並執行。結果儲存在獨立模擬資料庫，不會修改真實庫存。")
+        self.sar_sim_summary_label.setWordWrap(True)
+        layout.addWidget(self.sar_sim_summary_label)
+        self.sar_sim_cash_label = QLabel("現金：-")
+        self.sar_sim_market_value_label = QLabel("持倉市值：-")
+        self.sar_sim_total_assets_label = QLabel("總資產：-")
+        self.sar_sim_realized_pnl_label = QLabel("已實現損益：-")
+        self.sar_sim_unrealized_pnl_label = QLabel("未實現損益：-")
+        self.sar_sim_total_pnl_label = QLabel("總損益：-")
+        asset_summary_line = QHBoxLayout()
+        asset_summary_line.addWidget(self.sar_sim_cash_label)
+        asset_summary_line.addWidget(self.sar_sim_market_value_label)
+        asset_summary_line.addWidget(self.sar_sim_total_assets_label)
+        asset_summary_line.addStretch()
+        layout.addLayout(asset_summary_line)
+        pnl_summary_line = QHBoxLayout()
+        pnl_summary_line.addWidget(self.sar_sim_realized_pnl_label)
+        pnl_summary_line.addWidget(self.sar_sim_unrealized_pnl_label)
+        pnl_summary_line.addWidget(self.sar_sim_total_pnl_label)
+        self.sar_sim_return_label = QLabel("報酬率：-")
+        pnl_summary_line.addWidget(self.sar_sim_return_label)
+        pnl_summary_line.addStretch()
+        layout.addLayout(pnl_summary_line)
+
+        self.sar_sim_result_tabs = QTabWidget()
+
+        positions_page = QWidget()
+        positions_layout = QVBoxLayout(positions_page)
+        self.sar_sim_positions_table = QTableWidget(0, 9)
+        self.sar_sim_positions_table.setHorizontalHeaderLabels([
+            "代號", "名稱", "訊號日", "進場日", "股數", "均成本", "最新收盤", "未實現損益", "狀態",
+        ])
+        self.sar_sim_positions_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sar_sim_positions_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sar_sim_positions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.sar_sim_positions_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        positions_layout.addWidget(self.sar_sim_positions_table)
+        self.sar_sim_result_tabs.addTab(positions_page, "目前持倉")
+
+        realized_page = QWidget()
+        realized_layout = QVBoxLayout(realized_page)
+        self.sar_sim_realized_table = QTableWidget(0, 10)
+        self.sar_sim_realized_table.setHorizontalHeaderLabels([
+            "代號", "名稱", "訊號日", "進場日", "出場日", "股數",
+            "均成本", "出場價", "已實現損益", "出場原因",
+        ])
+        self.sar_sim_realized_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sar_sim_realized_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sar_sim_realized_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.sar_sim_realized_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        realized_layout.addWidget(self.sar_sim_realized_table)
+        layout.addWidget(QLabel("已實現損益為已平倉交易的淨損益，已扣除買賣手續費及證交稅。"))
+        self.sar_sim_result_tabs.addTab(realized_page, "已實現損益")
+
+        events_page = QWidget()
+        events_layout = QVBoxLayout(events_page)
+        self.sar_sim_events_table = QTableWidget(0, 9)
+        self.sar_sim_events_table.setHorizontalHeaderLabels([
+            "日期", "事件", "代號", "名稱", "股數", "價格", "手續費", "證交稅", "說明",
+        ])
+        self.sar_sim_events_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sar_sim_events_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sar_sim_events_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.sar_sim_events_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Stretch)
+        events_layout.addWidget(self.sar_sim_events_table)
+        self.sar_sim_result_tabs.addTab(events_page, "模擬事件")
+        layout.addWidget(self.sar_sim_result_tabs)
+
+        if self.sar_simulation_conn is not None:
+            try:
+                latest_result = sar_simulation_storage.load_simulation_result(self.sar_simulation_conn)
+            except sqlite3.Error as exc:
+                QMessageBox.critical(self, "讀取模擬紀錄失敗", str(exc))
+            else:
+                if latest_result is not None:
+                    if latest_result.strategy_version != SAR_STRATEGY_VERSION:
+                        self.sar_sim_summary_label.setText(
+                            f"最近紀錄使用策略版本 {latest_result.strategy_version}，與目前版本 "
+                            f"{SAR_STRATEGY_VERSION} 不同。策略篩選規則已修正；舊紀錄保留，"
+                            "請重新執行模擬以取得可比較的結果。"
+                        )
+                    else:
+                        self.sar_sim_start_date.setDate(QDate.fromString(latest_result.start_date, "yyyy-MM-dd"))
+                        self.sar_sim_end_date.setDate(QDate.fromString(latest_result.end_date, "yyyy-MM-dd"))
+                        self.sar_sim_initial_capital.setValue(latest_result.initial_capital)
+                        self.sar_sim_max_close_price.setValue(latest_result.max_close_price)
+                        self.sar_sim_whole_lot_radio.setChecked(latest_result.whole_lot_trading)
+                        self.sar_sim_odd_lot_radio.setChecked(not latest_result.whole_lot_trading)
+                        self._display_sar_simulation_result(latest_result)
+    def _build_sar_validation_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel(
+            "用途：把目前這套固定規則分別放到較早、較近期的歷史行情中重跑，查看不同期間的模擬績效。"
+            "每段都以相同本金重新開始；這是歷史回測，不是未來預測，也不代表之後會有相同報酬。"
+        ))
+        self.sar_validation_data_warning = QLabel(
+            "資料限制：指標會由資料庫現有 OHLCV 在記憶體重算，不修改行情資料庫。"
+            "目前資料未包含完整已下市股票，且價格未做除權息還原，可能有存活者偏差及公司行動影響。"
+            "較近期期間包含 2026-09-15～2026-10-20（曾用於策略規則比對），因此不是完全未接觸的測試期間。"
+        )
+        self.sar_validation_data_warning.setWordWrap(True)
+        self.sar_validation_data_warning.setStyleSheet(f"color: {COLOR_SELL};")
+        layout.addWidget(self.sar_validation_data_warning)
+
+        available_dates: list[str] = []
+        if self.conn is not None:
+            available_dates = [
+                row[0]
+                for row in self.conn.execute(
+                    """
+                    SELECT DISTINCT sp.date
+                    FROM stock_prices sp
+                    JOIN stocks s ON s.stock_id = sp.stock_id
+                    WHERE s.market IN ('TWSE', 'TPEx')
+                    ORDER BY sp.date
+                    """
+                ).fetchall()
+            ]
+        self.sar_validation_available_dates = available_dates
+        warmup_bars = 240
+        eligible_dates = available_dates[warmup_bars:]
+        self.sar_validation_run_button = QPushButton("▶ 比較兩段期間")
+        self.sar_validation_run_button.clicked.connect(self._run_sar_validation)
+
+        dates_layout = QGridLayout()
+        dates_layout.addWidget(QLabel("較早期間起日"), 0, 0)
+        self.sar_validation_reference_start = QDateEdit()
+        self.sar_validation_reference_start.setCalendarPopup(True)
+        self.sar_validation_reference_start.setDisplayFormat("yyyy-MM-dd")
+        dates_layout.addWidget(self.sar_validation_reference_start, 0, 1)
+        dates_layout.addWidget(QLabel("迄日"), 0, 2)
+        self.sar_validation_reference_end = QDateEdit()
+        self.sar_validation_reference_end.setCalendarPopup(True)
+        self.sar_validation_reference_end.setDisplayFormat("yyyy-MM-dd")
+        dates_layout.addWidget(self.sar_validation_reference_end, 0, 3)
+        dates_layout.addWidget(QLabel("較近期期間起日"), 1, 0)
+        self.sar_validation_holdout_start = QDateEdit()
+        self.sar_validation_holdout_start.setCalendarPopup(True)
+        self.sar_validation_holdout_start.setDisplayFormat("yyyy-MM-dd")
+        dates_layout.addWidget(self.sar_validation_holdout_start, 1, 1)
+        dates_layout.addWidget(QLabel("迄日"), 1, 2)
+        self.sar_validation_holdout_end = QDateEdit()
+        self.sar_validation_holdout_end.setCalendarPopup(True)
+        self.sar_validation_holdout_end.setDisplayFormat("yyyy-MM-dd")
+        dates_layout.addWidget(self.sar_validation_holdout_end, 1, 3)
+        layout.addLayout(dates_layout)
+
+        settings_layout = QHBoxLayout()
+        settings_layout.addWidget(QLabel("本金"))
+        self.sar_validation_initial_capital = QDoubleSpinBox()
+        self.sar_validation_initial_capital.setRange(1, 1_000_000_000)
+        self.sar_validation_initial_capital.setDecimals(0)
+        self.sar_validation_initial_capital.setSingleStep(10_000)
+        self.sar_validation_initial_capital.setValue(INITIAL_CAPITAL)
+        self.sar_validation_initial_capital.setPrefix("NT$")
+        settings_layout.addWidget(self.sar_validation_initial_capital)
+        settings_layout.addWidget(QLabel("選股收盤價上限"))
+        self.sar_validation_max_close_price = QDoubleSpinBox()
+        self.sar_validation_max_close_price.setRange(0.01, 1_000_000)
+        self.sar_validation_max_close_price.setDecimals(2)
+        self.sar_validation_max_close_price.setSingleStep(1)
+        self.sar_validation_max_close_price.setValue(SarStrategyParams().max_close_price)
+        self.sar_validation_max_close_price.setPrefix("NT$")
+        settings_layout.addWidget(self.sar_validation_max_close_price)
+        self.sar_validation_odd_lot_radio = QRadioButton("零股")
+        self.sar_validation_whole_lot_radio = QRadioButton("整張")
+        self.sar_validation_odd_lot_radio.setChecked(True)
+        self.sar_validation_lot_mode_group = QButtonGroup(self)
+        self.sar_validation_lot_mode_group.addButton(self.sar_validation_odd_lot_radio)
+        self.sar_validation_lot_mode_group.addButton(self.sar_validation_whole_lot_radio)
+        settings_layout.addWidget(self.sar_validation_odd_lot_radio)
+        settings_layout.addWidget(self.sar_validation_whole_lot_radio)
+        settings_layout.addWidget(self.sar_validation_run_button)
+        settings_layout.addStretch()
+        layout.addLayout(settings_layout)
+
+        if len(eligible_dates) >= 2:
+            split_index = max(1, len(eligible_dates) * 7 // 10)
+            split_index = min(split_index, len(eligible_dates) - 1)
+            minimum = QDate.fromString(eligible_dates[0], "yyyy-MM-dd")
+            maximum = QDate.fromString(eligible_dates[-1], "yyyy-MM-dd")
+            date_inputs = (
+                self.sar_validation_reference_start,
+                self.sar_validation_reference_end,
+                self.sar_validation_holdout_start,
+                self.sar_validation_holdout_end,
+            )
+            for date_input in date_inputs:
+                date_input.setDateRange(minimum, maximum)
+            self.sar_validation_reference_start.setDate(
+                QDate.fromString(eligible_dates[0], "yyyy-MM-dd"),
+            )
+            self.sar_validation_reference_end.setDate(
+                QDate.fromString(eligible_dates[split_index - 1], "yyyy-MM-dd"),
+            )
+            self.sar_validation_holdout_start.setDate(
+                QDate.fromString(eligible_dates[split_index], "yyyy-MM-dd"),
+            )
+            self.sar_validation_holdout_end.setDate(maximum)
+            self.sar_validation_run_button.setEnabled(True)
+        else:
+            self.sar_validation_run_button.setEnabled(False)
+            layout.addWidget(QLabel(
+                f"可用行情僅 {len(available_dates)} 個交易日；需至少 {warmup_bars + 2} 日，"
+                "才能保留 240 個均線／SAR暖身日並切分兩段。"
+            ))
+
+        self.sar_validation_status_label = QLabel("尚未比較期間。")
+        self.sar_validation_status_label.setWordWrap(True)
+        layout.addWidget(self.sar_validation_status_label)
+        self.sar_validation_metrics_table = QTableWidget(0, 13)
+        self.sar_validation_metrics_table.setHorizontalHeaderLabels([
+            "期間", "實際日期", "交易日", "選股訊號", "已平倉", "勝率",
+            "已實現損益", "未實現損益", "總損益", "總報酬率", "最大回撤",
+            "平均投入率", "現金基準",
+        ])
+        self.sar_validation_metrics_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sar_validation_metrics_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sar_validation_metrics_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.sar_validation_metrics_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch,
+        )
+        self.sar_validation_metrics_table.horizontalHeaderItem(11).setToolTip(
+            "期間平均持倉市值 ÷ 初始本金；分母不是當期總資產，因此可能高於 100%。"
+        )
+        layout.addWidget(self.sar_validation_metrics_table)
+        layout.addWidget(QLabel("較近期期間每日資產變化"))
+        self.sar_validation_equity_table = QTableWidget(0, 5)
+        self.sar_validation_equity_table.setHorizontalHeaderLabels([
+            "日期", "現金", "持倉市值", "總資產", "區間內回撤",
+        ])
+        self.sar_validation_equity_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sar_validation_equity_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sar_validation_equity_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        layout.addWidget(self.sar_validation_equity_table)
+
+        if self.sar_simulation_conn is not None:
+            try:
+                saved_result = sar_simulation_storage.load_latest_historical_validation(
+                    self.sar_simulation_conn,
+                )
+            except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+                QMessageBox.critical(self, "讀取期間比較紀錄失敗", str(exc))
+            else:
+                if saved_result is not None:
+                    self._display_sar_validation_result(saved_result)
+        return page
+
+    def _build_sar_scenario_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        explanation = QLabel(
+            "情境推演不是預測：請先選擇一種大盤歷史走勢，程式會將該段行情中各股票的每日漲跌比例"
+            "套用到目前股價，接續最近一次「策略模擬」的現金與未平倉部位，並掃描股池、依原策略規則"
+            "列出該情境下的候選進場明細。各情境彼此獨立，不代表同一期間會同時發生。"
+        )
+        explanation.setWordWrap(True)
+        limitations = QLabel(
+            "限制：只推演目前資料庫中的上市／上櫃股票，部分股票可能沒有對應的歷史行情而不會參與；"
+            "行情未還原除權息／分割；未來日期會套用 TWSE 已公告的年度休市日，未公告年度仍以週一至週五估算。"
+            "請先在「策略模擬」執行至希望作為起點的日期。"
+        )
+        limitations.setWordWrap(True)
+        limitations.setStyleSheet(f"color: {COLOR_SELL};")
+
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("推演情境"))
+        self.sar_scenario_type = QComboBox()
+        self.sar_scenario_type.addItems([
+            "大盤漲幅較大",
+            "大盤接近平盤",
+            "大盤跌幅較大",
+        ])
+        toolbar.addWidget(self.sar_scenario_type)
+        toolbar.addWidget(QLabel("推演長度"))
+        self.sar_scenario_horizon = QComboBox()
+        for days in (20, 60, 120):
+            self.sar_scenario_horizon.addItem(f"{days} 個交易日", days)
+        self.sar_scenario_horizon.setCurrentIndex(1)
+        toolbar.addWidget(self.sar_scenario_horizon)
+        self.sar_scenario_run_button = QPushButton("▶ 推演所選情境")
+        self.sar_scenario_run_button.clicked.connect(self._run_sar_scenario)
+        self.sar_scenario_run_button.setEnabled(self.sar_simulation_conn is not None)
+        toolbar.addWidget(self.sar_scenario_run_button)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self.sar_scenario_status_label = QLabel("尚未執行情境推演。")
+        self.sar_scenario_status_label.setWordWrap(True)
+        layout.addWidget(self.sar_scenario_status_label)
+
+        self.sar_scenario_result_tabs = QTabWidget()
+        candidates_page = QWidget()
+        candidates_layout = QVBoxLayout(candidates_page)
+        self.sar_scenario_candidates_table = QTableWidget(0, 9)
+        self.sar_scenario_candidates_table.setHorizontalHeaderLabels([
+            "訊號日", "預計進場日", "代號", "名稱", "訊號收盤價",
+            "SAR距離%", "預計進場價", "預計股數", "資金／推演狀態",
+        ])
+        self.sar_scenario_candidates_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers,
+        )
+        self.sar_scenario_candidates_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows,
+        )
+        self.sar_scenario_candidates_table.setSortingEnabled(True)
+        self.sar_scenario_candidates_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.sar_scenario_candidates_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch,
+        )
+        self.sar_scenario_candidates_table.horizontalHeader().setSectionResizeMode(
+            8, QHeaderView.ResizeMode.Stretch,
+        )
+        candidates_layout.addWidget(self.sar_scenario_candidates_table)
+        self.sar_scenario_result_tabs.addTab(candidates_page, "未來可進場股票")
+
+        analysis_page = QWidget()
+        analysis_layout = QVBoxLayout(analysis_page)
+        self.sar_scenario_summary_table = QTableWidget(0, 9)
+        self.sar_scenario_summary_table.setHorizontalHeaderLabels([
+            "情境", "歷史行情來源", "加權指數變化", "推演損益", "期末總資產",
+            "相對起始資產", "新增進場", "出場", "期末持倉",
+        ])
+        self.sar_scenario_summary_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sar_scenario_summary_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sar_scenario_summary_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.sar_scenario_summary_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch,
+        )
+        analysis_layout.addWidget(QLabel("所選假設行情的情境績效"))
+        analysis_layout.addWidget(self.sar_scenario_summary_table)
+
+        analysis_layout.addWidget(QLabel("所選情境的每日總資產"))
+        self.sar_scenario_equity_table = QTableWidget(0, 2)
+        self.sar_scenario_equity_table.setHorizontalHeaderLabels(["推演交易日", "總資產"])
+        self.sar_scenario_equity_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sar_scenario_equity_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sar_scenario_equity_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        analysis_layout.addWidget(self.sar_scenario_equity_table)
+        self.sar_scenario_result_tabs.addTab(analysis_page, "情境績效／資產曲線")
+        layout.addWidget(self.sar_scenario_result_tabs)
+        layout.addWidget(explanation)
+        layout.addWidget(limitations)
+
+        if self.sar_simulation_conn is not None:
+            try:
+                saved_result = sar_simulation_storage.load_latest_forward_scenario_result(
+                    self.sar_simulation_conn,
+                )
+            except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+                QMessageBox.critical(self, "讀取情境推演紀錄失敗", str(exc))
+            else:
+                if saved_result is not None:
+                    self._display_sar_scenario_result(saved_result)
+        return page
+
+    def _run_sar_validation(self) -> None:
+        if self.conn is None or self.sar_simulation_conn is None:
+            QMessageBox.critical(
+                self,
+                "歷史回測失敗",
+                "行情資料庫或模擬資料庫尚未連線，無法執行並保存驗證結果。",
+            )
+            return
+        if self._sar_validation_worker is not None and self._sar_validation_worker.isRunning():
+            return
+        reference_start = self.sar_validation_reference_start.date().toString("yyyy-MM-dd")
+        reference_end = self.sar_validation_reference_end.date().toString("yyyy-MM-dd")
+        holdout_start = self.sar_validation_holdout_start.date().toString("yyyy-MM-dd")
+        holdout_end = self.sar_validation_holdout_end.date().toString("yyyy-MM-dd")
+        if reference_start > reference_end or holdout_start > holdout_end:
+            QMessageBox.warning(self, "日期區間錯誤", "各驗證區間的起日不可晚於迄日。")
+            return
+        if reference_end >= holdout_start:
+            QMessageBox.warning(self, "日期區間錯誤", "較早期間必須早於較近期期間，且兩段不可重疊。")
+            return
+        initial_capital = self.sar_validation_initial_capital.value()
+        max_close_price = self.sar_validation_max_close_price.value()
+        params = SarStrategyParams(
+            max_close_price=max_close_price,
+            whole_lot_trading=self.sar_validation_whole_lot_radio.isChecked(),
+        )
+        self.sar_validation_run_button.setEnabled(False)
+        self.sar_validation_status_label.setText(
+            "正在從歷史行情重算均線與 SAR，並比較兩段期間..."
+        )
+        self._sar_validation_worker = SarValidationWorker(
+            reference_start,
+            reference_end,
+            holdout_start,
+            holdout_end,
+            initial_capital,
+            params,
+        )
+        self._sar_validation_worker.finished_ok.connect(self._on_sar_validation_finished)
+        self._sar_validation_worker.failed.connect(self._on_sar_validation_failed)
+        self._sar_validation_worker.finished.connect(self._on_sar_validation_worker_stopped)
+        self._sar_validation_worker.start()
+
+    def _on_sar_validation_finished(self, result: HistoricalValidationResult) -> None:
+        self._display_sar_validation_result(result)
+
+    def _on_sar_validation_failed(self, message: str) -> None:
+        self.sar_validation_status_label.setText("期間比較失敗；先前保存的結果未被覆蓋。")
+        QMessageBox.critical(self, "期間比較失敗", message)
+
+    def _on_sar_validation_worker_stopped(self) -> None:
+        self.sar_validation_run_button.setEnabled(True)
+
+    def _display_sar_validation_result(self, result: HistoricalValidationResult) -> None:
+        for date_input, value in (
+            (self.sar_validation_reference_start, result.reference.start_date),
+            (self.sar_validation_reference_end, result.reference.end_date),
+            (self.sar_validation_holdout_start, result.holdout.start_date),
+            (self.sar_validation_holdout_end, result.holdout.end_date),
+        ):
+            date_input.setDate(QDate.fromString(value, "yyyy-MM-dd"))
+        self.sar_validation_initial_capital.setValue(result.initial_capital)
+        self.sar_validation_max_close_price.setValue(float(result.params["max_close_price"]))
+        self.sar_validation_whole_lot_radio.setChecked(bool(result.params["whole_lot_trading"]))
+        self.sar_validation_odd_lot_radio.setChecked(not result.params["whole_lot_trading"])
+        self.sar_validation_status_label.setText(
+            f"比較紀錄：{result.validation_id[:8]}　執行時間：{result.created_at}　"
+            f"本金：NT${result.initial_capital:,.0f}　股價上限："
+            f"NT${result.params['max_close_price']:,.2f}　"
+            f"模式：{'整張' if result.params['whole_lot_trading'] else '零股'}"
+        )
+        metrics_table = self.sar_validation_metrics_table
+        metrics_table.setRowCount(2)
+        for row, (period_label, metrics) in enumerate((
+            ("較早期間", result.reference),
+            ("較近期期間", result.holdout),
+        )):
+            values = [
+                period_label,
+                f"{metrics.start_date}～{metrics.end_date}",
+                str(metrics.trading_days),
+                str(metrics.signal_count),
+                str(metrics.closed_trade_count),
+                f"{metrics.win_rate_pct:.2f}%",
+                f"NT${metrics.realized_pnl:+,.2f}",
+                f"NT${metrics.unrealized_pnl:+,.2f}",
+                f"NT${metrics.total_pnl:+,.2f}",
+                f"{metrics.total_return_pct:+.2f}%",
+                f"-{metrics.max_drawdown_pct:.2f}%",
+                f"{metrics.average_invested_pct:.2f}%",
+                f"{metrics.cash_benchmark_return_pct:+.2f}%",
+            ]
+            for column, value in enumerate(values):
+                metrics_table.setItem(row, column, QTableWidgetItem(value))
+
+        curve_table = self.sar_validation_equity_table
+        curve_table.setRowCount(len(result.holdout_equity_curve))
+        peak = result.initial_capital
+        for row, snapshot in enumerate(result.holdout_equity_curve):
+            peak = max(peak, snapshot.total_assets)
+            drawdown = (
+                (peak - snapshot.total_assets) / peak * 100
+                if peak > 0 else 0.0
+            )
+            values = [
+                snapshot.date,
+                f"{snapshot.cash:,.2f}",
+                f"{snapshot.market_value:,.2f}",
+                f"{snapshot.total_assets:,.2f}",
+                f"-{drawdown:.2f}%",
+            ]
+            for column, value in enumerate(values):
+                curve_table.setItem(row, column, QTableWidgetItem(value))
+
+    def _run_sar_scenario(self) -> None:
+        if self.sar_simulation_conn is None:
+            QMessageBox.critical(
+                self,
+                "情境推演失敗",
+                "模擬資料庫尚未連線，無法載入起始投組或保存情境結果。",
+            )
+            return
+        if self._sar_scenario_worker is not None and self._sar_scenario_worker.isRunning():
+            return
+        horizon_days = int(self.sar_scenario_horizon.currentData())
+        scenario_name = self.sar_scenario_type.currentText()
+        self.sar_scenario_run_button.setEnabled(False)
+        self.sar_scenario_status_label.setText(
+            f"正在讀取最近一次策略模擬及「{scenario_name}」歷史行情；推演會在背景執行..."
+        )
+        self._sar_scenario_worker = SarScenarioWorker(horizon_days, scenario_name)
+        self._sar_scenario_worker.status.connect(self.sar_scenario_status_label.setText)
+        self._sar_scenario_worker.finished_ok.connect(self._on_sar_scenario_finished)
+        self._sar_scenario_worker.failed.connect(self._on_sar_scenario_failed)
+        self._sar_scenario_worker.finished.connect(self._on_sar_scenario_worker_stopped)
+        self._sar_scenario_worker.start()
+
+    def _on_sar_scenario_finished(self, result: ForwardScenarioResult) -> None:
+        self._display_sar_scenario_result(result)
+
+    def _on_sar_scenario_failed(self, message: str) -> None:
+        self.sar_scenario_status_label.setText("情境推演失敗；先前保存的結果未被覆蓋。")
+        QMessageBox.critical(self, "情境推演失敗", message)
+
+    def _on_sar_scenario_worker_stopped(self) -> None:
+        self.sar_scenario_run_button.setEnabled(True)
+
+    def _display_sar_scenario_result(self, result: ForwardScenarioResult) -> None:
+        selected_scenario = result.selected_scenario or (
+            result.scenarios[0].name if result.scenarios else ""
+        )
+        scenario_index = self.sar_scenario_type.findText(selected_scenario)
+        if scenario_index >= 0:
+            self.sar_scenario_type.setCurrentIndex(scenario_index)
+        displayed_scenarios = [
+            scenario for scenario in result.scenarios
+            if scenario.name == selected_scenario
+        ]
+        self.sar_scenario_status_label.setText(
+            f"起點：策略模擬截至 {result.base_end_date}（紀錄 {result.base_run_id[:8]}），"
+            f"起始總資產 NT${result.starting_assets:,.2f}；"
+            f"情境：{selected_scenario}；推演 {result.horizon_days} 個交易日；"
+            f"選出 {sum(len(scenario.entry_candidates) for scenario in displayed_scenarios)} "
+            "筆候選明細。"
+            + (
+                "\n未納入推演的過期持倉："
+                + "；".join(
+                    f"{position.stock_id} {position.name}（最後行情 "
+                    f"{position.last_quote_date or '無'}；"
+                    f"{position.shares:,} 股、市值 NT${position.market_value:,.2f}；"
+                    f"{position.reason}）"
+                    for position in result.excluded_stale_positions
+                )
+                if result.excluded_stale_positions else ""
+            )
+        )
+        candidates = self.sar_scenario_candidates_table
+        candidate_rows = [
+            candidate
+            for scenario in displayed_scenarios
+            for candidate in scenario.entry_candidates
+        ]
+        candidates.setSortingEnabled(False)
+        candidates.setRowCount(len(candidate_rows))
+        for row, candidate in enumerate(candidate_rows):
+            values = [
+                candidate.signal_date,
+                candidate.entry_date,
+                candidate.stock_id,
+                candidate.name,
+                f"{candidate.signal_close:,.2f}",
+                f"{candidate.sar_distance_pct:+.2f}%",
+                f"{candidate.entry_price:,.2f}" if candidate.entry_price is not None else "-",
+                f"{candidate.shares:,}" if candidate.shares else "-",
+                candidate.funding_status,
+            ]
+            for column, value in enumerate(values):
+                candidates.setItem(row, column, QTableWidgetItem(value))
+        candidates.setSortingEnabled(True)
+        candidates.sortItems(1, Qt.SortOrder.AscendingOrder)
+
+        table = self.sar_scenario_summary_table
+        table.setRowCount(len(displayed_scenarios))
+        for row, scenario in enumerate(displayed_scenarios):
+            values = [
+                scenario.name,
+                f"{scenario.source_start_date}～{scenario.source_end_date}",
+                f"{scenario.source_index_return_pct:+.2f}%",
+                f"NT${scenario.scenario_pnl:+,.2f}",
+                f"NT${scenario.ending_assets:,.2f}",
+                f"{scenario.scenario_return_pct:+.2f}%",
+                str(scenario.new_entry_count),
+                str(scenario.exit_count),
+                str(scenario.ending_open_position_count),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column in (2, 3, 5):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if column in (3, 5):
+                    color = COLOR_BUY if scenario.scenario_pnl >= 0 else COLOR_SELL
+                    item.setForeground(QColor(color))
+                table.setItem(row, column, item)
+
+        curve_table = self.sar_scenario_equity_table
+        curve_length = max(
+            (len(scenario.daily_snapshots) for scenario in displayed_scenarios),
+            default=0,
+        )
+        curve_table.setRowCount(curve_length)
+        for row in range(curve_length):
+            snapshot = displayed_scenarios[0].daily_snapshots[row]
+            curve_table.setItem(row, 0, QTableWidgetItem(snapshot.date))
+            curve_table.setItem(row, 1, QTableWidgetItem(f"NT${snapshot.total_assets:,.2f}"))
+
+    def _refresh_sar_simulation_tab(self) -> None:
+        """切回分頁時保留已載入或剛保存的模擬結果，不重跑歷史行情。"""
+
+    def _run_sar_simulation(self) -> None:
+        if self.conn is None:
+            QMessageBox.critical(self, "實戰模擬失敗", "主資料庫尚未連線，無法載入歷史行情。")
+            return
+        if self.sar_simulation_conn is None:
+            QMessageBox.critical(self, "實戰模擬失敗", "模擬資料庫尚未連線，無法保存結果。")
+            return
+        if self._sar_simulation_worker is not None and self._sar_simulation_worker.isRunning():
+            return
+        start_date = self.sar_sim_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.sar_sim_end_date.date().toString("yyyy-MM-dd")
+        if start_date > end_date:
+            QMessageBox.warning(self, "日期區間錯誤", "模擬起日不可晚於迄日。")
+            return
+        initial_capital = self.sar_sim_initial_capital.value()
+        max_close_price = self.sar_sim_max_close_price.value()
+        if initial_capital <= 0 or max_close_price <= 0:
+            QMessageBox.warning(self, "參數錯誤", "模擬本金與選股股價上限都必須大於 0。")
+            return
+        self.sar_sim_run_button.setEnabled(False)
+        self.sar_sim_summary_label.show()
+        self.sar_sim_summary_label.setText(
+            "正在讀取行情並執行模擬，完成後會自動保存紀錄..."
+        )
+        params = SarStrategyParams(
+            max_close_price=max_close_price,
+            whole_lot_trading=self.sar_sim_whole_lot_radio.isChecked(),
+        )
+        self._sar_simulation_worker = SarSimulationWorker(
+            start_date, end_date, initial_capital, params,
+        )
+        self._sar_simulation_worker.finished_ok.connect(self._on_sar_simulation_finished)
+        self._sar_simulation_worker.failed.connect(self._on_sar_simulation_failed)
+        self._sar_simulation_worker.finished.connect(self._on_sar_simulation_worker_stopped)
+        self._sar_simulation_worker.start()
+
+    def _on_sar_simulation_finished(self, result: SarSimulationResult) -> None:
+        self._display_sar_simulation_result(result)
+
+    def _on_sar_simulation_failed(self, message: str) -> None:
+        self.sar_sim_summary_label.setText("模擬失敗；先前保存的紀錄未被覆蓋。")
+        QMessageBox.critical(self, "實戰模擬失敗", message)
+
+    def _on_sar_simulation_worker_stopped(self) -> None:
+        self.sar_sim_run_button.setEnabled(True)
+
+    def _display_sar_simulation_result(self, result: SarSimulationResult) -> None:
+        try:
+            result, excluded_positions = self._exclude_stale_positions_for_display(result)
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.critical(self, "檢查持倉行情失敗", str(exc))
+            return
+        if excluded_positions:
+            details = "；".join(
+                f"{position.stock_id} {position.name}（最後行情 "
+                f"{position.last_quote_date or '無'}，{position.shares:,} 股，"
+                f"排除市值 NT${position.market_value:,.2f}）"
+                for position in excluded_positions
+            )
+            self.sar_sim_summary_label.setText(
+                "以下未平倉部位的最新行情早於模擬迄日，已從畫面持倉及期末資產計算排除；"
+                f"資料庫原始模擬紀錄未修改：{details}"
+            )
+            self.sar_sim_summary_label.show()
+        else:
+            self.sar_sim_summary_label.clear()
+            self.sar_sim_summary_label.hide()
+        self.sar_sim_cash_label.setText(f"現金：NT${result.cash:,.2f}")
+        self.sar_sim_market_value_label.setText(f"持倉市值：NT${result.market_value:,.2f}")
+        self.sar_sim_total_assets_label.setText(f"總資產：NT${result.total_assets:,.2f}")
+        self.sar_sim_realized_pnl_label.setText(f"已實現損益：NT${result.realized_pnl:+,.2f}")
+        self.sar_sim_unrealized_pnl_label.setText(f"未實現損益：NT${result.unrealized_pnl:+,.2f}")
+        self.sar_sim_total_pnl_label.setText(f"總損益：NT${result.total_pnl:+,.2f}")
+        return_pct = result.total_pnl / result.initial_capital * 100
+        return_color = COLOR_BUY if return_pct >= 0 else COLOR_SELL
+        self.sar_sim_return_label.setText(f"報酬率：{return_pct:+.2f}%")
+        self.sar_sim_return_label.setStyleSheet(
+            f"color: {return_color}; font-weight: bold;"
+        )
+        self.sar_sim_result_tabs.setTabText(0, f"目前持倉 ({len(result.positions)})")
+        self.sar_sim_result_tabs.setTabText(1, f"已實現損益 ({len(result.closed_positions)})")
+        self.sar_sim_result_tabs.setTabText(2, f"模擬事件 ({len(result.events)})")
+        positions_table = self.sar_sim_positions_table
+        positions_table.setSortingEnabled(False)
+        positions_table.setRowCount(len(result.positions))
+        for row_index, position in enumerate(result.positions):
+            values = [
+                position.stock_id,
+                position.name,
+                position.signal_date,
+                position.entry_date,
+                f"{position.shares:,}",
+                f"{position.average_cost:,.2f}",
+                f"{position.last_price:,.2f}",
+                f"{position.unrealized_pnl:+,.2f}",
+                "已加碼" if position.added else "加碼略過" if position.add_attempted else "未加碼",
+            ]
+            if position.trailing_active:
+                values[-1] += "／移動停利中"
+            for column, value in enumerate(values):
+                item = _NumericTableWidgetItem(value) if column == 7 else QTableWidgetItem(value)
+                positions_table.setItem(row_index, column, item)
+        positions_table.setSortingEnabled(True)
+        positions_table.sortItems(7, Qt.SortOrder.DescendingOrder)
+
+        realized_table = self.sar_sim_realized_table
+        realized_table.setSortingEnabled(False)
+        realized_table.setRowCount(len(result.closed_positions))
+        for row_index, position in enumerate(result.closed_positions):
+            values = [
+                position.stock_id,
+                position.name,
+                position.signal_date,
+                position.entry_date,
+                position.exit_date or "-",
+                f"{position.shares:,}",
+                f"{position.average_cost:,.2f}",
+                f"{position.exit_price:,.2f}" if position.exit_price is not None else "-",
+                f"{position.realized_pnl:+,.2f}",
+                position.exit_reason or "-",
+            ]
+            for column, value in enumerate(values):
+                item = _NumericTableWidgetItem(value) if column == 8 else QTableWidgetItem(value)
+                if column == 8:
+                    item.setForeground(QColor(COLOR_BUY if position.realized_pnl >= 0 else COLOR_SELL))
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                realized_table.setItem(row_index, column, item)
+        realized_table.setSortingEnabled(True)
+        realized_table.sortItems(8, Qt.SortOrder.DescendingOrder)
+
+        events_table = self.sar_sim_events_table
+        events_table.setSortingEnabled(False)
+        events_table.setRowCount(len(result.events))
+        for row_index, event in enumerate(result.events):
+            values = [
+                event.date,
+                event.event_type,
+                event.stock_id,
+                event.name,
+                f"{event.shares:,}" if event.shares else "-",
+                f"{event.price:,.2f}" if event.price else "-",
+                f"{event.fee:,.2f}" if event.fee else "-",
+                f"{event.tax:,.2f}" if event.tax else "-",
+                event.detail,
+            ]
+            for column, value in enumerate(values):
+                events_table.setItem(row_index, column, QTableWidgetItem(value))
+        events_table.setSortingEnabled(True)
+        events_table.sortItems(0, Qt.SortOrder.DescendingOrder)
+
+    def _exclude_stale_positions_for_display(
+        self,
+        result: SarSimulationResult,
+    ) -> tuple[SarSimulationResult, list[ExcludedStalePosition]]:
+        if not result.positions:
+            return result, []
+        if self.conn is None:
+            raise ValueError("主行情資料庫尚未連線，無法確認未平倉部位行情日期。")
+        stock_ids = [position.stock_id for position in result.positions]
+        placeholders = ", ".join("?" for _ in stock_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT stock_id, MAX(date)
+            FROM stock_prices
+            WHERE date <= ? AND stock_id IN ({placeholders})
+            GROUP BY stock_id
+            """,
+            (result.end_date, *stock_ids),
+        ).fetchall()
+        latest_quote_dates = {str(stock_id): str(date) for stock_id, date in rows}
+        return exclude_stale_positions(result, latest_quote_dates)
+
     def _build_backfill_tab(self) -> None:
         """「回補資料」分頁：取代原本只能下命令列跑scripts/backfill_*.py的回補流程。
 
@@ -3850,6 +4975,8 @@ class MainWindow(QMainWindow):
             self._refresh_inventory_tab()
         elif index == TAB_WATCHLIST:
             self._refresh_watchlist_tab()
+        elif index == TAB_SAR_SIMULATION:
+            self._refresh_sar_simulation_tab()
         elif index == TAB_LOG:
             self._refresh_log_tab()
 

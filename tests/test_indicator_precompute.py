@@ -30,6 +30,24 @@ def test_compute_indicator_rows_only_returns_requested_dates():
     assert all(r["stock_id"] == "2330" for r in rows)
 
 
+def test_compute_indicator_rows_can_skip_unneeded_trend_position():
+    df = _make_df([100.0 + i for i in range(30)])
+    target_date = "2026-01-20"
+
+    complete = compute_indicator_rows("2330", df, {target_date})[0]
+    without_trend = compute_indicator_rows(
+        "2330", df, {target_date}, include_trend_position=False,
+    )[0]
+
+    assert without_trend["ma200"] == complete["ma200"]
+    assert without_trend["sar_value"] == complete["sar_value"]
+    assert without_trend["sar_is_bull"] == complete["sar_is_bull"]
+    assert without_trend["sar_flip_days_ago"] == complete["sar_flip_days_ago"]
+    assert without_trend["trend_is_at_high"] is None
+    assert without_trend["trend_is_at_low"] is None
+    assert without_trend["trend_swing_pct"] is None
+
+
 def test_compute_indicator_rows_ma_values_match_compute_ma_set():
     """驗證這裡沒有重新定義均線算法，數值要跟直接呼叫compute_ma_set()一致——用第280天
     (300天資料的倒數第20天)確保MA240這種長天期均線也已經有足夠資料算出真正的數值，

@@ -51,10 +51,11 @@ def _sar_flip_days_ago_series(sar_bull: pd.Series) -> list[int | None]:
     result: list[int | None] = [None] * n
     if n == 0:
         return result
+    values = sar_bull.to_numpy(dtype=bool)
     days_since_flip = 1
     result[0] = days_since_flip
     for i in range(1, n):
-        if bool(sar_bull.iloc[i]) != bool(sar_bull.iloc[i - 1]):
+        if values[i] != values[i - 1]:
             days_since_flip = 1
         else:
             days_since_flip += 1
@@ -66,11 +67,17 @@ def _safe_float(value: object) -> float | None:
     return None if pd.isna(value) else float(value)
 
 
-def compute_indicator_rows(stock_id: str, df: pd.DataFrame, target_dates: set[str]) -> list[dict]:
+def compute_indicator_rows(
+    stock_id: str,
+    df: pd.DataFrame,
+    target_dates: set[str],
+    include_trend_position: bool = True,
+) -> list[dict]:
     """`df`是這檔股票依date排序、DatetimeIndex的OHLCV(跟`daily_screener.
     load_trailing_frames()`回傳格式一致)，只回傳`target_dates`("YYYY-MM-DD"字串集合)
     這些日期需要的列，不是整段歷史都回傳(呼叫端視情境決定要哪幾天：日常只要今天一天，
-    排程往回刷新窗口，backfill要全部歷史)。
+    排程往回刷新窗口，backfill要全部歷史)。僅需 MA/SAR 的呼叫端可將
+    `include_trend_position=False`，略過選股不需要的趨勢位置運算；預設仍計算所有欄位。
 
     均線/SAR都是對整個`df`只算一次(而不是每個target_date各自重算一次回看窗口)，效能上
     遠比「逐日期獨立重算」快，尤其backfill全部歷史時差異更明顯。
@@ -85,11 +92,25 @@ def compute_indicator_rows(stock_id: str, df: pd.DataFrame, target_dates: set[st
     ma200 = sma(df["close"], 200)
     sar_bull, sar_values = compute_sar(df["high"], df["low"], df["close"])
     flip_days_ago_list = _sar_flip_days_ago_series(sar_bull)
+    ma_values = {
+        f"ma{period}": ma_frame[f"MA{period}"].to_numpy()
+        for period in FULL_PERIODS
+    }
+    ma200_values = ma200.to_numpy()
+    sar_bull_values = sar_bull.to_numpy(dtype=bool)
+    sar_value_values = sar_values.to_numpy()
     sar_len = len(sar_bull)
     # 2026-08-10新增：src.indicators.trend_position.compute_trend_position()對整個df
     # 只算一次(跟SAR/均線同一個效能原則)，供「外資/投信累計買超」篩選(chart_data.
     # load_institutional_accumulation_flags())判斷「底部」/「追價」快取用。
-    trend_position = compute_trend_position(df["high"], df["low"], df["close"])
+    trend_position = (
+        compute_trend_position(df["high"], df["low"], df["close"])
+        if include_trend_position else None
+    )
+    if trend_position is not None:
+        trend_high_values = trend_position["is_at_high"].to_numpy(dtype=bool)
+        trend_low_values = trend_position["is_at_low"].to_numpy(dtype=bool)
+        trend_swing_values = trend_position["swing_pct"].to_numpy()
 
     date_strs = df.index.strftime("%Y-%m-%d")
     updated_at = datetime.now().isoformat()
@@ -101,19 +122,28 @@ def compute_indicator_rows(stock_id: str, df: pd.DataFrame, target_dates: set[st
         rows.append({
             "stock_id": stock_id,
             "date": date_str,
-            "ma5": _safe_float(ma_frame["MA5"].iloc[i]),
-            "ma10": _safe_float(ma_frame["MA10"].iloc[i]),
-            "ma20": _safe_float(ma_frame["MA20"].iloc[i]),
-            "ma60": _safe_float(ma_frame["MA60"].iloc[i]),
-            "ma120": _safe_float(ma_frame["MA120"].iloc[i]),
-            "ma200": _safe_float(ma200.iloc[i]),
-            "ma240": _safe_float(ma_frame["MA240"].iloc[i]),
-            "sar_value": _safe_float(sar_values.iloc[i]) if has_sar else None,
-            "sar_is_bull": int(bool(sar_bull.iloc[i])) if has_sar else None,
+            "ma5": _safe_float(ma_values["ma5"][i]),
+            "ma10": _safe_float(ma_values["ma10"][i]),
+            "ma20": _safe_float(ma_values["ma20"][i]),
+            "ma60": _safe_float(ma_values["ma60"][i]),
+            "ma120": _safe_float(ma_values["ma120"][i]),
+            "ma200": _safe_float(ma200_values[i]),
+            "ma240": _safe_float(ma_values["ma240"][i]),
+            "sar_value": _safe_float(sar_value_values[i]) if has_sar else None,
+            "sar_is_bull": int(bool(sar_bull_values[i])) if has_sar else None,
             "sar_flip_days_ago": flip_days_ago_list[i] if has_sar else None,
-            "trend_is_at_high": int(bool(trend_position["is_at_high"].iloc[i])),
-            "trend_is_at_low": int(bool(trend_position["is_at_low"].iloc[i])),
-            "trend_swing_pct": _safe_float(trend_position["swing_pct"].iloc[i]),
+            "trend_is_at_high": (
+                int(bool(trend_high_values[i]))
+                if trend_position is not None else None
+            ),
+            "trend_is_at_low": (
+                int(bool(trend_low_values[i]))
+                if trend_position is not None else None
+            ),
+            "trend_swing_pct": (
+                _safe_float(trend_swing_values[i])
+                if trend_position is not None else None
+            ),
             "updated_at": updated_at,
         })
     return rows
