@@ -111,8 +111,9 @@ python scripts/daily_pipeline.py --date 20260722 --local-db data/tw_stock.db
 「尚未收盤」)。
 
 ✅ **這8個排程工作已經在本機建立好了**（前6個2026-07-24建立，17:00/21:00這2個
-2026-08-03新增，見`ai/PLAN.md`同日期章節）。以下指令留著給之後要在其他機器上重新設定、
-或排程被誤刪需要重建時參考：
+2026-08-03新增，見`ai/PLAN.md`同日期章節）。在其他機器設定時，可先完成`.env`設定與
+`setup_windows.bat`安裝，再執行`setup_schedule.bat`自動建立或更新這8個工作；也可使用下列
+指令手動設定：
 
 ```powershell
 schtasks /create /tn "tw_stock_pipeline_1000" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 10:00
@@ -121,7 +122,7 @@ schtasks /create /tn "tw_stock_pipeline_1200" /tr "C:\path\to\python.exe D:\tw_s
 schtasks /create /tn "tw_stock_pipeline_1300" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:00
 schtasks /create /tn "tw_stock_pipeline_1330" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:30
 schtasks /create /tn "tw_stock_pipeline_1430" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:30
-schtasks /create /tn "tw_stock_pipeline_1700" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --skip-tpex" /sc weekly /d MON,TUE,WED,THU,FRI /st 17:00
+schtasks /create /tn "tw_stock_pipeline_1700" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --chip-refresh" /sc weekly /d MON,TUE,WED,THU,FRI /st 17:00
 schtasks /create /tn "tw_stock_pipeline_2100" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --skip-tpex" /sc weekly /d MON,TUE,WED,THU,FRI /st 21:00
 ```
 
@@ -130,14 +131,16 @@ schtasks /create /tn "tw_stock_pipeline_2100" /tr "C:\path\to\python.exe D:\tw_s
 不一定會套用互動式終端機的PATH設定，直接寫死完整路徑比較保險，用純`python`指令可能因為
 排程環境解析不到而靜默失敗。
 
-**17:00/21:00這兩個排程的用途**：三大法人買賣超／融資融券資料(`institutional_investors`/
+**17:00/21:00這兩個排程的用途**：17:00工作使用`--dry-run --chip-refresh`，在不重複發送
+LINE/Email通知的同時，更新TPEx三大法人、觀察清單F/G與Google Sheet匯出；`--chip-refresh`
+獨立於`--dry-run`之外。21:00工作則使用`--dry-run --skip-tpex`，補抓可能延遲公布的TWSE
+法人買賣超／融資融券資料(`institutional_investors`/
 `margin_trading`表，`fetch_today_twse()`裡跟股價同一批抓)有時TWSE公布時間比收盤價晚，
-14:30那次不一定抓得齊全，所以晚上再補跑兩次盡量拿到當天最終的法人/資券數字。這兩個
-排程刻意加了`--dry-run --skip-tpex`：`--dry-run`是因為候選清單此時通常跟14:30那次
+14:30那次不一定抓得齊全，所以晚上再補跑一次盡量拿到當天最終的法人/資券數字。兩個排程
+都加了`--dry-run`：候選清單此時通常跟14:30那次
 完全一樣(目前選股規則都還沒用到法人/資券資料，見`scripts/daily_pipeline.py`模組
 docstring)，不用再發一次重複的LINE/Email通知；`--skip-tpex`是因為法人/資券資料
-本來就只有TWSE上市股票才有(TPEx這兩張表完全沒有抓取來源，見同一份docstring)，跳過
-TPEx股價重抓可以加快這兩次排程的執行時間。
+只在21:00使用，因為該時段只需補TWSE法人/資券資料，跳過TPEx股價重抓可加快執行時間。
 
 ⚠️ 實際建立時**拿掉了`/rl highest`**（原本以為要有這個旗標，但套用後`schtasks /create`
 會要求系統管理員權限、直接回`ERROR: Access is denied.`）——這支腳本只做HTTP請求跟寫自己

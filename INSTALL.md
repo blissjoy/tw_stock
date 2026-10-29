@@ -138,7 +138,9 @@ Remove-Item Env:LOCAL_DB_PATH
 
 ### 自動每日更新
 
-新電腦不會自動帶入舊電腦的 Windows 工作排程器工作。若要在本機排程自動更新，請先完成 `.env` 憑證設定，再依照 [README 的「本機每日排程」章節](README.md)重新建立工作，並確認排程使用新電腦的專案路徑與 `.venv\Scripts\python.exe`。
+新電腦不會自動帶入舊電腦的 Windows 工作排程器工作。完成 `.env` 設定（至少填入 `FINMIND_API_TOKEN`），並先執行 `setup_windows.bat` 安裝環境後，在專案根目錄執行 `setup_schedule.bat`。此腳本會建立或更新 README 所列的 8 個週一至週五每日更新工作，使用目前專案的 `.venv\Scripts\python.exe` 與本機資料庫路徑；重複執行會更新同名工作。
+
+排程使用目前 Windows 帳號的登入工作階段，因此工作執行時該帳號必須已登入。若錯過排定時間，工作排程器會在工作下次可用時補跑。需要在使用者登出時仍執行，請在工作排程器 GUI 中修改工作的登入選項；Windows 可能要求帳號密碼。排程時間、各時段用途及手動驗證方式請見 [README 的「本機每日排程」章節](README.md)。
 
 ## 驗證安裝（可選）
 
