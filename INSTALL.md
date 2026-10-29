@@ -4,6 +4,14 @@
 
 ## 1. 安裝必要工具
 
+### 自動安裝（建議）
+
+先下載或複製本專案，然後在專案根目錄執行 `setup_windows.bat`（可在檔案總管雙擊）。它會在需要時安裝 Git 與 Python 3.12，建立 `.venv`、安裝 `requirements.txt` 中的套件，並在尚未有 `.env` 時複製 `.env.example`。安裝 Python 時即使 `py` 指令無法辨識，腳本也會嘗試直接找到 Python 執行檔。
+
+此方式需要 Windows 的 `winget` 與網路連線；套件安裝可能會顯示系統確認視窗。若程式碼尚未下載，請先依「下載程式碼」取得專案，再執行腳本。
+
+### 手動安裝
+
 ### Git
 
 用來從 GitHub 下載程式碼。以一般使用者權限開啟 PowerShell，執行：
@@ -142,7 +150,7 @@ Remove-Item Env:LOCAL_DB_PATH
 
 ## 問題排查
 
-- **找不到 `py`：**重新安裝 Python 3.12，確認安裝 Python Launcher，並重新開啟 PowerShell。
+- **找不到 `py`：**重新開啟 PowerShell；若仍無法辨識，執行專案根目錄的 `setup_windows.bat`，它會嘗試使用 Python 執行檔的完整路徑。手動安裝時，請確認 Python Launcher 已安裝，或從 Python 3.12 安裝目錄直接執行 `python.exe`。
 - **PowerShell 不允許啟用虛擬環境：**本指南使用 `.venv\Scripts\python.exe` 直接執行，不需要啟用虛擬環境。
 - **`pip install` 後仍找不到套件：**確認安裝與啟動都使用專案的 `.venv\Scripts\python.exe`，不要混用其他 Python。
 - **桌面版可開啟但畫面沒有資料：**確認已複製 `data\tw_stock.db`，並檢查應用程式實際使用的資料夾是目前專案目錄中的 `data`。
