@@ -718,24 +718,19 @@ def run_daily_pipeline(
 
             sar_preview = None
             if include_sar_preview:
-                if is_intraday:
-                    error = "今日行情仍是盤中資料，略過實戰模擬隔日提示。"
+                simulation_conn = None
+                try:
+                    simulation_conn = get_default_sar_simulation_connection()
+                    sar_preview = build_sar_next_day_preview(
+                        conn, simulation_conn, iso_date,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    error = f"實戰模擬隔日提示產生失敗：{exc}"
                     print(error)
                     run_errors.append(error)
-                else:
-                    simulation_conn = None
-                    try:
-                        simulation_conn = get_default_sar_simulation_connection()
-                        sar_preview = build_sar_next_day_preview(
-                            conn, simulation_conn, iso_date,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        error = f"實戰模擬隔日提示產生失敗：{exc}"
-                        print(error)
-                        run_errors.append(error)
-                    finally:
-                        if simulation_conn is not None:
-                            simulation_conn.close()
+                finally:
+                    if simulation_conn is not None:
+                        simulation_conn.close()
 
             taiex_sar_is_bull = None
             try:
@@ -770,6 +765,7 @@ def run_daily_pipeline(
                         iso_date, notify_candidates, stock_names=stock_names, stock_industries=stock_industries,
                         inventory_warnings=inventory_warnings, current_prices=notify_current_prices,
                         sar_next_day_preview=sar_preview,
+                        sar_preview_is_intraday=is_intraday,
                         taiex_sar_is_bull=taiex_sar_is_bull,
                     ))
                 except Exception as exc:  # noqa: BLE001

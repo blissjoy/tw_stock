@@ -87,6 +87,21 @@ def test_format_candidates_message_includes_sar_next_day_items_and_closes():
     assert "・2454聯發科 收盤 1275.00" in text
 
 
+def test_format_candidates_message_marks_intraday_sar_preview_as_provisional():
+    text = format_candidates_message(
+        "2026-11-03",
+        [],
+        sar_next_day_preview={
+            "buy_items": [{"stock_id": "2330", "name": "台積電", "close": 1450.0}],
+            "sell_items": [],
+        },
+        sar_preview_is_intraday=True,
+    )
+
+    assert "【實戰模擬｜明日（盤中估算）】" in text
+    assert "・2330台積電 盤中估價 1450.00" in text
+
+
 def test_format_candidates_message_marks_index_sar_unavailable():
     text = format_candidates_message("2026-11-03", [])
 

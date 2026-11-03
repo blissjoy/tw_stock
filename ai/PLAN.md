@@ -10430,3 +10430,13 @@ yfinance備援都沒有資料才判定非交易日。本機DB另確認`daily_can
 - 候選篩選失敗時跳過LINE與Email候選通知，不降級發送未篩選候選；候選清單每檔顯示本次行情更新取得的最新價。
 - 文件同步：README說明候選篩選失敗策略、候選行情價格、指數SAR符號及14:30模擬提示；INSTALL說明排程安裝/更新後的通知行為。
 - 驗證：`tests/test_sar_next_day_preview.py`、`tests/test_notify.py`、`tests/test_daily_pipeline.py`、`tests/test_sar_portfolio.py`、`tests/test_sar_simulation_storage.py`及`tests/test_twse_client.py`共136項通過。
+
+## 將實戰模擬隔日提示提前至13:30（2026-11-03）
+
+使用者希望提早收到「實戰模擬｜明日」提示，以便有時間參考盤後零股下單。原先只在14:30工作啟用提示，且盤中行情時會略過；改為13:30工作啟用`--sar-preview`，允許使用當時可取得的行情估算。因13:30時TWSE正式收盤行情可能尚未公布，通知標題及價格欄會明確標示「盤中估算／盤中估價」，不冒充正式收盤價；14:30工作保留原本資料更新與一般通知，不再附加隔日預覽。
+
+- `setup_schedule.ps1`及README手動排程範例：將`--sar-preview`從14:30移至13:30。
+- `scripts/daily_pipeline.py`：不再因`is_intraday`略過隔日提示，將行情狀態傳給通知格式化函式。
+- `src/notify/line_notify.py`：盤中預覽使用「實戰模擬｜明日（盤中估算）」標題與「盤中估價」欄位；官方收盤行情則維持「收盤」標示。
+- `INSTALL.md`、README：說明提前通知的盤中估算限制、14:30仍會正常更新，以及重新執行`setup_schedule.bat`以更新本機排程。
+- 驗證：`tests/test_notify.py`、`tests/test_daily_pipeline.py`及`tests/test_sar_next_day_preview.py`共89項通過；本機Windows排程已更新，確認13:30帶`--sar-preview`、14:30不帶該旗標。

@@ -113,10 +113,11 @@ python scripts/daily_pipeline.py --date 20260722 --local-db data/tw_stock.db
 (daily_data_status表會記錄某次結果是盤中即時價還是官方收盤價，兩個前端UI會標示
 「尚未收盤」)。
 
-14:30通知另外附上「實戰模擬｜明日」區塊：買進候選依當日收盤選股，賣出觀察列出目前
-模擬持倉，兩者都附當日收盤價；這是隔日項目提醒，不代表明日一定成交。只有取得TWSE
-正式收盤行情時才產生此區塊；若仍是盤中行情，會略過提示。更新既有排程時請重新執行
-`setup_schedule.bat`，讓14:30工作加上`--sar-preview`。LINE第一行的加權指數SAR方向則使用
+13:30通知另外附上「實戰模擬｜明日」區塊：買進候選依當日行情估算，賣出觀察列出目前
+模擬持倉，兩者都附當下可用價格；若尚未取得TWSE正式收盤行情，標示為「盤中估算」及
+「盤中估價」，結果可能隨正式收盤價更新而改變。這是供盤後零股下單參考的隔日項目提醒，
+不代表明日一定成交。14:30排程仍會更新資料與發送一般通知。更新既有排程時請重新執行
+`setup_schedule.bat`，讓13:30工作加上`--sar-preview`。LINE第一行的加權指數SAR方向則使用
 發送前取得、日期經核對的TWSE MIS即時指數K線；「+」表示SAR在K線下方，「-」表示在上方，
 若資料無效則明確顯示資料不足。
 
@@ -130,8 +131,8 @@ schtasks /create /tn "tw_stock_pipeline_1000" /tr "C:\path\to\python.exe D:\tw_s
 schtasks /create /tn "tw_stock_pipeline_1100" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 11:00
 schtasks /create /tn "tw_stock_pipeline_1200" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 12:00
 schtasks /create /tn "tw_stock_pipeline_1300" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:00
-schtasks /create /tn "tw_stock_pipeline_1330" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:30
-schtasks /create /tn "tw_stock_pipeline_1430" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --sar-preview" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:30
+schtasks /create /tn "tw_stock_pipeline_1330" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --sar-preview" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:30
+schtasks /create /tn "tw_stock_pipeline_1430" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:30
 schtasks /create /tn "tw_stock_pipeline_1700" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --chip-refresh" /sc weekly /d MON,TUE,WED,THU,FRI /st 17:00
 schtasks /create /tn "tw_stock_pipeline_2100" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --skip-tpex" /sc weekly /d MON,TUE,WED,THU,FRI /st 21:00
 ```

@@ -38,6 +38,7 @@ def format_candidates_message(
     inventory_warnings: list[dict] | None = None,
     current_prices: dict[str, float] | None = None,
     sar_next_day_preview: dict[str, list[dict]] | None = None,
+    sar_preview_is_intraday: bool = False,
     taiex_sar_is_bull: bool | None = None,
 ) -> str:
     """把每日候選清單格式化成單則LINE文字訊息，超過LINE長度上限時截斷。
@@ -55,7 +56,8 @@ def format_candidates_message(
     括號那段——使用者反映只看代號+名稱不容易一眼分辨這檔股票的產業背景。
     current_prices：{stock_id: 本次更新取得的最新價}；盤中為當下報價，收盤後為最新可用價格；
     省略或查無價格時顯示"-"。
-    sar_next_day_preview：可選的SAR實戰模擬隔日買進候選／持倉觀察，逐筆附當日收盤價。
+    sar_next_day_preview：可選的SAR實戰模擬隔日買進候選／持倉觀察，逐筆附當日價格。
+    sar_preview_is_intraday：True時提示價格與選股結果依盤中行情估算，尚非正式收盤結果。
 
     inventory_warnings(2026-08-12新增，2026-08-13改版)：庫存逃命示警清單，每筆
     {"stock_id", "name", "close", "cost_price", "return_pct"}，只放「目前有逃命
@@ -119,13 +121,15 @@ def format_candidates_message(
             lines.append("安全")
 
     if sar_next_day_preview is not None:
-        lines.extend(["", "【實戰模擬｜明日】", "買進候選："])
+        preview_title = "【實戰模擬｜明日（盤中估算）】" if sar_preview_is_intraday else "【實戰模擬｜明日】"
+        preview_price_label = "盤中估價" if sar_preview_is_intraday else "收盤"
+        lines.extend(["", preview_title, "買進候選："])
         buy_items = sar_next_day_preview.get("buy_items", [])
         if buy_items:
             for item in buy_items:
                 close = _fmt_num(item.get("close"))
                 lines.append(
-                    f"・{item['stock_id']}{item.get('name', '')} 收盤 {close}"
+                    f"・{item['stock_id']}{item.get('name', '')} {preview_price_label} {close}"
                 )
         else:
             lines.append("無")
@@ -136,7 +140,7 @@ def format_candidates_message(
             for item in sell_items:
                 close = _fmt_num(item.get("close"))
                 lines.append(
-                    f"・{item['stock_id']}{item.get('name', '')} 收盤 {close}"
+                    f"・{item['stock_id']}{item.get('name', '')} {preview_price_label} {close}"
                 )
         else:
             lines.append("無")

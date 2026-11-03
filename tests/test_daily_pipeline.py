@@ -490,10 +490,11 @@ def test_sar_preview_is_added_to_the_same_line_message_when_enabled(monkeypatch,
     assert "・2454聯發科 收盤 980.00" in line_messages[0]
 
 
-def test_sar_preview_is_skipped_when_twse_data_is_intraday(monkeypatch, tmp_path):
+def test_sar_preview_uses_intraday_prices_as_a_provisional_estimate(monkeypatch, tmp_path):
     conn = _fresh_conn()
     monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
+    monkeypatch.setattr(daily_pipeline, "get_default_sar_simulation_connection", lambda: _fresh_portfolio_conn())
     _stub_stock_info(monkeypatch, [])
     monkeypatch.setattr(daily_pipeline, "fetch_today_twse", lambda *args, **kwargs: (True, True))
     monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
@@ -508,10 +509,14 @@ def test_sar_preview_is_skipped_when_twse_data_is_intraday(monkeypatch, tmp_path
         lambda *args, **kwargs: pd.DataFrame({"stock_id": []}),
     )
 
-    def _unexpected_preview(*args, **kwargs):
-        pytest.fail("盤中行情不得產生收盤後的隔日提示")
-
-    monkeypatch.setattr(daily_pipeline, "build_sar_next_day_preview", _unexpected_preview)
+    monkeypatch.setattr(
+        daily_pipeline,
+        "build_sar_next_day_preview",
+        lambda *args, **kwargs: {
+            "buy_items": [{"stock_id": "2330", "name": "台積電", "close": 104.0}],
+            "sell_items": [],
+        },
+    )
     line_messages = []
     monkeypatch.setattr(daily_pipeline, "send_line_broadcast", line_messages.append)
     monkeypatch.setattr(daily_pipeline, "send_email", lambda *args, **kwargs: None)
@@ -525,7 +530,8 @@ def test_sar_preview_is_skipped_when_twse_data_is_intraday(monkeypatch, tmp_path
     )
 
     assert len(line_messages) == 1
-    assert "實戰模擬｜明日" not in line_messages[0]
+    assert "【實戰模擬｜明日（盤中估算）】" in line_messages[0]
+    assert "・2330台積電 盤中估價 104.00" in line_messages[0]
 
 
 def test_get_taiex_sar_direction_uses_live_index_candle(monkeypatch):
