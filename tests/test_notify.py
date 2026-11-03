@@ -1,5 +1,6 @@
 from src.notify.email_notify import format_candidates_email_body
-from src.notify.line_notify import format_candidates_message
+from src.notify import line_notify
+from src.notify.line_notify import format_candidates_flex_message, format_candidates_message
 
 
 def _sample_candidates():
@@ -211,6 +212,148 @@ def test_format_candidates_message_inventory_warning_missing_values_show_dash():
     )
 
     assert "・測試股 現- 成- -" in text
+
+
+def _flex_text_components(value):
+    if isinstance(value, dict):
+        if value.get("type") == "text":
+            yield value
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                yield from _flex_text_components(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _flex_text_components(child)
+
+
+def test_format_candidates_flex_message_applies_requested_colors_and_bold_alert():
+    message = format_candidates_flex_message(
+        "2026-11-03",
+        [],
+        inventory_warnings=[
+            {
+                "stock_id": "1216",
+                "name": "統一",
+                "close": 81.1,
+                "cost_price": 90.0,
+                "return_pct": -9.9,
+                "momentum_5d": {
+                    "foreign": {"current": -1000},
+                    "trust": {"current": -2000},
+                },
+            },
+            {
+                "stock_id": "2330",
+                "name": "台積電",
+                "close": 1400.0,
+                "cost_price": 1400.0,
+                "return_pct": 0.0,
+                "momentum_5d": {
+                    "foreign": {"current": 1000},
+                    "trust": {"current": -2000},
+                },
+            },
+            {
+                "stock_id": "2317",
+                "name": "鴻海",
+                "close": 200.0,
+                "cost_price": 180.0,
+                "return_pct": 11.1,
+                "momentum_5d": {
+                    "foreign": {"current": -1000},
+                    "trust": {"current": 0},
+                },
+            },
+        ],
+        sar_next_day_preview={
+            "buy_items": [{
+                "stock_id": "2454",
+                "name": "聯發科",
+                "close": 980.0,
+                "momentum_5d": {
+                    "foreign": {"current": 1000, "prior": 500, "trend": "買超力道增強"},
+                    "trust": {"current": -1000, "prior": -500, "trend": "賣壓加重"},
+                },
+            }],
+            "sell_items": [{
+                "stock_id": "2317",
+                "name": "鴻海",
+                "close": 200.0,
+                "momentum_5d": {
+                    "foreign": {"current": 0, "prior": 0, "trend": "買賣力道持平"},
+                    "trust": {"current": 0, "prior": 0, "trend": "買賣力道持平"},
+                },
+            }],
+        },
+        taiex_sar_is_bull=True,
+    )
+    bubble = message["contents"]
+    components = list(_flex_text_components(message))
+
+    assert message["type"] == "flex"
+    assert bubble["type"] == "bubble"
+    assert bubble["header"]["contents"][0]["color"] == "#C0392B"
+
+    warning_section = next(
+        section for section in bubble["body"]["contents"]
+        if section["contents"][0].get("text") == "【庫存警示】"
+    )
+    negative_row, zero_row, positive_row = warning_section["contents"][1:]
+    assert negative_row["weight"] == "bold"
+    assert negative_row["contents"][-1]["color"] == "#27AE60"
+    assert "weight" not in zero_row
+    assert zero_row["contents"][-1]["color"] == "#222222"
+    assert positive_row["contents"][-1]["color"] == "#C0392B"
+    assert "??? " not in str(message)
+
+    preview_section = next(
+        section for section in bubble["body"]["contents"]
+        if section["contents"][0].get("text") == "【實戰模擬｜明日】"
+    )
+    item_row = next(
+        component for component in preview_section["contents"]
+        if component.get("type") == "text" and "2454聯發科" in str(component)
+    )
+    assert item_row["contents"][0]["color"] == "#222222"
+    assert item_row["contents"][2]["color"] == "#C0392B"
+    assert item_row["contents"][4]["color"] == "#27AE60"
+    sell_row = next(
+        component for component in preview_section["contents"]
+        if component.get("type") == "text" and "2317鴻海" in str(component)
+    )
+    assert sell_row["contents"][0]["color"] == "#222222"
+    assert sell_row["contents"][2]["color"] == "#222222"
+    assert sell_row["contents"][4]["color"] == "#222222"
+    assert components
+
+
+def test_format_candidates_flex_message_colors_bearish_index_green():
+    message = format_candidates_flex_message("2026-11-03", [], taiex_sar_is_bull=False)
+
+    assert message["contents"]["header"]["contents"][0]["color"] == "#27AE60"
+
+
+def test_send_line_broadcast_sends_flex_message_object(monkeypatch):
+    captured = {}
+
+    class _Response:
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    monkeypatch.setattr(line_notify, "get_line_channel_token", lambda: "test-token")
+    monkeypatch.setattr(
+        line_notify.requests,
+        "post",
+        lambda url, **kwargs: captured.update(url=url, **kwargs) or _Response(),
+    )
+    message = format_candidates_flex_message(
+        "2026-11-03", [], taiex_sar_is_bull=True,
+    )
+
+    line_notify.send_line_broadcast(message)
+
+    assert captured["json"]["messages"] == [message]
 
 
 def test_format_candidates_email_body_empty():

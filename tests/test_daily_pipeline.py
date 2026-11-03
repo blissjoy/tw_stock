@@ -34,6 +34,31 @@ def _stub_stock_info(monkeypatch, rows):
     monkeypatch.setattr(daily_pipeline.finmind_client, "fetch_stock_info", lambda: rows)
 
 
+def _flex_message_text(message):
+    parts = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            if value.get("type") == "text" and isinstance(value.get("text"), str):
+                parts.append(value["text"])
+                return
+            if value.get("type") == "text" and isinstance(value.get("contents"), list):
+                parts.append("".join(
+                    child.get("text", "") for child in value["contents"]
+                    if isinstance(child, dict)
+                ))
+                return
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(message)
+    return "\n".join(parts)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_taiex_network_calls(monkeypatch, tmp_path):
     """run_daily_pipeline()新增了大盤(TAIEX)更新(見fetch_today_taiex())，會無條件呼叫
@@ -485,9 +510,11 @@ def test_sar_preview_is_added_to_the_same_line_message_when_enabled(monkeypatch,
     )
 
     assert len(line_messages) == 1
-    assert line_messages[0].splitlines()[0] == "加權指數 SAR +"
-    assert "・2330台積電 收盤 104.00" in line_messages[0]
-    assert "・2454聯發科 收盤 980.00" in line_messages[0]
+    assert line_messages[0]["type"] == "flex"
+    message_text = _flex_message_text(line_messages[0])
+    assert "加權指數 SAR +" in message_text
+    assert "・2330台積電 收盤 104.00" in message_text
+    assert "・2454聯發科 收盤 980.00" in message_text
 
 
 def test_sar_preview_uses_intraday_prices_as_a_provisional_estimate(monkeypatch, tmp_path):
@@ -530,8 +557,9 @@ def test_sar_preview_uses_intraday_prices_as_a_provisional_estimate(monkeypatch,
     )
 
     assert len(line_messages) == 1
-    assert "【實戰模擬｜明日（盤中估算）】" in line_messages[0]
-    assert "・2330台積電 盤中估價 104.00" in line_messages[0]
+    message_text = _flex_message_text(line_messages[0])
+    assert "【實戰模擬｜明日（盤中估算）】" in message_text
+    assert "・2330台積電 盤中估價 104.00" in message_text
 
 
 def test_get_taiex_sar_direction_uses_live_index_candle(monkeypatch):
@@ -617,6 +645,14 @@ def test_run_daily_pipeline_combines_inventory_warnings_into_line_message(monkey
         daily_pipeline.portfolio_data, "load_escape_signals_for_stocks",
         lambda conn, stock_ids: {"2317": [{"rule_id": "R-CANDLE-05", "title": "高檔變盤線", "date": "2026-07-22"}]},
     )
+    monkeypatch.setattr(
+        daily_pipeline.stock_detail_data,
+        "load_institutional_momentum_analysis",
+        lambda conn, stock_id: {
+            "外資": {"5日": {"current": -1000, "prior": -500, "trend": "賣壓加重"}},
+            "投信": {"5日": {"current": -2000, "prior": -1000, "trend": "賣壓加重"}},
+        },
+    )
 
     line_calls = []
     monkeypatch.setattr(daily_pipeline, "send_line_broadcast", lambda text: line_calls.append(text))
@@ -625,10 +661,16 @@ def test_run_daily_pipeline_combines_inventory_warnings_into_line_message(monkey
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
 
     assert len(line_calls) == 1  # 只發一則，不是候選清單跟庫存警示分開兩則
-    assert "【庫存警示】" in line_calls[0]
+    assert line_calls[0]["type"] == "flex"
+    assert "【庫存警示】" in _flex_message_text(line_calls[0])
+    inventory_section = next(
+        section for section in line_calls[0]["contents"]["body"]["contents"]
+        if section["contents"][0].get("text") == "【庫存警示】"
+    )
+    assert inventory_section["contents"][1]["weight"] == "bold"
     # _price_row()收盤價104.0、成本價200.0，return_pct由load_inventory_summary()算
     # (含估計手續費，不是單純(現價-成本)/成本的簡化算法，見portfolio_data.py)。
-    assert "・鴻海 現104.00 成200.00 -48.2%" in line_calls[0]
+    assert "・鴻海 現104.00 成200.00 -48.2%" in _flex_message_text(line_calls[0])
 
 
 def test_run_daily_pipeline_line_message_shows_safe_when_inventory_has_no_warnings(monkeypatch):
@@ -654,8 +696,8 @@ def test_run_daily_pipeline_line_message_shows_safe_when_inventory_has_no_warnin
 
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
 
-    assert "【庫存警示】" in line_calls[0]
-    assert "安全" in line_calls[0]
+    assert "【庫存警示】" in _flex_message_text(line_calls[0])
+    assert "安全" in _flex_message_text(line_calls[0])
 
 
 def test_run_daily_pipeline_omits_inventory_section_when_escape_check_fails(monkeypatch):
@@ -682,7 +724,7 @@ def test_run_daily_pipeline_omits_inventory_section_when_escape_check_fails(monk
     daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
 
     assert len(line_calls) == 1
-    assert "【庫存警示】" not in line_calls[0]
+    assert "【庫存警示】" not in _flex_message_text(line_calls[0])
 
 
 def test_run_daily_pipeline_line_still_sent_when_email_not_configured(monkeypatch):
@@ -762,8 +804,9 @@ def test_run_daily_pipeline_notifications_apply_same_default_filters_as_ui(monke
     assert captured_filter_args["sar_flip_option"] == chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT
     assert captured_filter_args["zhu_rule_only"] is chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT
     assert any("2330" in text for text in sent_texts)
-    assert any("・2330 104.00 符合規格數1" in text for text in sent_texts)
-    assert not any("9999" in text for text in sent_texts)
+    assert any("・2330 104.00 符合規格數1" in _flex_message_text(text) for text in sent_texts if isinstance(text, dict))
+    assert not any("9999" in _flex_message_text(text) for text in sent_texts if isinstance(text, dict))
+    assert not any("9999" in text for text in sent_texts if isinstance(text, str))
 
 
 def test_run_daily_pipeline_skips_notifications_when_notify_filter_fails(monkeypatch):

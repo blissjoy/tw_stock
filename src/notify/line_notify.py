@@ -15,6 +15,10 @@ from src.data.config import get_line_channel_token
 
 LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
 MAX_MESSAGE_LENGTH = 5000  # LINE單則文字訊息長度上限
+MAX_FLEX_SECTION_ITEMS = 48
+COLOR_RED = "#C0392B"
+COLOR_GREEN = "#27AE60"
+COLOR_BLACK = "#222222"
 
 # 從signal_name字串(例如"R-MA-23單一均線短線做空（88%）")抽出信心分數，跟
 # src/presentation/chart_data.py的_CONFIDENCE_PATTERN是同一個規則(那邊獨立定義一份，
@@ -172,13 +176,166 @@ def format_candidates_message(
     return "\n".join(lines)[:MAX_MESSAGE_LENGTH]
 
 
-def send_line_broadcast(text: str) -> None:
+def _flex_text(text: str, *, color: str = COLOR_BLACK, weight: str | None = None, size: str = "sm") -> dict:
+    component = {"type": "text", "text": text, "wrap": True, "color": color, "size": size}
+    if weight is not None:
+        component["weight"] = weight
+    return component
+
+
+def _flex_rich_text(spans: list[dict], *, weight: str | None = None) -> dict:
+    component = {"type": "text", "contents": spans, "wrap": True, "size": "sm"}
+    if weight is not None:
+        component["weight"] = weight
+    return component
+
+
+def _inventory_is_both_institutional_selling(warning: dict) -> bool:
+    momentum = warning.get("momentum_5d") or {}
+    foreign = momentum.get("foreign")
+    trust = momentum.get("trust")
+    return bool(
+        foreign and trust
+        and foreign.get("current", 0) < 0
+        and trust.get("current", 0) < 0
+    )
+
+
+def _momentum_flex_spans(line: str) -> list[dict] | None:
+    if " 5日" not in line:
+        return None
+    base, momentum_text = line.split(" 5日", 1)
+    match = re.fullmatch(
+        r"外資(買超|賣超|買賣持平|資料不足)([↑↓↔]?) 投信(買超|賣超|買賣持平|資料不足)([↑↓↔]?)",
+        momentum_text,
+    )
+    if match is None:
+        return None
+
+    def _flow_span(label: str, direction: str, arrow: str) -> dict:
+        color = COLOR_RED if arrow == "↑" else (COLOR_GREEN if arrow == "↓" else COLOR_BLACK)
+        return {"type": "span", "text": f"{label}{direction}{arrow}", "color": color}
+
+    return [
+        {"type": "span", "text": base, "color": COLOR_BLACK},
+        {"type": "span", "text": " 5日"},
+        _flow_span("外資", match.group(1), match.group(2)),
+        {"type": "span", "text": " "},
+        _flow_span("投信", match.group(3), match.group(4)),
+    ]
+
+
+def format_candidates_flex_message(
+    date: str, candidates: list[dict], stock_names: dict[str, str] | None = None,
+    stock_industries: dict[str, str] | None = None,
+    inventory_warnings: list[dict] | None = None,
+    current_prices: dict[str, float] | None = None,
+    sar_next_day_preview: dict[str, list[dict]] | None = None,
+    sar_preview_is_intraday: bool = False,
+    taiex_sar_is_bull: bool | None = None,
+) -> dict:
+    """建立單一LINE Flex泡泡；通知文字沿用純文字formatter統一產生。"""
+    text = format_candidates_message(
+        date,
+        candidates,
+        stock_names=stock_names,
+        stock_industries=stock_industries,
+        inventory_warnings=inventory_warnings,
+        current_prices=current_prices,
+        sar_next_day_preview=sar_next_day_preview,
+        sar_preview_is_intraday=sar_preview_is_intraday,
+        taiex_sar_is_bull=taiex_sar_is_bull,
+    )
+    lines = text.splitlines()
+    sar_line = lines[0] if lines else "加權指數 SAR 資料不足"
+    sar_color = COLOR_RED if sar_line.endswith("+") else (
+        COLOR_GREEN if sar_line.endswith("-") else COLOR_BLACK
+    )
+
+    sections: list[tuple[str, list[str]]] = []
+    current_section: tuple[str, list[str]] | None = None
+    for line in lines[1:]:
+        if not line:
+            current_section = None
+            continue
+        if line.startswith("【"):
+            current_section = (line, [])
+            sections.append(current_section)
+        elif current_section is not None:
+            current_section[1].append(line)
+        else:
+            current_section = (line, [])
+            sections.append(current_section)
+
+    body_sections = []
+    warning_index = 0
+    warnings = inventory_warnings or []
+    for title, section_lines in sections:
+        section_contents = [_flex_text(title, weight="bold", size="md")]
+        for line in section_lines[:MAX_FLEX_SECTION_ITEMS]:
+            if title == "【庫存警示】" and line.startswith("・") and warning_index < len(warnings):
+                warning = warnings[warning_index]
+                warning_index += 1
+                prefix, _, return_text = line.rpartition(" ")
+                return_pct = warning.get("return_pct")
+                return_color = (
+                    COLOR_RED if return_pct is not None and return_pct > 0 else
+                    COLOR_GREEN if return_pct is not None and return_pct < 0 else COLOR_BLACK
+                )
+                spans = [
+                    {"type": "span", "text": f"{prefix} ", "color": COLOR_BLACK},
+                    {"type": "span", "text": return_text, "color": return_color},
+                ]
+                row_weight = "bold" if _inventory_is_both_institutional_selling(warning) else None
+                section_contents.append(_flex_rich_text(spans, weight=row_weight))
+            elif title == "【庫存警示】" and line.startswith("・"):
+                section_contents.append(_flex_text(line))
+            else:
+                spans = _momentum_flex_spans(line)
+                section_contents.append(
+                    _flex_rich_text(spans) if spans is not None else _flex_text(line)
+                )
+        omitted = len(section_lines) - MAX_FLEX_SECTION_ITEMS
+        if omitted > 0:
+            section_contents.append(_flex_text(f"…其餘 {omitted} 項略"))
+        body_sections.append({
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": section_contents,
+        })
+
+    return {
+        "type": "flex",
+        "altText": f"{date} 每日選股與庫存通知",
+        "contents": {
+            "type": "bubble",
+            "size": "giga",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [_flex_text(sar_line, color=sar_color, weight="bold", size="lg")],
+                "paddingAll": "16px",
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "lg",
+                "contents": body_sections or [_flex_text("沒有通知內容")],
+                "paddingAll": "16px",
+            },
+        },
+    }
+
+
+def send_line_broadcast(text: str | dict) -> None:
     """呼叫 LINE Messaging API 的 broadcast endpoint，送給所有加此頻道為好友的人。"""
     token = get_line_channel_token()
+    line_message = {"type": "text", "text": text} if isinstance(text, str) else text
     response = requests.post(
         LINE_BROADCAST_URL,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"messages": [{"type": "text", "text": text}]},
+        json={"messages": [line_message]},
         timeout=10,
     )
     response.raise_for_status()

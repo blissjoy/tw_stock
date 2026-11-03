@@ -49,8 +49,8 @@ from src.data.connection import (  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.indicators.parabolic_sar import compute_sar  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
-from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
-from src.presentation import chart_data, data_fetch_log, pipeline_status, portfolio_data, watchlist_export  # noqa: E402
+from src.notify.line_notify import format_candidates_flex_message, send_line_broadcast  # noqa: E402
+from src.presentation import chart_data, data_fetch_log, pipeline_status, portfolio_data, stock_detail_data, watchlist_export  # noqa: E402
 from src.screener.daily_screener import refresh_indicator_window, run_screen_and_store  # noqa: E402
 
 
@@ -701,16 +701,22 @@ def run_daily_pipeline(
                 try:
                     summary_df = portfolio_data.load_inventory_summary(conn, inventory_portfolio_conn)
                     escape_signals = portfolio_data.load_escape_signals_for_stocks(conn, list(summary_df["stock_id"]))
-                    inventory_warnings = [
-                        {
+                    inventory_warnings = []
+                    for _, row in summary_df.iterrows():
+                        stock_id = row["stock_id"]
+                        if not escape_signals.get(stock_id):
+                            continue
+                        momentum = stock_detail_data.load_institutional_momentum_analysis(conn, stock_id)
+                        inventory_warnings.append({
                             "stock_id": row["stock_id"], "name": row["name"],
                             "close": row["close"] if pd.notna(row["close"]) else None,
                             "cost_price": row["cost_price"] if pd.notna(row["cost_price"]) else None,
                             "return_pct": row["return_pct"] if pd.notna(row["return_pct"]) else None,
-                        }
-                        for _, row in summary_df.iterrows()
-                        if escape_signals.get(row["stock_id"])
-                    ]
+                            "momentum_5d": {
+                                "foreign": momentum.get("外資", {}).get("5日") if momentum else None,
+                                "trust": momentum.get("投信", {}).get("5日") if momentum else None,
+                            },
+                        })
                 finally:
                     inventory_portfolio_conn.close()
             except Exception as exc:  # noqa: BLE001
@@ -761,7 +767,7 @@ def run_daily_pipeline(
                 try:
                     stock_names = {sid: info.get("name", "") for sid, info in stock_info_by_id.items()}
                     stock_industries = {sid: info.get("industry", "") for sid, info in stock_info_by_id.items()}
-                    send_line_broadcast(format_candidates_message(
+                    send_line_broadcast(format_candidates_flex_message(
                         iso_date, notify_candidates, stock_names=stock_names, stock_industries=stock_industries,
                         inventory_warnings=inventory_warnings, current_prices=notify_current_prices,
                         sar_next_day_preview=sar_preview,

@@ -10449,3 +10449,11 @@ yfinance備援都沒有資料才判定非交易日。本機DB另確認`daily_can
 - `src/notify/line_notify.py`：價格後附「5日外資買超↑ 投信賣超↓」格式；箭頭沿用既有動能分類語意，法人資料不足分別標示。
 - README及INSTALL說明通知欄位與箭頭意義。
 - 測試：驗證既有動能分析結果傳入預覽項目、通知方向/箭頭格式與資料不足顯示。
+
+## LINE每日通知改用Flex訊息與色彩標示（2026-11-03）
+
+使用者要求將每日通知改成單一Flex訊息，並依加權指數SAR、庫存報酬率及實戰模擬法人力道標示顏色；庫存股近5日外資與投信都淨賣超時，整列加粗。
+
+- `src/notify/line_notify.py`：新增Flex bubble格式，沿用既有文字formatter提供內容；SAR多頭紅、空頭綠，庫存報酬率正紅/零黑/負綠，模擬通知箭頭上升紅/下降綠/持平黑；庫存列若外資與投信5日淨額皆為負值則加粗。每個區塊限制項目數並顯示略過數，避免超出Flex元件上限。
+- `scripts/daily_pipeline.py`：庫存警示列使用個股明細相同的5日動能分析，並以Flex訊息送出；舊的純文字LINE helper仍保留供相容與單元測試。
+- 測試：`tests/test_notify.py`、`tests/test_daily_pipeline.py`、`tests/test_stock_detail_data.py`共139項通過；LINE官方非發送型broadcast validator回HTTP 200，確認Flex payload格式有效，沒有送出測試推播。
