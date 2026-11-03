@@ -25,7 +25,7 @@ $schedules = @(
     @{ Suffix = "1200"; Time = "12:00"; Flags = "" },
     @{ Suffix = "1300"; Time = "13:00"; Flags = "" },
     @{ Suffix = "1330"; Time = "13:30"; Flags = "--sar-preview" },
-    @{ Suffix = "1430"; Time = "14:30"; Flags = "" },
+    @{ Suffix = "1430"; Time = "14:30"; Flags = "--market-forecast" },
     @{ Suffix = "1700"; Time = "17:00"; Flags = "--dry-run --chip-refresh" },
     @{ Suffix = "2100"; Time = "21:00"; Flags = "--dry-run --skip-tpex" }
 )

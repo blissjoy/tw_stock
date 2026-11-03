@@ -48,6 +48,12 @@ from src.data.connection import (  # noqa: E402
 )
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.indicators.parabolic_sar import compute_sar  # noqa: E402
+from src.market_forecast import (  # noqa: E402
+    build_taiex_forecast,
+    format_taiex_forecast,
+    record_taiex_forecast,
+    verify_pending_taiex_forecast,
+)
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_flex_message, send_line_broadcast  # noqa: E402
 from src.presentation import chart_data, data_fetch_log, pipeline_status, portfolio_data, stock_detail_data, watchlist_export  # noqa: E402
@@ -505,6 +511,7 @@ def run_daily_pipeline(
     conn, date_str: str | None = None, min_days: int = 60, dry_run: bool = False, skip_tpex: bool = False,
     chip_refresh: bool = False, on_progress: Callable[[str, int, int], None] | None = None,
     trigger: str = "automatic", include_sar_preview: bool = False,
+    include_market_forecast: bool = False,
 ) -> list[dict]:
     """核心orchestration，刻意與「conn是Turso還是本機sqlite」無關，方便測試與dry-run重用。
 
@@ -781,6 +788,50 @@ def run_daily_pipeline(
                 except Exception as exc:  # noqa: BLE001
                     print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
 
+            if include_market_forecast:
+                if dry_run:
+                    print("--dry-run：略過明日大盤預估LINE通知。")
+                elif is_intraday:
+                    error = "明日大盤預估需要正式收盤行情；本次仍為盤中資料，略過預估通知。"
+                    print(error)
+                    run_errors.append(error)
+                else:
+                    try:
+                        index_rows = conn.execute(
+                            """
+                            SELECT date, open, high, low, close, volume
+                            FROM stock_prices
+                            WHERE stock_id = ? AND date <= ?
+                            ORDER BY date DESC
+                            LIMIT 120
+                            """,
+                            (yfinance_client.TAIEX_STOCK_ID, iso_date),
+                        ).fetchall()
+                        index_rows.reverse()
+                        if not index_rows or index_rows[-1][0] != iso_date:
+                            raise ValueError(f"加權指數缺少 {iso_date} 的收盤行情。")
+
+                        if len(index_rows) >= 2:
+                            previous = index_rows[-2]
+                            verify_pending_taiex_forecast(
+                                forecast_date=previous[0],
+                                actual_date=iso_date,
+                                previous_close=float(previous[4]),
+                                close=float(index_rows[-1][4]),
+                                high=float(index_rows[-1][2]),
+                                low=float(index_rows[-1][3]),
+                            )
+
+                        forecast = build_taiex_forecast(index_rows)
+                        if record_taiex_forecast(forecast):
+                            send_line_broadcast(format_taiex_forecast(forecast))
+                        else:
+                            print(f"{iso_date} 的大盤預估已記錄，略過重複通知。")
+                    except Exception as exc:  # noqa: BLE001
+                        error = f"明日大盤預估產生、記錄或發送失敗：{exc}"
+                        print(error)
+                        run_errors.append(error)
+
         if chip_refresh:
             # F/G(觀察清單股票)+Google Sheet匯出：2026-08-04改成獨立於dry_run之外的
             # chip_refresh旗標(理由見run_daily_pipeline() docstring)。兩件事共用同一個
@@ -849,6 +900,10 @@ def main() -> None:
         "--sar-preview", action="store_true",
         help="在LINE通知中加入SAR實戰模擬的明日買進候選、賣出觀察及今日收盤價（僅正式收盤行情）",
     )
+    parser.add_argument(
+        "--market-forecast", action="store_true",
+        help="使用正式收盤加權指數資料，獨立發送並記錄朱老師短線明日大盤預估",
+    )
     args = parser.parse_args()
 
     if args.local_db:
@@ -879,6 +934,7 @@ def main() -> None:
         conn, date_str=args.date, min_days=args.min_days, dry_run=args.dry_run, skip_tpex=args.skip_tpex,
         chip_refresh=args.chip_refresh, on_progress=_print_progress,
         include_sar_preview=args.sar_preview,
+        include_market_forecast=args.market_forecast,
     )
     conn.close()
 

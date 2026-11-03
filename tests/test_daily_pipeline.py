@@ -513,8 +513,8 @@ def test_sar_preview_is_added_to_the_same_line_message_when_enabled(monkeypatch,
     assert line_messages[0]["type"] == "flex"
     message_text = _flex_message_text(line_messages[0])
     assert "加權指數 SAR +" in message_text
-    assert "・2330台積電 收盤 104.00" in message_text
-    assert "・2454聯發科 收盤 980.00" in message_text
+    assert "・2330 台積電 104.00 5日力道 外資資料不足 投信資料不足" in message_text
+    assert "・2454 聯發科 980.00 5日力道 外資資料不足 投信資料不足" in message_text
 
 
 def test_sar_preview_uses_intraday_prices_as_a_provisional_estimate(monkeypatch, tmp_path):
@@ -559,7 +559,87 @@ def test_sar_preview_uses_intraday_prices_as_a_provisional_estimate(monkeypatch,
     assert len(line_messages) == 1
     message_text = _flex_message_text(line_messages[0])
     assert "【實戰模擬｜明日（盤中估算）】" in message_text
-    assert "・2330台積電 盤中估價 104.00" in message_text
+    assert "・2330 台積電 104.00 5日力道 外資資料不足 投信資料不足" in message_text
+
+
+def test_market_forecast_is_sent_as_a_separate_line_message(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta
+
+    conn = _fresh_conn()
+    iso_dates = [
+        (datetime(2026, 6, 1) + timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(30)
+    ]
+    forecast_date = iso_dates[-1]
+    date_str = forecast_date.replace("-", "")
+    storage.upsert_stocks(conn, [{
+        "stock_id": daily_pipeline.yfinance_client.TAIEX_STOCK_ID,
+        "name": "TAIEX",
+        "market": "INDEX",
+        "industry": None,
+        "updated_at": forecast_date,
+    }])
+    storage.upsert_stock_prices(conn, [
+        {
+            "stock_id": daily_pipeline.yfinance_client.TAIEX_STOCK_ID,
+            "date": day,
+            "open": 20000 - offset * 10,
+            "high": 20002 - offset * 10,
+            "low": 19988 - offset * 10,
+            "close": 19990 - offset * 10,
+            "volume": 1_000_000,
+            "trading_money": None,
+            "trading_turnover": None,
+            "spread": None,
+        }
+        for offset, day in enumerate(iso_dates)
+    ])
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
+    _stub_stock_info(monkeypatch, [])
+    monkeypatch.setattr(daily_pipeline, "fetch_today_twse", lambda *args, **kwargs: (True, False))
+    monkeypatch.setattr(daily_pipeline, "fetch_today_taiex", lambda *args, **kwargs: True)
+    monkeypatch.setattr(daily_pipeline, "fetch_today_tpex", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        daily_pipeline.twse_client,
+        "fetch_taiex_realtime",
+        lambda value: {
+            "date": forecast_date,
+            "high": 19972.0,
+            "low": 19958.0,
+            "close": 19960.0,
+        },
+    )
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        daily_pipeline.chart_data,
+        "load_stock_universe_for_date",
+        lambda *args, **kwargs: (pd.DataFrame({"stock_id": []}), forecast_date, False),
+    )
+    monkeypatch.setattr(
+        daily_pipeline.chart_data,
+        "apply_candidate_filters",
+        lambda *args, **kwargs: pd.DataFrame({"stock_id": []}),
+    )
+    recorded = []
+    monkeypatch.setattr(daily_pipeline, "record_taiex_forecast", lambda forecast: recorded.append(forecast) or True)
+    monkeypatch.setattr(daily_pipeline, "verify_pending_taiex_forecast", lambda **kwargs: False)
+    line_messages = []
+    monkeypatch.setattr(daily_pipeline, "send_line_broadcast", line_messages.append)
+    monkeypatch.setattr(daily_pipeline, "send_email", lambda *args, **kwargs: None)
+
+    daily_pipeline.run_daily_pipeline(
+        conn,
+        date_str=date_str,
+        dry_run=False,
+        skip_tpex=True,
+        include_market_forecast=True,
+    )
+
+    assert len(recorded) == 1
+    assert len(line_messages) == 2
+    assert line_messages[0]["type"] == "flex"
+    assert line_messages[1].startswith("【明日大盤預估｜朱老師短線】")
 
 
 def test_get_taiex_sar_direction_uses_live_index_candle(monkeypatch):
@@ -670,7 +750,7 @@ def test_run_daily_pipeline_combines_inventory_warnings_into_line_message(monkey
     assert inventory_section["contents"][1]["weight"] == "bold"
     # _price_row()收盤價104.0、成本價200.0，return_pct由load_inventory_summary()算
     # (含估計手續費，不是單純(現價-成本)/成本的簡化算法，見portfolio_data.py)。
-    assert "・鴻海 現104.00 成200.00 -48.2%" in _flex_message_text(line_calls[0])
+    assert "・鴻海 現104.00 成200.00 -48.2% 5日力道 外資↓ 投信↓" in _flex_message_text(line_calls[0])
 
 
 def test_run_daily_pipeline_line_message_shows_safe_when_inventory_has_no_warnings(monkeypatch):
