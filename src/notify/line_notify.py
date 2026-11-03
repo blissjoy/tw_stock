@@ -36,6 +36,7 @@ def format_candidates_message(
     date: str, candidates: list[dict], stock_names: dict[str, str] | None = None,
     stock_industries: dict[str, str] | None = None,
     inventory_warnings: list[dict] | None = None,
+    current_prices: dict[str, float] | None = None,
 ) -> str:
     """把每日候選清單格式化成單則LINE文字訊息，超過LINE長度上限時截斷。
 
@@ -44,12 +45,15 @@ def format_candidates_message(
     使用者收到的LINE訊息因此充滿同一檔股票重複出現(只差在觸發哪條規則)的雜訊，
     跟候選清單畫面(`chart_data.load_stock_universe_for_date()`已經合併成同一檔股票
     一列)差異很大，讓人困惑。改成依stock_id分組，一檔股票只顯示一行
-    「{代號}{名稱}(產業別) 符合規格數{n}」，依信心分數加總由高到低排序(反映「這檔
+    「{代號}{名稱}(產業別) {股價} 符合規格數{n}」，依信心分數加總由高到低排序(反映「這檔
     股票有多少、多強的訊號重疊」，不是隨意順序)。
 
     stock_names：{stock_id: name}，省略或查無名稱時該檔只顯示代號。
     stock_industries(2026-08-13新增)：{stock_id: 產業別}，省略或查無產業別時不顯示
     括號那段——使用者反映只看代號+名稱不容易一眼分辨這檔股票的產業背景。
+    current_prices：{stock_id: 本次更新取得的最新價}；盤中為當下報價，收盤後為最新可用價格；
+    省略或查無價格時顯示"-"。
+    sar_next_day_preview：可選的SAR實戰模擬隔日買進候選／持倉觀察，逐筆附當日收盤價。
 
     inventory_warnings(2026-08-12新增，2026-08-13改版)：庫存逃命示警清單，每筆
     {"stock_id", "name", "close", "cost_price", "return_pct"}，只放「目前有逃命
@@ -70,6 +74,7 @@ def format_candidates_message(
     else:
         stock_names = stock_names or {}
         stock_industries = stock_industries or {}
+        current_prices = current_prices or {}
         grouped: dict[str, list[dict]] = {}
         for c in candidates:
             grouped.setdefault(c["stock_id"], []).append(c)
@@ -89,7 +94,8 @@ def format_candidates_message(
             name = stock_names.get(stock_id, "")
             industry = stock_industries.get(stock_id, "")
             industry_suffix = f"({industry})" if industry else ""
-            lines.append(f"・{stock_id}{name}{industry_suffix} 符合規格數{len(matches)}")
+            price = _fmt_num(current_prices.get(stock_id))
+            lines.append(f"・{stock_id}{name}{industry_suffix} {price} 符合規格數{len(matches)}")
 
     if inventory_warnings is not None:
         lines.append("")

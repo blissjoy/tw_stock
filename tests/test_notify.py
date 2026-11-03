@@ -12,33 +12,38 @@ def _sample_candidates():
 def test_format_candidates_message_empty():
     text = format_candidates_message("2026-07-22", [])
     assert "2026-07-22" in text
+    assert text.splitlines()[0] == "加權指數 SAR +"
     assert "沒有符合條件" in text
 
 
 def test_format_candidates_message_lists_all_candidates():
     text = format_candidates_message("2026-07-22", _sample_candidates())
     assert "共2檔候選" in text
+    assert text.splitlines()[0] == "加權指數 SAR -"
     assert "2330" in text
     assert "2454" in text
 
 
 def test_format_candidates_message_dedupes_same_stock_and_shows_match_count():
-    """2026-08-01改版：同一檔股票符合多條規則時(screen_all_stocks()刻意不去重)，
-    LINE訊息應該合併成一行「{代號}{名稱} 符合規格數{n}」，不是逐條規則各自一行。"""
+    """同一檔股票符合多條規則時，訊息合併成一行並顯示股價與符合規格數。"""
     candidates = [
         {"stock_id": "00937B", "signal_name": "R-MA-23單一均線短線做空（88%）", "entry_price": 14.73, "stop_loss": 14.75, "note": None},
         {"stock_id": "00937B", "signal_name": "R-MA-25單一均線中線做空（88%）", "entry_price": 14.73, "stop_loss": 14.75, "note": None},
         {"stock_id": "2330", "signal_name": "R-TREND-14多頭短線進場（92%）", "entry_price": 600.0, "stop_loss": 570.0, "note": None},
     ]
 
-    text = format_candidates_message("2026-07-22", candidates, stock_names={"00937B": "元大美債20正2", "2330": "台積電"})
+    text = format_candidates_message(
+        "2026-07-22", candidates,
+        stock_names={"00937B": "元大美債20正2", "2330": "台積電"},
+        current_prices={"00937B": 14.73, "2330": 600.0},
+    )
 
     assert "共2檔候選" in text  # 2檔不重複的股票，不是3條規則紀錄
     lines = text.splitlines()
-    assert "・00937B元大美債20正2 符合規格數2" in lines
-    assert "・2330台積電 符合規格數1" in lines
+    assert "・00937B元大美債20正2 14.73 符合規格數2" in lines
+    assert "・2330台積電 600.00 符合規格數1" in lines
     # 00937B兩條規則信心加總176(88+88) > 2330單條92，應該排在前面
-    assert lines.index("・00937B元大美債20正2 符合規格數2") < lines.index("・2330台積電 符合規格數1")
+    assert lines.index("・00937B元大美債20正2 14.73 符合規格數2") < lines.index("・2330台積電 600.00 符合規格數1")
 
 
 def test_format_candidates_message_missing_name_falls_back_to_stock_id_only():
@@ -46,7 +51,7 @@ def test_format_candidates_message_missing_name_falls_back_to_stock_id_only():
 
     text = format_candidates_message("2026-07-22", candidates)
 
-    assert "・9999 符合規格數1" in text
+    assert "・9999 - 符合規格數1" in text
 
 
 def test_format_candidates_message_appends_industry_when_provided():
@@ -63,8 +68,8 @@ def test_format_candidates_message_appends_industry_when_provided():
     )
 
     lines = text.splitlines()
-    assert "・2330台積電(半導體) 符合規格數1" in lines
-    assert "・2454聯發科(半導體) 符合規格數1" in lines
+    assert "・2330台積電(半導體) - 符合規格數1" in lines
+    assert "・2454聯發科(半導體) - 符合規格數1" in lines
 
 
 def test_format_candidates_message_appends_inventory_warnings_section_when_present():

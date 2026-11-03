@@ -598,14 +598,12 @@ def test_run_daily_pipeline_notifications_apply_same_default_filters_as_ui(monke
     assert captured_filter_args["sar_flip_option"] == chart_data.CANDIDATE_SAR_FLIP_OPTION_DEFAULT
     assert captured_filter_args["zhu_rule_only"] is chart_data.CANDIDATE_ZHU_RULE_ONLY_DEFAULT
     assert any("2330" in text for text in sent_texts)
+    assert any("・2330 104.00 符合規格數1" in text for text in sent_texts)
     assert not any("9999" in text for text in sent_texts)
 
 
-def test_run_daily_pipeline_falls_back_to_unfiltered_candidates_when_notify_filter_fails(monkeypatch):
-    """通知篩選這一步(load_stock_universe_for_date/apply_candidate_filters)萬一
-    出錯，不應該讓整條pipeline中斷或掉入'failed'狀態、也不應該讓使用者今天完全
-    收不到通知——候選清單已經成功寫進DB了，退回寄出未篩選的原始candidates即可。
-    """
+def test_run_daily_pipeline_skips_notifications_when_notify_filter_fails(monkeypatch):
+    """候選篩選出錯時不得把未篩選候選股發送給使用者，但管線與資料寫入仍正常完成。"""
     conn = _fresh_conn()
     monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
     _stub_stock_info(monkeypatch, [])
@@ -629,7 +627,10 @@ def test_run_daily_pipeline_falls_back_to_unfiltered_candidates_when_notify_filt
     result = daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=False, skip_tpex=True)
 
     assert result == raw_candidates
-    assert any("2330" in text for text in sent_texts)
+    assert sent_texts == []
+    log_entry = json.loads(daily_pipeline.data_fetch_log.LOG_PATH.read_text(encoding="utf-8").splitlines()[-1])
+    assert log_entry["status"] == "success"
+    assert "通知篩選失敗，已跳過LINE/Email候選通知：模擬daily_indicators查詢失敗" in log_entry["errors"]
 
 
 def test_run_daily_pipeline_updates_tpex_when_not_skipped(monkeypatch):

@@ -518,7 +518,7 @@ def run_daily_pipeline(
     # 部分資料，不會因為變數還沒賦值而在except分支裡NameError。
     twse_failed_stock_ids: list[dict] = []
     tpex_failed_stock_ids: list[dict] = []
-    taiex_errors: list[str] = []
+    run_errors: list[str] = []
 
     try:
         # 只呼叫一次FinMind的股票基本資料(涵蓋TWSE+TPEx)，同時供TWSE/TPEx兩條路徑取得真實
@@ -561,10 +561,10 @@ def run_daily_pipeline(
                 if not taiex_ok:
                     detail = "今日OHLC仍缺失；大盤資料來源均無可寫入資料"
                 print(f"大盤({yfinance_client.TAIEX_STOCK_ID})：{detail}")
-                taiex_errors.append(f"{iso_date} {detail}")
+                run_errors.append(f"{iso_date} {detail}")
         except Exception as exc:  # noqa: BLE001
             print(f"大盤({yfinance_client.TAIEX_STOCK_ID})更新失敗（略過，不影響個股資料）：{exc}")
-            taiex_errors.append(f"{iso_date} 大盤指數更新失敗：{exc}")
+            run_errors.append(f"{iso_date} 大盤指數更新失敗：{exc}")
 
         if not skip_tpex:
             tpex_count = fetch_today_tpex(
@@ -613,12 +613,10 @@ def run_daily_pipeline(
             # 使用者回報收到的LINE通知涵蓋股票數比打開UI看到的候選清單多，兩邊篩選
             # 條件對不齊、讓人誤以為系統有bug，才發現這個落差——這裡改成先用跟UI同一套
             # 預設條件篩選過，再從candidates篩出通過的股票才格式化發送，確保「主動推播
-            # 收到的」跟「打開UI看到的」是同一個集合。獨立包一層try/except，理由跟下面
-            # 兩個通知管道一致：候選清單已經成功寫進DB了，如果這層篩選本身出問題(例如
-            # daily_indicators查詢失敗)，不應該讓整條pipeline被標記成失敗、也不應該讓
-            # 使用者今天完全收不到通知——退回寄出未篩選的原始candidates(寧可訊息範圍
-            # 比UI寬，也不要整批通知直接消失)。
+            # 收到的」跟「打開UI看到的」是同一個集合。候選清單已寫入DB，但篩選失敗時
+            # 不可退回未篩選名單，以免誤導使用者。
             notify_candidates = candidates
+            notification_filters_ok = True
             try:
                 universe_df, _, _ = chart_data.load_stock_universe_for_date(conn, target_date=iso_date)
                 active_filter_labels = [
@@ -637,7 +635,10 @@ def run_daily_pipeline(
                 notify_candidates = [c for c in candidates if c["stock_id"] in notify_stock_ids]
                 print(f"通知套用UI預設篩選後：{len(notify_stock_ids)}檔（原始規則命中{len(candidates)}筆）")
             except Exception as exc:  # noqa: BLE001
-                print(f"通知篩選失敗，改寄未篩選的原始候選清單（略過，不影響已寫入的候選清單）：{exc}")
+                notification_filters_ok = False
+                error = f"通知篩選失敗，已跳過LINE/Email候選通知：{exc}"
+                print(error)
+                run_errors.append(error)
 
             # 2026-08-12新增：庫存逃命示警——使用者要求「庫存損益是整個系統存在的關鍵」，
             # 每次真正發送通知(=股價/籌碼資料剛更新完)都要主動檢查一次目前持股有沒有
@@ -670,21 +671,29 @@ def run_daily_pipeline(
             except Exception as exc:  # noqa: BLE001
                 print(f"庫存逃命示警檢查失敗（略過，不影響候選清單通知）：{exc}")
 
-            # 兩個通知管道各自獨立try/except：例如Gmail憑證還沒設定時，LINE通知仍應正常發送，
-            # 不應該讓其中一個管道還沒設定/暫時失敗就讓整條pipeline中斷（候選清單已經寫進Turso了）。
-            try:
-                stock_names = {sid: info.get("name", "") for sid, info in stock_info_by_id.items()}
-                stock_industries = {sid: info.get("industry", "") for sid, info in stock_info_by_id.items()}
-                send_line_broadcast(format_candidates_message(
-                    iso_date, notify_candidates, stock_names=stock_names, stock_industries=stock_industries,
-                    inventory_warnings=inventory_warnings,
-                ))
-            except Exception as exc:  # noqa: BLE001
-                print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
-            try:
-                send_email(f"[每日選股] {iso_date}", format_candidates_email_body(iso_date, notify_candidates))
-            except Exception as exc:  # noqa: BLE001
-                print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
+            if notification_filters_ok:
+                notify_current_prices = {}
+                notify_stock_ids = sorted({c["stock_id"] for c in notify_candidates})
+                if notify_stock_ids:
+                    placeholders = ",".join("?" for _ in notify_stock_ids)
+                    price_rows = conn.execute(
+                        f"SELECT stock_id, close FROM stock_prices WHERE date = ? AND stock_id IN ({placeholders})",
+                        [iso_date, *notify_stock_ids],
+                    ).fetchall()
+                    notify_current_prices = {stock_id: close for stock_id, close in price_rows}
+                try:
+                    stock_names = {sid: info.get("name", "") for sid, info in stock_info_by_id.items()}
+                    stock_industries = {sid: info.get("industry", "") for sid, info in stock_info_by_id.items()}
+                    send_line_broadcast(format_candidates_message(
+                        iso_date, notify_candidates, stock_names=stock_names, stock_industries=stock_industries,
+                        inventory_warnings=inventory_warnings, current_prices=notify_current_prices,
+                    ))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
+                try:
+                    send_email(f"[每日選股] {iso_date}", format_candidates_email_body(iso_date, notify_candidates))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"Email通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
 
         if chip_refresh:
             # F/G(觀察清單股票)+Google Sheet匯出：2026-08-04改成獨立於dry_run之外的
@@ -724,7 +733,7 @@ def run_daily_pipeline(
         data_fetch_log.record_fetch_run(
             conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="success",
             is_intraday=is_intraday, candidates_count=len(candidates), indicators_refreshed=refreshed,
-            errors=taiex_errors,
+            errors=run_errors,
             failed_downloads={"TWSE": twse_failed_stock_ids, "TPEx": tpex_failed_stock_ids},
         )
         return candidates
