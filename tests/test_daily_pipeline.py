@@ -48,6 +48,9 @@ def _no_real_taiex_network_calls(monkeypatch, tmp_path):
     range()(內部逐月呼叫fetch_taiex_volume())覆蓋yfinance的volume欄位，同一個理由，
     一併擋住避免真的打到TWSE。
 
+    2026-11-02新增：Yahoo漏掉最新指數列時會呼叫TWSE MIS即時行情作為OHLC備援，預設
+    也要擋住網路請求。
+
     同一天再新增：fetch_today_tpex()對批次下載後仍失敗的股票，現在會呼叫
     yfinance_client.fetch_twse_prices_batch()當「轉上市」備援(見fetch_today_tpex()
     docstring)——這個檔案裡不少既有測試會故意讓TPEx批次下載對某些股票查無資料
@@ -64,6 +67,7 @@ def _no_real_taiex_network_calls(monkeypatch, tmp_path):
     """
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda *args, **kwargs: [])
     monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_volume", lambda *args, **kwargs: {})
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_realtime", lambda *args, **kwargs: None)
     monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_twse_prices_batch", lambda *args, **kwargs: {})
     monkeypatch.setattr(daily_pipeline.trading_calendar, "get_holidays", lambda year: [])
     monkeypatch.setattr(daily_pipeline.data_fetch_log, "LOG_PATH", tmp_path / "data_fetch_log.jsonl")
@@ -1240,6 +1244,36 @@ def test_fetch_today_taiex_skips_date_with_twse_volume_but_no_ohlc_anywhere(monk
         "SELECT COUNT(*) FROM stock_prices WHERE stock_id = ? AND date = ?", (stock_id, "2026-08-03"),
     ).fetchone()
     assert row == (0,)
+
+
+def test_fetch_today_taiex_uses_twse_realtime_when_yfinance_omits_latest_day(monkeypatch):
+    conn = _fresh_conn()
+    stock_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    old_row = {
+        "stock_id": stock_id, "date": "2026-08-03",
+        "open": 17000.0, "high": 17100.0, "low": 16950.0, "close": 17050.0,
+        "volume": 0, "trading_money": None, "trading_turnover": None, "spread": None,
+    }
+    realtime_row = {
+        "stock_id": stock_id, "date": "2026-08-04",
+        "open": 17100.0, "high": 17200.0, "low": 17050.0, "close": 17150.0,
+        "volume": 0, "trading_money": None, "trading_turnover": None, "spread": None,
+    }
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: [old_row])
+    monkeypatch.setattr(
+        daily_pipeline.twse_client, "fetch_taiex_volume",
+        lambda month: {"2026-08-04": 123456789} if month.startswith("202608") else {},
+    )
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_taiex_realtime", lambda date: realtime_row)
+
+    result = daily_pipeline.fetch_today_taiex(conn, "20260804")
+
+    assert result is True
+    row = conn.execute(
+        "SELECT open, high, low, close, volume FROM stock_prices WHERE stock_id = ? AND date = ?",
+        (stock_id, "2026-08-04"),
+    ).fetchone()
+    assert row == (17100.0, 17200.0, 17050.0, 17150.0, 123456789)
 
 
 def test_fetch_today_taiex_returns_false_when_no_data(monkeypatch):

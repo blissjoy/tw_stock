@@ -6,6 +6,7 @@ from src.data.twse_client import (
     parse_institutional_investors,
     parse_margin_trading,
     parse_stock_prices,
+    parse_taiex_realtime,
     parse_taiex_volume,
 )
 
@@ -158,6 +159,31 @@ def test_parse_taiex_volume_returns_date_to_volume_map():
 def test_parse_taiex_volume_empty_when_stat_not_ok():
     # 查詢還沒有任何交易日資料的月份時的實際回應型態
     assert parse_taiex_volume({"stat": "查詢無資料"}) == {}
+
+
+def test_parse_taiex_realtime_reads_current_index_ohlc():
+    raw = {
+        "msgArray": [{
+            "i": "tidx.tw", "d": "20261102",
+            "o": "45,034.53", "h": "45,156.17", "l": "44,399.10", "z": "44,920.14",
+        }],
+    }
+
+    row = parse_taiex_realtime(raw, "20261102")
+
+    assert row == {
+        "stock_id": "^TWII", "date": "2026-11-02",
+        "open": 45034.53, "high": 45156.17, "low": 44399.10, "close": 44920.14,
+        "volume": 0, "trading_money": None, "trading_turnover": None, "spread": None,
+    }
+
+
+def test_parse_taiex_realtime_rejects_stale_or_incomplete_quotes():
+    stale = {"msgArray": [{"i": "tidx.tw", "d": "20261030", "o": "1", "h": "1", "l": "1", "z": "1"}]}
+    incomplete = {"msgArray": [{"i": "tidx.tw", "d": "20261102", "o": "-", "h": "1", "l": "1", "z": "1"}]}
+
+    assert parse_taiex_realtime(stale, "20261102") is None
+    assert parse_taiex_realtime(incomplete, "20261102") is None
 
 
 def test_month_starts_covers_month_boundary_including_year_rollover():

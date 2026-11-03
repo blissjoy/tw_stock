@@ -400,6 +400,11 @@ def fetch_today_taiex(conn, date_str: str) -> bool:
     (代表Yahoo以前回傳過這天、現在才消失)的，用DB裡的舊OHLC+TWSE的新volume組一筆
     補回去；兩邊都沒有OHLC可用的日期(從來没被yfinance回傳過)就放棄，沒有open/high/
     low/close可以寫。
+
+    ⚠️ 2026-11-02再次發現：上述補救只涵蓋「資料庫已有舊OHLC」的日期；若Yahoo漏掉
+    最新交易日，該日尚無舊OHLC可用，雖然TWSE FMTQIK已有收盤指數與成交量，仍會跳過
+    該日，且歷史列讓整次函式看似成功。最新交易日缺列時改向TWSE MIS即時行情取當日
+    真實OHLC；必須核對回傳日期，避免把前一交易日快取當今天。收盤量仍以FMTQIK為準。
     """
     iso_date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
     next_day = (date.fromisoformat(iso_date) + timedelta(days=1)).isoformat()
@@ -412,6 +417,15 @@ def fetch_today_taiex(conn, date_str: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         print(f"大盤官方成交量(TWSE FMTQIK)更新失敗（略過，volume欄位維持yfinance原始值）：{exc}")
         volume_by_date = {}
+
+    if iso_date not in rows_by_date:
+        try:
+            realtime_row = twse_client.fetch_taiex_realtime(date_str)
+        except Exception as exc:  # noqa: BLE001
+            print(f"大盤即時OHLC備援(TWSE MIS)更新失敗：{exc}")
+            realtime_row = None
+        if realtime_row is not None:
+            rows_by_date[iso_date] = realtime_row
 
     for row_date, volume in volume_by_date.items():
         if row_date in rows_by_date:

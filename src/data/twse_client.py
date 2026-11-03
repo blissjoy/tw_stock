@@ -23,6 +23,9 @@ MARGIN_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
 # 2026-08-04新增，取代yfinance的^TWII volume欄位——見scripts/daily_pipeline.py
 # fetch_today_taiex()的說明，Yahoo的大盤成交量欄位長期不可靠。
 TAIEX_VOLUME_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
+# 即時大盤指數(TAIEX，MIS 行情端點)，提供當日開高低與最新指數；Yahoo 漏掉當日列時
+# 作為 OHLC 備援。回傳日期必須由呼叫端核對，避免把快取中的前一交易日資料當成今天。
+TAIEX_REALTIME_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 
 # 只收4碼數字股票代號，排除ETF(5~6碼)、權證(6碼)、債券等其他證券類型
 STOCK_CODE_PATTERN = re.compile(r"^\d{4}$")
@@ -127,6 +130,36 @@ def parse_taiex_volume(raw: dict) -> dict[str, int]:
     return {_parse_roc_slash_date(row[0].strip()): _to_int(row[1]) for row in raw.get("data", [])}
 
 
+def parse_taiex_realtime(raw: dict, expected_date: str) -> dict | None:
+    """解析 MIS 的加權指數即時報價，僅接受指定日期且 OHLC 完整的行情。"""
+    quote = next(
+        (row for row in raw.get("msgArray", []) if row.get("i") == "tidx.tw"),
+        None,
+    )
+    if quote is None or quote.get("d") != expected_date:
+        return None
+
+    try:
+        open_, high, low, close = (_to_number(quote[key]) for key in ("o", "h", "l", "z"))
+    except (KeyError, ValueError):
+        return None
+    if min(open_, high, low, close) <= 0:
+        return None
+
+    return {
+        "stock_id": "^TWII",
+        "date": format_date(expected_date),
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": 0,
+        "trading_money": None,
+        "trading_turnover": None,
+        "spread": None,
+    }
+
+
 def parse_margin_trading(raw: dict) -> list[dict]:
     """解析 MI_MARGN 回應（取「融資融券彙總」逐股明細表，不取開頭的全市場統計表）。"""
     if raw.get("stat") != "OK":
@@ -195,6 +228,15 @@ def fetch_taiex_volume(date: str) -> dict[str, int]:
     數字本身被忽略、回傳整個月份的資料)。查無資料(例如還沒收盤公布)回傳空dict。"""
     raw = _get_json(TAIEX_VOLUME_URL, {"date": date, "response": "json"})
     return parse_taiex_volume(raw)
+
+
+def fetch_taiex_realtime(date: str) -> dict | None:
+    """抓取指定日期的加權指數即時 OHLC；非交易日或回應日期不符時回傳 None。"""
+    raw = _get_json(
+        TAIEX_REALTIME_URL,
+        {"ex_ch": "tse_t00.tw", "json": "1", "delay": "0"},
+    )
+    return parse_taiex_realtime(raw, date)
 
 
 def _month_starts(start_date: str, end_date: str) -> list[str]:
