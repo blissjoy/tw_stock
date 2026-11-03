@@ -10419,3 +10419,14 @@ yfinance備援都沒有資料才判定非交易日。本機DB另確認`daily_can
   資料抓取日誌正確標成`skipped`，以及日曆API失敗時會回退；`tests/test_chart_data.py`
   驗證兩種空結果仍含標準欄位且成交量門檻可正常套用，日期選單會排除完全沒有股價的
   日期。`tests/test_daily_pipeline.py`65項、`tests/test_chart_data.py`132項皆通過。
+
+## LINE每日通知加入指數SAR與隔日實戰模擬提示（2026-11-03）
+
+使用者希望LINE第一行顯示加權指數SAR方向，並在14:30通知加入實戰模擬的隔日買進候選及持倉賣出觀察，僅列項目與當日收盤價，不把提醒描述成確定成交。另修正候選篩選錯誤時不得退回未篩選名單，並讓每日選股訊息顯示本次資料更新取得的最新股價。
+
+- `scripts/daily_pipeline.py`與`src/notify/line_notify.py`：LINE第一行依發送前取得、日期核對過的TWSE MIS加權指數即時K線計算SAR；SAR位於K線下方標「+」、上方標「-」，無有效即時行情顯示資料不足。沿用既有`compute_sar()`，不另建指標算法。
+- `src/backtest/sar_next_day_preview.py`：依最新已保存的實戰模擬狀態續算到提示日，以當日收盤規則產生買進候選，並列目前模擬持倉作賣出觀察；不宣稱隔日必然成交、不修改既有模擬紀錄。只有取得TWSE正式收盤行情時才加入14:30提示，盤中資料不使用。
+- `scripts/daily_pipeline.py`、`setup_schedule.ps1`：新增`--sar-preview`並接入14:30工作。更新已安裝的工作排程後，此時段會將模擬買賣提示與一般候選通知合併為同一則LINE。
+- 候選篩選失敗時跳過LINE與Email候選通知，不降級發送未篩選候選；候選清單每檔顯示本次行情更新取得的最新價。
+- 文件同步：README說明候選篩選失敗策略、候選行情價格、指數SAR符號及14:30模擬提示；INSTALL說明排程安裝/更新後的通知行為。
+- 驗證：`tests/test_sar_next_day_preview.py`、`tests/test_notify.py`、`tests/test_daily_pipeline.py`、`tests/test_sar_portfolio.py`、`tests/test_sar_simulation_storage.py`及`tests/test_twse_client.py`共136項通過。
