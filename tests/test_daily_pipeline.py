@@ -431,6 +431,164 @@ def test_run_daily_pipeline_sends_notifications_when_not_dry_run(monkeypatch):
     assert [c[0] for c in notify_calls] == ["line", "email"]
 
 
+def test_sar_preview_is_added_to_the_same_line_message_when_enabled(monkeypatch, tmp_path):
+    import sqlite3
+
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
+    monkeypatch.setattr(
+        daily_pipeline,
+        "get_default_sar_simulation_connection",
+        lambda: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(
+        daily_pipeline,
+        "build_sar_next_day_preview",
+        lambda market_conn, simulation_conn, as_of_date: {
+            "buy_items": [{"stock_id": "2330", "name": "台積電", "close": 104.0}],
+            "sell_items": [{"stock_id": "2454", "name": "聯發科", "close": 980.0}],
+        },
+    )
+    monkeypatch.setattr(
+        daily_pipeline.twse_client,
+        "fetch_taiex_realtime",
+        lambda date_str: {"date": "2026-07-22", "high": 105.0, "low": 99.0, "close": 104.0},
+    )
+    monkeypatch.setattr(daily_pipeline, "get_taiex_sar_direction", lambda *args: True)
+    _stub_stock_info(monkeypatch, [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+    monkeypatch.setattr(
+        daily_pipeline.chart_data,
+        "load_stock_universe_for_date",
+        lambda conn, target_date=None: (pd.DataFrame({"stock_id": []}), target_date, False),
+    )
+    monkeypatch.setattr(
+        daily_pipeline.chart_data,
+        "apply_candidate_filters",
+        lambda *args, **kwargs: pd.DataFrame({"stock_id": []}),
+    )
+
+    line_messages = []
+    monkeypatch.setattr(daily_pipeline, "send_line_broadcast", line_messages.append)
+    monkeypatch.setattr(daily_pipeline, "send_email", lambda *args, **kwargs: None)
+
+    daily_pipeline.run_daily_pipeline(
+        conn,
+        date_str="20260722",
+        dry_run=False,
+        skip_tpex=True,
+        include_sar_preview=True,
+    )
+
+    assert len(line_messages) == 1
+    assert line_messages[0].splitlines()[0] == "加權指數 SAR +"
+    assert "・2330台積電 收盤 104.00" in line_messages[0]
+    assert "・2454聯發科 收盤 980.00" in line_messages[0]
+
+
+def test_sar_preview_is_skipped_when_twse_data_is_intraday(monkeypatch, tmp_path):
+    conn = _fresh_conn()
+    monkeypatch.setattr(daily_pipeline.pipeline_status, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(daily_pipeline, "get_default_portfolio_connection", lambda: _fresh_portfolio_conn())
+    _stub_stock_info(monkeypatch, [])
+    monkeypatch.setattr(daily_pipeline, "fetch_today_twse", lambda *args, **kwargs: (True, True))
+    monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda conn, iso_date, min_days: [])
+    monkeypatch.setattr(
+        daily_pipeline.chart_data,
+        "load_stock_universe_for_date",
+        lambda conn, target_date=None: (pd.DataFrame({"stock_id": []}), target_date, False),
+    )
+    monkeypatch.setattr(
+        daily_pipeline.chart_data,
+        "apply_candidate_filters",
+        lambda *args, **kwargs: pd.DataFrame({"stock_id": []}),
+    )
+
+    def _unexpected_preview(*args, **kwargs):
+        pytest.fail("盤中行情不得產生收盤後的隔日提示")
+
+    monkeypatch.setattr(daily_pipeline, "build_sar_next_day_preview", _unexpected_preview)
+    line_messages = []
+    monkeypatch.setattr(daily_pipeline, "send_line_broadcast", line_messages.append)
+    monkeypatch.setattr(daily_pipeline, "send_email", lambda *args, **kwargs: None)
+
+    daily_pipeline.run_daily_pipeline(
+        conn,
+        date_str="20260722",
+        dry_run=False,
+        skip_tpex=True,
+        include_sar_preview=True,
+    )
+
+    assert len(line_messages) == 1
+    assert "實戰模擬｜明日" not in line_messages[0]
+
+
+def test_get_taiex_sar_direction_uses_live_index_candle(monkeypatch):
+    conn = _fresh_conn()
+    index_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    storage.upsert_stocks(conn, [{
+        "stock_id": index_id,
+        "name": "台股加權指數",
+        "market": "INDEX",
+        "industry": None,
+        "updated_at": "2026-11-03T10:00:00",
+    }])
+    storage.upsert_stock_prices(conn, [
+        {
+            "stock_id": index_id,
+            "date": f"2026-11-0{day}",
+            "open": 100.0,
+            "high": 105.0,
+            "low": 95.0,
+            "close": 102.0,
+            "volume": 0,
+            "trading_money": None,
+            "trading_turnover": None,
+            "spread": None,
+        }
+        for day in range(1, 4)
+    ])
+    monkeypatch.setattr(
+        daily_pipeline,
+        "compute_sar",
+        lambda high, low, close: (
+            pd.Series([True, True, True]),
+            pd.Series([90.0, 91.0, 94.0]),
+        ),
+    )
+
+    is_bull = daily_pipeline.get_taiex_sar_direction(
+        conn,
+        "20261103",
+        {
+            "date": "2026-11-03",
+            "high": 110.0,
+            "low": 96.0,
+            "close": 108.0,
+        },
+    )
+
+    assert is_bull is True
+
+
+def test_get_taiex_sar_direction_rejects_stale_realtime_quote():
+    assert daily_pipeline.get_taiex_sar_direction(
+        _fresh_conn(),
+        "20261103",
+        {
+            "date": "2026-11-02",
+            "high": 110.0,
+            "low": 96.0,
+            "close": 108.0,
+        },
+    ) is None
+
+
 def test_run_daily_pipeline_combines_inventory_warnings_into_line_message(monkeypatch):
     """2026-08-12新增、2026-08-13改版：使用者要求「庫存損益是整個系統存在的關鍵」，
     每次真正發送通知都要檢查庫存逃命示警，且要跟候選清單同一則LINE訊息一起發送、

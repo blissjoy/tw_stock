@@ -41,8 +41,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import finmind_client, holder_shares_sync, storage, tpex_client, trading_calendar, twse_client, yfinance_client  # noqa: E402
-from src.data.connection import get_default_portfolio_connection  # noqa: E402
+from src.backtest.sar_next_day_preview import build_sar_next_day_preview  # noqa: E402
+from src.data.connection import (  # noqa: E402
+    get_default_portfolio_connection,
+    get_default_sar_simulation_connection,
+)
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
+from src.indicators.parabolic_sar import compute_sar  # noqa: E402
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_message, send_line_broadcast  # noqa: E402
 from src.presentation import chart_data, data_fetch_log, pipeline_status, portfolio_data, watchlist_export  # noqa: E402
@@ -456,10 +461,50 @@ def fetch_today_taiex(conn, date_str: str) -> bool:
     return True
 
 
+def get_taiex_sar_direction(conn, date_str: str, realtime_row: dict | None) -> bool | None:
+    """Return whether the latest index SAR point is below the current day's candle."""
+    if realtime_row is None or realtime_row.get("date") != (
+        f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    ):
+        return None
+
+    rows = conn.execute(
+        """
+        SELECT date, high, low, close
+        FROM stock_prices
+        WHERE stock_id = ? AND date <= ?
+        ORDER BY date
+        """,
+        (yfinance_client.TAIEX_STOCK_ID, realtime_row["date"]),
+    ).fetchall()
+    history = {
+        row[0]: {"high": row[1], "low": row[2], "close": row[3]}
+        for row in rows
+    }
+    history[realtime_row["date"]] = {
+        "high": realtime_row["high"],
+        "low": realtime_row["low"],
+        "close": realtime_row["close"],
+    }
+    dates = sorted(history)
+    if len(dates) < 3:
+        return None
+
+    high = pd.Series([history[day]["high"] for day in dates], dtype="float64")
+    low = pd.Series([history[day]["low"] for day in dates], dtype="float64")
+    close = pd.Series([history[day]["close"] for day in dates], dtype="float64")
+    _, sar_values = compute_sar(high, low, close)
+    sar_value = sar_values.iloc[-1]
+    current_low = low.iloc[-1]
+    if pd.isna(sar_value) or pd.isna(current_low):
+        return None
+    return bool(sar_value <= current_low)
+
+
 def run_daily_pipeline(
     conn, date_str: str | None = None, min_days: int = 60, dry_run: bool = False, skip_tpex: bool = False,
     chip_refresh: bool = False, on_progress: Callable[[str, int, int], None] | None = None,
-    trigger: str = "automatic",
+    trigger: str = "automatic", include_sar_preview: bool = False,
 ) -> list[dict]:
     """核心orchestration，刻意與「conn是Turso還是本機sqlite」無關，方便測試與dry-run重用。
 
@@ -671,6 +716,43 @@ def run_daily_pipeline(
             except Exception as exc:  # noqa: BLE001
                 print(f"庫存逃命示警檢查失敗（略過，不影響候選清單通知）：{exc}")
 
+            sar_preview = None
+            if include_sar_preview:
+                if is_intraday:
+                    error = "今日行情仍是盤中資料，略過實戰模擬隔日提示。"
+                    print(error)
+                    run_errors.append(error)
+                else:
+                    simulation_conn = None
+                    try:
+                        simulation_conn = get_default_sar_simulation_connection()
+                        sar_preview = build_sar_next_day_preview(
+                            conn, simulation_conn, iso_date,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        error = f"實戰模擬隔日提示產生失敗：{exc}"
+                        print(error)
+                        run_errors.append(error)
+                    finally:
+                        if simulation_conn is not None:
+                            simulation_conn.close()
+
+            taiex_sar_is_bull = None
+            try:
+                realtime_index_row = twse_client.fetch_taiex_realtime(date_str)
+                taiex_sar_is_bull = get_taiex_sar_direction(
+                    conn, date_str, realtime_index_row,
+                )
+                if taiex_sar_is_bull is None:
+                    error = "無法取得今日加權指數即時K線/SAR，LINE將標示資料不足。"
+                    print(error)
+                    run_errors.append(error)
+            except Exception as exc:  # noqa: BLE001
+                error = f"加權指數即時SAR計算失敗，LINE將標示資料不足：{exc}"
+                print(error)
+                run_errors.append(error)
+
+            # 兩個通知管道各自獨立try/except，但只在候選篩選成功後發送。
             if notification_filters_ok:
                 notify_current_prices = {}
                 notify_stock_ids = sorted({c["stock_id"] for c in notify_candidates})
@@ -687,6 +769,8 @@ def run_daily_pipeline(
                     send_line_broadcast(format_candidates_message(
                         iso_date, notify_candidates, stock_names=stock_names, stock_industries=stock_industries,
                         inventory_warnings=inventory_warnings, current_prices=notify_current_prices,
+                        sar_next_day_preview=sar_preview,
+                        taiex_sar_is_bull=taiex_sar_is_bull,
                     ))
                 except Exception as exc:  # noqa: BLE001
                     print(f"LINE通知發送失敗（略過，不影響已寫入的候選清單）：{exc}")
@@ -759,6 +843,10 @@ def main() -> None:
         help="更新TPEx三大法人買賣超＋觀察清單F/G(大戶/散戶持股)＋觀察清單Google Sheet匯出。"
              "獨立於--dry-run之外，17:00法人資料公布後的排程應加這個旗標（見run_daily_pipeline() docstring）",
     )
+    parser.add_argument(
+        "--sar-preview", action="store_true",
+        help="在LINE通知中加入SAR實戰模擬的明日買進候選、賣出觀察及今日收盤價（僅正式收盤行情）",
+    )
     args = parser.parse_args()
 
     if args.local_db:
@@ -788,6 +876,7 @@ def main() -> None:
     run_daily_pipeline(
         conn, date_str=args.date, min_days=args.min_days, dry_run=args.dry_run, skip_tpex=args.skip_tpex,
         chip_refresh=args.chip_refresh, on_progress=_print_progress,
+        include_sar_preview=args.sar_preview,
     )
     conn.close()
 

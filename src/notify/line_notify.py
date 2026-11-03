@@ -37,6 +37,8 @@ def format_candidates_message(
     stock_industries: dict[str, str] | None = None,
     inventory_warnings: list[dict] | None = None,
     current_prices: dict[str, float] | None = None,
+    sar_next_day_preview: dict[str, list[dict]] | None = None,
+    taiex_sar_is_bull: bool | None = None,
 ) -> str:
     """把每日候選清單格式化成單則LINE文字訊息，超過LINE長度上限時截斷。
 
@@ -97,6 +99,12 @@ def format_candidates_message(
             price = _fmt_num(current_prices.get(stock_id))
             lines.append(f"・{stock_id}{name}{industry_suffix} {price} 符合規格數{len(matches)}")
 
+    if taiex_sar_is_bull is None:
+        lines.insert(0, "加權指數 SAR 資料不足")
+    else:
+        direction = "+" if taiex_sar_is_bull else "-"
+        lines.insert(0, f"加權指數 SAR {direction}")
+
     if inventory_warnings is not None:
         lines.append("")
         lines.append("【庫存警示】")
@@ -109,6 +117,29 @@ def format_candidates_message(
                 lines.append(f"・{w.get('name', '')} 現{close_text} 成{cost_text} {return_pct_text}{return_pct_suffix}")
         else:
             lines.append("安全")
+
+    if sar_next_day_preview is not None:
+        lines.extend(["", "【實戰模擬｜明日】", "買進候選："])
+        buy_items = sar_next_day_preview.get("buy_items", [])
+        if buy_items:
+            for item in buy_items:
+                close = _fmt_num(item.get("close"))
+                lines.append(
+                    f"・{item['stock_id']}{item.get('name', '')} 收盤 {close}"
+                )
+        else:
+            lines.append("無")
+
+        lines.append("賣出觀察：")
+        sell_items = sar_next_day_preview.get("sell_items", [])
+        if sell_items:
+            for item in sell_items:
+                close = _fmt_num(item.get("close"))
+                lines.append(
+                    f"・{item['stock_id']}{item.get('name', '')} 收盤 {close}"
+                )
+        else:
+            lines.append("無")
 
     return "\n".join(lines)[:MAX_MESSAGE_LENGTH]
 

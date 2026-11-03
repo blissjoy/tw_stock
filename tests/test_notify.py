@@ -10,14 +10,14 @@ def _sample_candidates():
 
 
 def test_format_candidates_message_empty():
-    text = format_candidates_message("2026-07-22", [])
+    text = format_candidates_message("2026-07-22", [], taiex_sar_is_bull=True)
     assert "2026-07-22" in text
     assert text.splitlines()[0] == "加權指數 SAR +"
     assert "沒有符合條件" in text
 
 
 def test_format_candidates_message_lists_all_candidates():
-    text = format_candidates_message("2026-07-22", _sample_candidates())
+    text = format_candidates_message("2026-07-22", _sample_candidates(), taiex_sar_is_bull=False)
     assert "共2檔候選" in text
     assert text.splitlines()[0] == "加權指數 SAR -"
     assert "2330" in text
@@ -70,6 +70,41 @@ def test_format_candidates_message_appends_industry_when_provided():
     lines = text.splitlines()
     assert "・2330台積電(半導體) - 符合規格數1" in lines
     assert "・2454聯發科(半導體) - 符合規格數1" in lines
+
+
+def test_format_candidates_message_includes_sar_next_day_items_and_closes():
+    preview = {
+        "buy_items": [{"stock_id": "2330", "name": "台積電", "close": 1450.0}],
+        "sell_items": [{"stock_id": "2454", "name": "聯發科", "close": 1275.0}],
+    }
+
+    text = format_candidates_message("2026-11-03", [], sar_next_day_preview=preview)
+
+    assert "【實戰模擬｜明日】" in text
+    assert "買進候選：" in text
+    assert "・2330台積電 收盤 1450.00" in text
+    assert "賣出觀察：" in text
+    assert "・2454聯發科 收盤 1275.00" in text
+
+
+def test_format_candidates_message_marks_index_sar_unavailable():
+    text = format_candidates_message("2026-11-03", [])
+
+    assert text.splitlines()[0] == "加權指數 SAR 資料不足"
+
+
+def test_format_candidates_message_shows_empty_sar_preview_lists_and_missing_close():
+    text = format_candidates_message(
+        "2026-11-03",
+        [],
+        sar_next_day_preview={
+            "buy_items": [],
+            "sell_items": [{"stock_id": "2454", "name": "聯發科", "close": None}],
+        },
+    )
+
+    assert "買進候選：\n無" in text
+    assert "・2454聯發科 收盤 -" in text
 
 
 def test_format_candidates_message_appends_inventory_warnings_section_when_present():
