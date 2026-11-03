@@ -10440,3 +10440,12 @@ yfinance備援都沒有資料才判定非交易日。本機DB另確認`daily_can
 - `src/notify/line_notify.py`：盤中預覽使用「實戰模擬｜明日（盤中估算）」標題與「盤中估價」欄位；官方收盤行情則維持「收盤」標示。
 - `INSTALL.md`、README：說明提前通知的盤中估算限制、14:30仍會正常更新，以及重新執行`setup_schedule.bat`以更新本機排程。
 - 驗證：`tests/test_notify.py`、`tests/test_daily_pipeline.py`及`tests/test_sar_next_day_preview.py`共89項通過；本機Windows排程已更新，確認13:30帶`--sar-preview`、14:30不帶該旗標。
+
+## 實戰模擬通知顯示外資與投信5日力道（2026-11-03）
+
+使用者希望「實戰模擬｜明日」每檔買進候選及持倉觀察，附上5日外資、投信買賣方向與近期力道是增強或減弱。沿用個股明細既有`load_institutional_momentum_analysis()`，比較近5日與前5日買賣超，並將資料不足明確顯示，避免建立另一套重複判讀。
+
+- `src/backtest/sar_next_day_preview.py`：為預覽中的買進候選與持倉載入外資、投信的5日動能資料。
+- `src/notify/line_notify.py`：價格後附「5日外資買超↑ 投信賣超↓」格式；箭頭沿用既有動能分類語意，法人資料不足分別標示。
+- README及INSTALL說明通知欄位與箭頭意義。
+- 測試：驗證既有動能分析結果傳入預覽項目、通知方向/箭頭格式與資料不足顯示。

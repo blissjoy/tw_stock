@@ -32,6 +32,28 @@ def _fmt_num(value: float | None, decimals: int = 2, signed: bool = False) -> st
     return f"{sign}{value:.{decimals}f}"
 
 
+def _format_5d_institutional_momentum(item: dict) -> str:
+    momentum = item.get("momentum_5d") or {}
+    parts = []
+    for key, label in (("foreign", "外資"), ("trust", "投信")):
+        flow = momentum.get(key)
+        if not flow:
+            parts.append(f"{label}資料不足")
+            continue
+
+        current = flow["current"]
+        direction = "買超" if current > 0 else ("賣超" if current < 0 else "買賣持平")
+        trend = flow["trend"]
+        if trend in ("買超力道增強", "賣壓減緩", "由賣轉買"):
+            arrow = "↑"
+        elif trend in ("買超力道減弱", "賣壓加重", "由買轉賣"):
+            arrow = "↓"
+        else:
+            arrow = "↔"
+        parts.append(f"{label}{direction}{arrow}")
+    return f" 5日{' '.join(parts)}"
+
+
 def format_candidates_message(
     date: str, candidates: list[dict], stock_names: dict[str, str] | None = None,
     stock_industries: dict[str, str] | None = None,
@@ -130,6 +152,7 @@ def format_candidates_message(
                 close = _fmt_num(item.get("close"))
                 lines.append(
                     f"・{item['stock_id']}{item.get('name', '')} {preview_price_label} {close}"
+                    f"{_format_5d_institutional_momentum(item)}"
                 )
         else:
             lines.append("無")
@@ -141,6 +164,7 @@ def format_candidates_message(
                 close = _fmt_num(item.get("close"))
                 lines.append(
                     f"・{item['stock_id']}{item.get('name', '')} {preview_price_label} {close}"
+                    f"{_format_5d_institutional_momentum(item)}"
                 )
         else:
             lines.append("無")

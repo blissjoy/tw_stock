@@ -74,17 +74,42 @@ def test_format_candidates_message_appends_industry_when_provided():
 
 def test_format_candidates_message_includes_sar_next_day_items_and_closes():
     preview = {
-        "buy_items": [{"stock_id": "2330", "name": "台積電", "close": 1450.0}],
-        "sell_items": [{"stock_id": "2454", "name": "聯發科", "close": 1275.0}],
+        "buy_items": [{
+            "stock_id": "2330", "name": "台積電", "close": 1450.0,
+            "momentum_5d": {
+                "foreign": {"current": 15_293_000, "prior": 14_310_000, "trend": "買超力道增強"},
+                "trust": {"current": -1_000_000, "prior": -2_000_000, "trend": "賣壓減緩"},
+            },
+        }],
+        "sell_items": [{
+            "stock_id": "2454", "name": "聯發科", "close": 1275.0,
+            "momentum_5d": {
+                "foreign": {"current": -1_000_000, "prior": -500_000, "trend": "賣壓加重"},
+                "trust": {"current": 1_000_000, "prior": 2_000_000, "trend": "買超力道減弱"},
+            },
+        }],
     }
 
     text = format_candidates_message("2026-11-03", [], sar_next_day_preview=preview)
 
     assert "【實戰模擬｜明日】" in text
     assert "買進候選：" in text
-    assert "・2330台積電 收盤 1450.00" in text
+    assert "・2330台積電 收盤 1450.00 5日外資買超↑ 投信賣超↑" in text
     assert "賣出觀察：" in text
-    assert "・2454聯發科 收盤 1275.00" in text
+    assert "・2454聯發科 收盤 1275.00 5日外資賣超↓ 投信買超↓" in text
+
+
+def test_format_candidates_message_marks_missing_five_day_institutional_data():
+    text = format_candidates_message(
+        "2026-11-03",
+        [],
+        sar_next_day_preview={
+            "buy_items": [{"stock_id": "1216", "name": "統一", "close": 81.1, "momentum_5d": None}],
+            "sell_items": [],
+        },
+    )
+
+    assert "・1216統一 收盤 81.10 5日外資資料不足 投信資料不足" in text
 
 
 def test_format_candidates_message_marks_intraday_sar_preview_as_provisional():

@@ -76,17 +76,25 @@ def test_build_sar_next_day_preview_continues_latest_run_and_uses_today_close(mo
         "load_sar_market_data_with_recomputed_indicators",
         lambda conn, end_date: market_data,
     )
+    monkeypatch.setattr(
+        sar_next_day_preview,
+        "load_institutional_momentum_analysis",
+        lambda conn, stock_id: {
+            "外資": {"5日": {"current": 15_293_000, "prior": 14_310_000, "trend": "買超力道增強"}},
+            "投信": {"5日": {"current": -1_000_000, "prior": -2_000_000, "trend": "賣壓減緩"}},
+        },
+    )
 
     preview = sar_next_day_preview.build_sar_next_day_preview(
         object(), simulation_conn, "2026-01-06",
     )
 
-    assert preview["buy_items"] == [
-        {"stock_id": "2330", "name": "股票2330", "close": 80.0},
-    ]
-    assert preview["sell_items"] == [
-        {"stock_id": "2454", "name": "聯發科", "close": 52.0},
-    ]
+    assert preview["buy_items"][0]["stock_id"] == "2330"
+    assert preview["buy_items"][0]["close"] == 80.0
+    assert preview["buy_items"][0]["momentum_5d"]["foreign"]["trend"] == "買超力道增強"
+    assert preview["sell_items"][0]["stock_id"] == "2454"
+    assert preview["sell_items"][0]["close"] == 52.0
+    assert preview["sell_items"][0]["momentum_5d"]["trust"]["trend"] == "賣壓減緩"
     simulation_conn.close()
 
 

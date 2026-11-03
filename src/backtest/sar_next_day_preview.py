@@ -12,6 +12,7 @@ from src.backtest.sar_portfolio import (
     run_sar_portfolio_simulation,
 )
 from src.data.sar_simulation_storage import load_simulation_result
+from src.presentation.stock_detail_data import load_institutional_momentum_analysis
 
 
 def build_sar_next_day_preview(
@@ -112,4 +113,12 @@ def build_sar_next_day_preview(
         }
         for position in result.positions
     ]
+
+    for item in [*buy_items, *sell_items]:
+        momentum = load_institutional_momentum_analysis(market_conn, item["stock_id"])
+        item["momentum_5d"] = {
+            "foreign": momentum.get("外資", {}).get("5日") if momentum else None,
+            "trust": momentum.get("投信", {}).get("5日") if momentum else None,
+        }
+
     return {"buy_items": buy_items, "sell_items": sell_items}
