@@ -1314,6 +1314,27 @@ def test_run_daily_pipeline_updates_taiex_alongside_stocks(monkeypatch):
     assert stock_row == ("INDEX",)
 
 
+def test_run_daily_pipeline_logs_when_taiex_latest_date_is_missing(monkeypatch):
+    conn = _fresh_conn()
+    _stub_stock_info(monkeypatch, [{"stock_id": "2330", "name": "台積電", "market": "TWSE", "industry": "半導體"}])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_stock_prices", lambda date_str: [_price_row()])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_institutional_investors", lambda date_str: [])
+    monkeypatch.setattr(daily_pipeline.twse_client, "fetch_margin_trading", lambda date_str: [])
+    monkeypatch.setattr(daily_screener, "screen_all_stocks", lambda frames, min_days, **_: [])
+    old_index_row = {
+        "stock_id": daily_pipeline.yfinance_client.TAIEX_STOCK_ID, "date": "2026-07-21",
+        "open": 17000.0, "high": 17100.0, "low": 16950.0, "close": 17050.0,
+        "volume": 5000000, "trading_money": None, "trading_turnover": None, "spread": None,
+    }
+    monkeypatch.setattr(daily_pipeline.yfinance_client, "fetch_taiex_prices", lambda start, end: [old_index_row])
+
+    daily_pipeline.run_daily_pipeline(conn, date_str="20260722", dry_run=True, skip_tpex=True)
+
+    log_entry = json.loads(daily_pipeline.data_fetch_log.LOG_PATH.read_text(encoding="utf-8").splitlines()[-1])
+    assert log_entry["status"] == "success"
+    assert log_entry["errors"] == ["2026-07-22 今日OHLC仍缺失；Yahoo與TWSE即時行情皆未提供資料"]
+
+
 def test_run_daily_pipeline_refreshes_indicator_window_after_screening(monkeypatch):
     """2026-08-02新增：均線/SAR快取(daily_indicators)除了run_screen_and_store()裡
     只算當天一天之外，排程執行時要額外往回刷新INDICATOR_REFRESH_WINDOW_DAYS個交易日，

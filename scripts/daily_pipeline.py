@@ -518,6 +518,7 @@ def run_daily_pipeline(
     # 部分資料，不會因為變數還沒賦值而在except分支裡NameError。
     twse_failed_stock_ids: list[dict] = []
     tpex_failed_stock_ids: list[dict] = []
+    taiex_errors: list[str] = []
 
     try:
         # 只呼叫一次FinMind的股票基本資料(涵蓋TWSE+TPEx)，同時供TWSE/TPEx兩條路徑取得真實
@@ -549,9 +550,21 @@ def run_daily_pipeline(
         # 個股資料已經抓完、候選清單照樣要算，大盤只是額外的補充分析素材。
         try:
             taiex_ok = fetch_today_taiex(conn, date_str)
-            print(f"大盤({yfinance_client.TAIEX_STOCK_ID})：{'更新成功' if taiex_ok else '查無資料，略過'}")
+            has_today_index = conn.execute(
+                "SELECT 1 FROM stock_prices WHERE stock_id = ? AND date = ?",
+                (yfinance_client.TAIEX_STOCK_ID, iso_date),
+            ).fetchone() is not None
+            if has_today_index:
+                print(f"大盤({yfinance_client.TAIEX_STOCK_ID})：更新成功")
+            else:
+                detail = "今日OHLC仍缺失；Yahoo與TWSE即時行情皆未提供資料"
+                if not taiex_ok:
+                    detail = "今日OHLC仍缺失；大盤資料來源均無可寫入資料"
+                print(f"大盤({yfinance_client.TAIEX_STOCK_ID})：{detail}")
+                taiex_errors.append(f"{iso_date} {detail}")
         except Exception as exc:  # noqa: BLE001
             print(f"大盤({yfinance_client.TAIEX_STOCK_ID})更新失敗（略過，不影響個股資料）：{exc}")
+            taiex_errors.append(f"{iso_date} 大盤指數更新失敗：{exc}")
 
         if not skip_tpex:
             tpex_count = fetch_today_tpex(
@@ -711,6 +724,7 @@ def run_daily_pipeline(
         data_fetch_log.record_fetch_run(
             conn, trigger=trigger, start_date=iso_date, end_date=iso_date, status="success",
             is_intraday=is_intraday, candidates_count=len(candidates), indicators_refreshed=refreshed,
+            errors=taiex_errors,
             failed_downloads={"TWSE": twse_failed_stock_ids, "TPEx": tpex_failed_stock_ids},
         )
         return candidates
