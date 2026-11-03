@@ -44,8 +44,10 @@ python desktop/main.py
   LINE/Email候選通知，不會改寄未篩選名單。LINE第一行另顯示加權指數SAR方向：「+」代表
   SAR位於當日K線下方，「-」代表位於上方；無法取得有效即時指數行情時顯示資料不足。
   LINE通知以單一Flex訊息呈現：加權指數SAR「+」紅色、「-」綠色；庫存報酬率正值紅色、
-  零黑色、負值綠色；實戰模擬的5日外資/投信力道箭頭上升紅色、下降綠色、持平黑色。
-  若庫存股近5日外資及投信合計各自都是淨賣超，該庫存列以粗體顯示；實戰模擬買賣項目文字為黑色。
+  零黑色、負值綠色。實戰模擬買賣項目與庫存警示都顯示「5日力道 外資↑ 投信↑」，
+  箭頭代表各自近5日相較前5日的力道變化（↑增強/賣壓減緩、↓減弱/賣壓加重、↔持平），
+  上升紅色、下降綠色、持平黑色；資料不足會明確標示。若庫存股近5日外資及投信各自都是
+  淨賣超，該庫存列以粗體顯示；實戰模擬買賣項目文字為黑色。
 - 個股查詢欄：輸入股票代號或名稱皆可查詢。
 - 「實戰模擬」：依 SAR 多頭策略模擬歷史每日選股、隔日進場、最多一次加碼、停損與移動停利，畫面可調整模擬本金、選股收盤價上限及零股／整張模式；零股依固定金額買進，加碼也是固定金額，整張模式每次買進 1 張、觸發加碼時再買 1 張，現金不足便跳過。摘要不顯示紀錄 ID、本金重複資訊、持倉筆數或模擬區間，第一行顯示現金、持倉市值、總資產，第二行顯示已實現／未實現／總損益及總報酬率（非負紅色、負值綠色）。以子分頁呈現目前持倉、已實現損益與模擬事件。持倉／已實現損益預設依損益降冪，模擬事件預設依日期降冪，點選欄位標題可自行排序。已實現損益明細包含進出場資訊，並已扣除交易成本。結果由行情資料與既有每日 SAR/均線快取即時計算，不會寫入真實庫存清單。
 - 「實戰模擬」內含「策略模擬」、「歷史回測」與「未來情境推演」子分頁。「歷史回測」以「較早期間／較近期期間」呈現同一套固定規則在兩段歷史行情中的表現；兩段各自用相同本金重新開始，並比較報酬、勝率、最大回撤等指標及較近期期間的每日資產變化。它不是未來預測，也不會依結果最佳化策略參數。
@@ -117,12 +119,20 @@ python scripts/daily_pipeline.py --date 20260722 --local-db data/tw_stock.db
 「尚未收盤」)。
 
 13:30通知另外附上「實戰模擬｜明日」區塊：買進候選依當日行情估算，賣出觀察列出目前
-模擬持倉，兩者都附當下可用價格；若尚未取得TWSE正式收盤行情，標示為「盤中估算」及
-「盤中估價」，結果可能隨正式收盤價更新而改變。這是供盤後零股下單參考的隔日項目提醒，
-不代表明日一定成交。每檔後續另附5日外資與投信買賣方向，以及近5日相較前5日的力道箭頭
-（↑增強、↓減弱、↔持平）；法人資料不足時會明確標示。此分析沿用個股明細的法人力道判讀，
-外資包含外資自營商，不含一般自營商。14:30排程仍會更新資料與發送一般通知。更新既有排程時請重新執行
-`setup_schedule.bat`，讓13:30工作加上`--sar-preview`。LINE第一行的加權指數SAR方向則使用
+模擬持倉，兩者都附當下可用價格；若尚未取得TWSE正式收盤行情，標題會標示「盤中估算」，
+結果可能隨正式收盤價更新而改變。這是供盤後零股下單參考的隔日項目提醒，不代表明日一定成交。
+每檔後續另附近5日相較前5日的外資、投信個別力道箭頭（例如「5日力道 外資↑ 投信↑」；
+↑增強/賣壓減緩、↓減弱/賣壓加重、↔持平）；庫存警示也使用相同欄位與判讀，法人資料不足時
+會明確標示。此分析沿用個股明細的法人力道判讀，
+外資包含外資自營商，不含一般自營商。14:30維持單一排程與單一pipeline指令；同一次執行先發一般Flex通知，
+再以另一則獨立LINE訊息發送大盤預估，不需建立第二個排程。更新既有排程時請重新執行
+`setup_schedule.bat`，讓13:30工作加上`--sar-preview`。14:30另以獨立LINE訊息發送
+「【明日大盤預估｜朱老師短線】」，內容包括偏多／偏空／區間與信心、5日轉折波和均線摘要、
+明日參考今日高低點的轉強／續弱條件。此規則化技術情境不是投資保證；只在正式收盤且有足夠
+加權指數日線資料時發送，盤中資料或指數日期缺漏時略過。每日預估追加至
+[`ai/MARKET_FORECAST_LOG.md`](ai/MARKET_FORECAST_LOG.md)，下一次交易日排程依實際收盤補上驗證，
+同一資料日不重複記錄或發送。更新既有排程時請重新執行`setup_schedule.bat`，讓13:30工作加上
+`--sar-preview`、14:30工作加上`--market-forecast`。LINE第一行的加權指數SAR方向則使用
 發送前取得、日期經核對的TWSE MIS即時指數K線；「+」表示SAR在K線下方，「-」表示在上方，
 若資料無效則明確顯示資料不足。
 
@@ -137,7 +147,7 @@ schtasks /create /tn "tw_stock_pipeline_1100" /tr "C:\path\to\python.exe D:\tw_s
 schtasks /create /tn "tw_stock_pipeline_1200" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 12:00
 schtasks /create /tn "tw_stock_pipeline_1300" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:00
 schtasks /create /tn "tw_stock_pipeline_1330" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --sar-preview" /sc weekly /d MON,TUE,WED,THU,FRI /st 13:30
-schtasks /create /tn "tw_stock_pipeline_1430" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:30
+schtasks /create /tn "tw_stock_pipeline_1430" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --market-forecast" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:30
 schtasks /create /tn "tw_stock_pipeline_1700" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --chip-refresh" /sc weekly /d MON,TUE,WED,THU,FRI /st 17:00
 schtasks /create /tn "tw_stock_pipeline_2100" /tr "C:\path\to\python.exe D:\tw_stock\scripts\daily_pipeline.py --local-db D:\tw_stock\data\tw_stock.db --dry-run --skip-tpex" /sc weekly /d MON,TUE,WED,THU,FRI /st 21:00
 ```

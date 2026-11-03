@@ -1,6 +1,8 @@
 # 台股分析系統：朱家泓技術分析 × 三大法人籌碼 — 開發計畫
 
 > 這份文件是給 AI（Claude）恢復記憶用的規劃文件，放在 `ai/` 目錄下，之後每次規劃異動都會回來更新這份文件，不會散落在專案外部。
+>
+> **每日漲跌勢預估與事後驗證請見 [MARKET_FORECAST_LOG.md](MARKET_FORECAST_LOG.md)**。14:30 `--market-forecast` 會在一般 Flex 通知外，另發「【明日大盤預估｜朱老師短線】」獨立 LINE 文字訊息，並記錄預估、隔日補驗證。該文件規定以朱家泓短線趨勢、轉折波、均線及 K 線支撐壓力規則為方法，並列出規則 ID。跨 AI 接手入口設於專案根目錄 [AGENTS.md](../AGENTS.md)：凡要求台股／加權指數預估或驗證，先讀市場預估紀錄及相關朱老師規則；市場日誌不要混入本開發計畫。
 
 > ⚠️ **`ai/RULE_STATUS.md`維護提醒(2026-07-26新增)**：`ai/zhu-rules/`246條規則庫另外有
 > 一份`ai/RULE_STATUS.md`，是「依信心分數降冪排序、逐條列出接入狀態(已接入/建構元件/
@@ -10457,3 +10459,11 @@ yfinance備援都沒有資料才判定非交易日。本機DB另確認`daily_can
 - `src/notify/line_notify.py`：新增Flex bubble格式，沿用既有文字formatter提供內容；SAR多頭紅、空頭綠，庫存報酬率正紅/零黑/負綠，模擬通知箭頭上升紅/下降綠/持平黑；庫存列若外資與投信5日淨額皆為負值則加粗。每個區塊限制項目數並顯示略過數，避免超出Flex元件上限。
 - `scripts/daily_pipeline.py`：庫存警示列使用個股明細相同的5日動能分析，並以Flex訊息送出；舊的純文字LINE helper仍保留供相容與單元測試。
 - 測試：`tests/test_notify.py`、`tests/test_daily_pipeline.py`、`tests/test_stock_detail_data.py`共139項通過；LINE官方非發送型broadcast validator回HTTP 200，確認Flex payload格式有效，沒有送出測試推播。
+
+## 修正LINE 5日法人力道顯示（2026-11-03）
+
+使用者比對桌面個股明細後指出，實戰買進項目應直接顯示外資與投信各自近5日相較前5日的力道箭頭；庫存警示也要顯示同一資訊，而非僅用法人資料判斷是否加粗。
+
+- `src/notify/line_notify.py`：買進候選、賣出觀察與庫存警示統一顯示「5日力道 外資↑ 投信↑」格式；箭頭沿用個股明細動能分類，並在Flex中依箭頭著色。買賣預覽列簡化為股票代號、名稱、當日價格及力道，不再混入買超/賣超字樣。
+- README及INSTALL同步說明買賣預覽與庫存警示共用的力道欄位。
+- 驗證：`tests/test_notify.py`及`tests/test_daily_pipeline.py`共91項通過；既有5項Pandas警告。
