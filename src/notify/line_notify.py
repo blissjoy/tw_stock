@@ -45,17 +45,15 @@ def _format_5d_institutional_momentum(item: dict) -> str:
             parts.append(f"{label}資料不足")
             continue
 
-        current = flow["current"]
-        direction = "買超" if current > 0 else ("賣超" if current < 0 else "買賣持平")
-        trend = flow["trend"]
+        trend = flow.get("trend")
         if trend in ("買超力道增強", "賣壓減緩", "由賣轉買"):
             arrow = "↑"
         elif trend in ("買超力道減弱", "賣壓加重", "由買轉賣"):
             arrow = "↓"
         else:
             arrow = "↔"
-        parts.append(f"{label}{direction}{arrow}")
-    return f" 5日{' '.join(parts)}"
+        parts.append(f"{label}{arrow}")
+    return f" 5日力道 {' '.join(parts)}"
 
 
 def format_candidates_message(
@@ -86,9 +84,10 @@ def format_candidates_message(
     sar_preview_is_intraday：True時提示價格與選股結果依盤中行情估算，尚非正式收盤結果。
 
     inventory_warnings(2026-08-12新增，2026-08-13改版)：庫存逃命示警清單，每筆
-    {"stock_id", "name", "close", "cost_price", "return_pct"}，只放「目前有逃命
-    示警」的持股(呼叫端已經用src.presentation.portfolio_data.load_escape_signals_
-    for_stocks()篩過)。3種狀態：
+    {"stock_id", "name", "close", "cost_price", "return_pct", "momentum_5d"}，只放
+    「目前有逃命示警」的持股(呼叫端已經用
+    src.presentation.portfolio_data.load_escape_signals_for_stocks()篩過)。每列會顯示
+    與實戰模擬相同的5日外資/投信力道箭頭；無動能資料時明確標示資料不足。3種狀態：
     - None(預設)：庫存檢查沒有執行/失敗，訊息裡完全不出現「【庫存警示】」這段——
       維持跟候選清單通知獨立的降級行為，檢查失敗不該讓使用者誤以為「有檢查、沒問題」。
     - []（空清單）：庫存檢查有跑，但目前沒有任何一檔持股有逃命示警，顯示「安全」。
@@ -142,20 +141,22 @@ def format_candidates_message(
                 cost_text = _fmt_num(w.get("cost_price"))
                 return_pct_text = _fmt_num(w.get("return_pct"), decimals=1, signed=True)
                 return_pct_suffix = "%" if w.get("return_pct") is not None else ""
-                lines.append(f"・{w.get('name', '')} 現{close_text} 成{cost_text} {return_pct_text}{return_pct_suffix}")
+                lines.append(
+                    f"・{w.get('name', '')} 現{close_text} 成{cost_text} "
+                    f"{return_pct_text}{return_pct_suffix}{_format_5d_institutional_momentum(w)}"
+                )
         else:
             lines.append("安全")
 
     if sar_next_day_preview is not None:
         preview_title = "【實戰模擬｜明日（盤中估算）】" if sar_preview_is_intraday else "【實戰模擬｜明日】"
-        preview_price_label = "盤中估價" if sar_preview_is_intraday else "收盤"
         lines.extend(["", preview_title, "買進候選："])
         buy_items = sar_next_day_preview.get("buy_items", [])
         if buy_items:
             for item in buy_items:
                 close = _fmt_num(item.get("close"))
                 lines.append(
-                    f"・{item['stock_id']}{item.get('name', '')} {preview_price_label} {close}"
+                    f"・{item['stock_id']} {item.get('name', '')} {close}"
                     f"{_format_5d_institutional_momentum(item)}"
                 )
         else:
@@ -167,7 +168,7 @@ def format_candidates_message(
             for item in sell_items:
                 close = _fmt_num(item.get("close"))
                 lines.append(
-                    f"・{item['stock_id']}{item.get('name', '')} {preview_price_label} {close}"
+                    f"・{item['stock_id']} {item.get('name', '')} {close}"
                     f"{_format_5d_institutional_momentum(item)}"
                 )
         else:
@@ -202,26 +203,27 @@ def _inventory_is_both_institutional_selling(warning: dict) -> bool:
 
 
 def _momentum_flex_spans(line: str) -> list[dict] | None:
-    if " 5日" not in line:
+    if " 5日力道 " not in line:
         return None
-    base, momentum_text = line.split(" 5日", 1)
+    base, momentum_text = line.split(" 5日力道 ", 1)
     match = re.fullmatch(
-        r"外資(買超|賣超|買賣持平|資料不足)([↑↓↔]?) 投信(買超|賣超|買賣持平|資料不足)([↑↓↔]?)",
+        r"外資(↑|↓|↔|資料不足) 投信(↑|↓|↔|資料不足)",
         momentum_text,
     )
     if match is None:
         return None
 
-    def _flow_span(label: str, direction: str, arrow: str) -> dict:
+    def _flow_span(label: str, indicator: str) -> dict:
+        arrow = indicator if indicator in ("↑", "↓", "↔") else ""
         color = COLOR_RED if arrow == "↑" else (COLOR_GREEN if arrow == "↓" else COLOR_BLACK)
-        return {"type": "span", "text": f"{label}{direction}{arrow}", "color": color}
+        return {"type": "span", "text": f"{label}{indicator}", "color": color}
 
     return [
         {"type": "span", "text": base, "color": COLOR_BLACK},
-        {"type": "span", "text": " 5日"},
-        _flow_span("外資", match.group(1), match.group(2)),
+        {"type": "span", "text": " 5日力道 "},
+        _flow_span("外資", match.group(1)),
         {"type": "span", "text": " "},
-        _flow_span("投信", match.group(3), match.group(4)),
+        _flow_span("投信", match.group(2)),
     ]
 
 
@@ -276,7 +278,8 @@ def format_candidates_flex_message(
             if title == "【庫存警示】" and line.startswith("・") and warning_index < len(warnings):
                 warning = warnings[warning_index]
                 warning_index += 1
-                prefix, _, return_text = line.rpartition(" ")
+                prefix_with_return = line.split(" 5日力道 ", 1)[0]
+                prefix, _, return_text = prefix_with_return.rpartition(" ")
                 return_pct = warning.get("return_pct")
                 return_color = (
                     COLOR_RED if return_pct is not None and return_pct > 0 else
@@ -286,6 +289,9 @@ def format_candidates_flex_message(
                     {"type": "span", "text": f"{prefix} ", "color": COLOR_BLACK},
                     {"type": "span", "text": return_text, "color": return_color},
                 ]
+                momentum = _momentum_flex_spans(line)
+                if momentum is not None:
+                    spans.extend(momentum[1:])
                 row_weight = "bold" if _inventory_is_both_institutional_selling(warning) else None
                 section_contents.append(_flex_rich_text(spans, weight=row_weight))
             elif title == "【庫存警示】" and line.startswith("・"):

@@ -95,9 +95,9 @@ def test_format_candidates_message_includes_sar_next_day_items_and_closes():
 
     assert "【實戰模擬｜明日】" in text
     assert "買進候選：" in text
-    assert "・2330台積電 收盤 1450.00 5日外資買超↑ 投信賣超↑" in text
+    assert "・2330 台積電 1450.00 5日力道 外資↑ 投信↑" in text
     assert "賣出觀察：" in text
-    assert "・2454聯發科 收盤 1275.00 5日外資賣超↓ 投信買超↓" in text
+    assert "・2454 聯發科 1275.00 5日力道 外資↓ 投信↓" in text
 
 
 def test_format_candidates_message_marks_missing_five_day_institutional_data():
@@ -110,7 +110,7 @@ def test_format_candidates_message_marks_missing_five_day_institutional_data():
         },
     )
 
-    assert "・1216統一 收盤 81.10 5日外資資料不足 投信資料不足" in text
+    assert "・1216 統一 81.10 5日力道 外資資料不足 投信資料不足" in text
 
 
 def test_format_candidates_message_marks_intraday_sar_preview_as_provisional():
@@ -125,7 +125,7 @@ def test_format_candidates_message_marks_intraday_sar_preview_as_provisional():
     )
 
     assert "【實戰模擬｜明日（盤中估算）】" in text
-    assert "・2330台積電 盤中估價 1450.00" in text
+    assert "・2330 台積電 1450.00" in text
 
 
 def test_format_candidates_message_marks_index_sar_unavailable():
@@ -145,7 +145,7 @@ def test_format_candidates_message_shows_empty_sar_preview_lists_and_missing_clo
     )
 
     assert "買進候選：\n無" in text
-    assert "・2454聯發科 收盤 -" in text
+    assert "・2454 聯發科 -" in text
 
 
 def test_format_candidates_message_appends_inventory_warnings_section_when_present():
@@ -155,7 +155,14 @@ def test_format_candidates_message_appends_inventory_warnings_section_when_prese
     段落(同一個字串，不是兩個獨立回傳值)。"""
     candidates = _sample_candidates()
     warnings = [
-        {"stock_id": "2317", "name": "鴻海", "close": 270.0, "cost_price": 235.76, "return_pct": 14.08},
+        {
+            "stock_id": "2317", "name": "鴻海", "close": 270.0, "cost_price": 235.76,
+            "return_pct": 14.08,
+            "momentum_5d": {
+                "foreign": {"trend": "買超力道增強"},
+                "trust": {"trend": "賣壓減緩"},
+            },
+        },
         {"stock_id": "6139", "name": "亞翔", "close": 811.0, "cost_price": 813.0, "return_pct": -0.63},
     ]
 
@@ -164,8 +171,8 @@ def test_format_candidates_message_appends_inventory_warnings_section_when_prese
     assert "共2檔候選" in text  # 候選清單段落照常存在
     assert "【庫存警示】" in text
     lines = text.splitlines()
-    assert "・鴻海 現270.00 成235.76 +14.1%" in lines
-    assert "・亞翔 現811.00 成813.00 -0.6%" in lines
+    assert "・鴻海 現270.00 成235.76 +14.1% 5日力道 外資↑ 投信↑" in lines
+    assert "・亞翔 現811.00 成813.00 -0.6% 5日力道 外資資料不足 投信資料不足" in lines
     # 庫存警示段落要接在候選清單段落之後，不是前面
     candidate_idx = next(i for i, l in enumerate(lines) if l.startswith("【2026"))
     warning_idx = lines.index("【庫存警示】")
@@ -200,7 +207,7 @@ def test_format_candidates_message_inventory_warnings_shown_even_when_no_candida
 
     assert "沒有符合條件" in text
     assert "【庫存警示】" in text
-    assert "・鴻海 現270.00 成235.76 +14.1%" in text
+    assert "・鴻海 現270.00 成235.76 +14.1% 5日力道 外資資料不足 投信資料不足" in text
 
 
 def test_format_candidates_message_inventory_warning_missing_values_show_dash():
@@ -211,7 +218,7 @@ def test_format_candidates_message_inventory_warning_missing_values_show_dash():
         inventory_warnings=[{"stock_id": "9999", "name": "測試股", "close": None, "cost_price": None, "return_pct": None}],
     )
 
-    assert "・測試股 現- 成- -" in text
+    assert "・測試股 現- 成- - 5日力道 外資資料不足 投信資料不足" in text
 
 
 def _flex_text_components(value):
@@ -238,8 +245,8 @@ def test_format_candidates_flex_message_applies_requested_colors_and_bold_alert(
                 "cost_price": 90.0,
                 "return_pct": -9.9,
                 "momentum_5d": {
-                    "foreign": {"current": -1000},
-                    "trust": {"current": -2000},
+                    "foreign": {"current": -1000, "trend": "賣壓加重"},
+                    "trust": {"current": -2000, "trend": "賣壓加重"},
                 },
             },
             {
@@ -249,8 +256,8 @@ def test_format_candidates_flex_message_applies_requested_colors_and_bold_alert(
                 "cost_price": 1400.0,
                 "return_pct": 0.0,
                 "momentum_5d": {
-                    "foreign": {"current": 1000},
-                    "trust": {"current": -2000},
+                    "foreign": {"current": 1000, "trend": "買超力道增強"},
+                    "trust": {"current": -2000, "trend": "賣壓加重"},
                 },
             },
             {
@@ -260,8 +267,8 @@ def test_format_candidates_flex_message_applies_requested_colors_and_bold_alert(
                 "cost_price": 180.0,
                 "return_pct": 11.1,
                 "momentum_5d": {
-                    "foreign": {"current": -1000},
-                    "trust": {"current": 0},
+                    "foreign": {"current": -1000, "trend": "賣壓加重"},
+                    "trust": {"current": 0, "trend": "買賣力道持平"},
                 },
             },
         ],
@@ -300,10 +307,16 @@ def test_format_candidates_flex_message_applies_requested_colors_and_bold_alert(
     )
     negative_row, zero_row, positive_row = warning_section["contents"][1:]
     assert negative_row["weight"] == "bold"
-    assert negative_row["contents"][-1]["color"] == "#27AE60"
+    assert negative_row["contents"][1]["color"] == "#27AE60"
+    assert negative_row["contents"][3]["color"] == "#27AE60"
+    assert negative_row["contents"][5]["color"] == "#27AE60"
     assert "weight" not in zero_row
-    assert zero_row["contents"][-1]["color"] == "#222222"
-    assert positive_row["contents"][-1]["color"] == "#C0392B"
+    assert zero_row["contents"][1]["color"] == "#222222"
+    assert zero_row["contents"][3]["color"] == "#C0392B"
+    assert zero_row["contents"][5]["color"] == "#27AE60"
+    assert positive_row["contents"][1]["color"] == "#C0392B"
+    assert positive_row["contents"][3]["color"] == "#27AE60"
+    assert positive_row["contents"][5]["color"] == "#222222"
     assert "??? " not in str(message)
 
     preview_section = next(
@@ -312,14 +325,14 @@ def test_format_candidates_flex_message_applies_requested_colors_and_bold_alert(
     )
     item_row = next(
         component for component in preview_section["contents"]
-        if component.get("type") == "text" and "2454聯發科" in str(component)
+        if component.get("type") == "text" and "2454 聯發科" in str(component)
     )
     assert item_row["contents"][0]["color"] == "#222222"
     assert item_row["contents"][2]["color"] == "#C0392B"
     assert item_row["contents"][4]["color"] == "#27AE60"
     sell_row = next(
         component for component in preview_section["contents"]
-        if component.get("type") == "text" and "2317鴻海" in str(component)
+        if component.get("type") == "text" and "2317 鴻海" in str(component)
     )
     assert sell_row["contents"][0]["color"] == "#222222"
     assert sell_row["contents"][2]["color"] == "#222222"
