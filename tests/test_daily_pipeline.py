@@ -562,7 +562,10 @@ def test_sar_preview_uses_intraday_prices_as_a_provisional_estimate(monkeypatch,
     assert "・2330 台積電 104.00 5日力道 外資資料不足 投信資料不足" in message_text
 
 
-def test_market_forecast_is_sent_as_a_separate_line_message(monkeypatch, tmp_path):
+@pytest.mark.parametrize("image_upload_fails", [False, True])
+def test_market_forecast_chart_and_text_are_sent_in_one_flex_message(
+    monkeypatch, tmp_path, image_upload_fails,
+):
     from datetime import datetime, timedelta
 
     conn = _fresh_conn()
@@ -623,6 +626,15 @@ def test_market_forecast_is_sent_as_a_separate_line_message(monkeypatch, tmp_pat
     )
     recorded = []
     monkeypatch.setattr(daily_pipeline, "record_taiex_forecast", lambda forecast: recorded.append(forecast) or True)
+    monkeypatch.setattr(daily_pipeline, "is_taiex_forecast_recorded", lambda forecast_date: False)
+    monkeypatch.setattr(daily_pipeline, "build_taiex_chart_image", lambda conn: b"chart-image")
+
+    def upload_chart(image, filename):
+        if image_upload_fails:
+            raise RuntimeError("temporary host unavailable")
+        return "https://tmpfiles.org/dl/chart.png"
+
+    monkeypatch.setattr(daily_pipeline, "upload_png_to_tmpfiles", upload_chart)
     monkeypatch.setattr(daily_pipeline, "verify_pending_taiex_forecast", lambda **kwargs: False)
     line_messages = []
     monkeypatch.setattr(daily_pipeline, "send_line_broadcast", line_messages.append)
@@ -639,7 +651,13 @@ def test_market_forecast_is_sent_as_a_separate_line_message(monkeypatch, tmp_pat
     assert len(recorded) == 1
     assert len(line_messages) == 2
     assert line_messages[0]["type"] == "flex"
-    assert line_messages[1].startswith("【明日大盤預估｜朱老師短線】")
+    if image_upload_fails:
+        assert isinstance(line_messages[1], str)
+        assert line_messages[1].startswith("【明日大盤預估｜朱老師短線】")
+    else:
+        assert line_messages[1]["type"] == "flex"
+        assert line_messages[1]["contents"]["hero"]["url"] == "https://tmpfiles.org/dl/chart.png"
+        assert "【明日大盤預估｜朱老師短線】" in _flex_message_text(line_messages[1])
 
 
 def test_get_taiex_sar_direction_uses_live_index_candle(monkeypatch):

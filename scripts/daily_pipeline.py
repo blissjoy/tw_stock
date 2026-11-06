@@ -49,13 +49,17 @@ from src.data.connection import (  # noqa: E402
 from src.data.twse_client import STOCK_CODE_PATTERN  # noqa: E402
 from src.indicators.parabolic_sar import compute_sar  # noqa: E402
 from src.market_forecast import (  # noqa: E402
+    build_taiex_chart_image,
     build_taiex_forecast,
     format_taiex_forecast,
+    format_taiex_forecast_flex,
+    is_taiex_forecast_recorded,
     record_taiex_forecast,
     verify_pending_taiex_forecast,
 )
 from src.notify.email_notify import format_candidates_email_body, send_email  # noqa: E402
 from src.notify.line_notify import format_candidates_flex_message, send_line_broadcast  # noqa: E402
+from src.notify.tmpfiles_image import upload_png_to_tmpfiles  # noqa: E402
 from src.presentation import chart_data, data_fetch_log, pipeline_status, portfolio_data, stock_detail_data, watchlist_export  # noqa: E402
 from src.screener.daily_screener import refresh_indicator_window, run_screen_and_store  # noqa: E402
 
@@ -823,10 +827,23 @@ def run_daily_pipeline(
                             )
 
                         forecast = build_taiex_forecast(index_rows)
-                        if record_taiex_forecast(forecast):
-                            send_line_broadcast(format_taiex_forecast(forecast))
-                        else:
+                        if is_taiex_forecast_recorded(forecast["date"]):
                             print(f"{iso_date} 的大盤預估已記錄，略過重複通知。")
+                        else:
+                            try:
+                                chart_image = build_taiex_chart_image(conn)
+                                image_url = upload_png_to_tmpfiles(
+                                    chart_image,
+                                    filename=f"taiex-{iso_date}.png",
+                                )
+                                forecast_message = format_taiex_forecast_flex(forecast, image_url)
+                            except Exception as exc:  # noqa: BLE001
+                                print(f"加權指數圖表產生或上傳失敗，改發純文字預估：{exc}")
+                                forecast_message = format_taiex_forecast(forecast)
+
+                            send_line_broadcast(forecast_message)
+                            if not record_taiex_forecast(forecast):
+                                print(f"{iso_date} 的大盤預估已由其他執行記錄。")
                     except Exception as exc:  # noqa: BLE001
                         error = f"明日大盤預估產生、記錄或發送失敗：{exc}"
                         print(error)

@@ -1,7 +1,9 @@
 from src.market_forecast import (
     FORECAST_TITLE,
+    build_taiex_chart_image,
     build_taiex_forecast,
     format_taiex_forecast,
+    format_taiex_forecast_flex,
     record_taiex_forecast,
     verify_pending_taiex_forecast,
 )
@@ -44,6 +46,69 @@ def test_build_taiex_forecast_requires_sufficient_index_history():
         assert "不足20個交易日" in str(exc)
     else:
         raise AssertionError("Expected a clear error for insufficient index history")
+
+
+def test_forecast_flex_message_contains_chart_and_forecast_text():
+    forecast = build_taiex_forecast(_falling_index_rows())
+
+    message = format_taiex_forecast_flex(forecast, "https://tmpfiles.org/dl/chart.png")
+
+    assert message["type"] == "flex"
+    assert message["contents"]["hero"]["url"] == "https://tmpfiles.org/dl/chart.png"
+    body_text = "\n".join(
+        item["text"] for item in message["contents"]["body"]["contents"]
+        if item["type"] == "text"
+    )
+    assert FORECAST_TITLE in body_text
+    assert forecast["direction"] in body_text
+    assert "近20個交易日" in body_text
+
+
+def test_build_taiex_chart_uses_shared_desktop_chart_with_20_sessions(monkeypatch):
+    import pandas as pd
+
+    import src.market_forecast as market_forecast
+
+    price_df = pd.DataFrame(
+        {
+            "open": range(20),
+            "high": range(1, 21),
+            "low": range(20),
+            "close": range(1, 21),
+            "volume": range(100, 120),
+        },
+        index=pd.date_range("2026-10-01", periods=20),
+    )
+    calls = {}
+
+    class FakeFigure:
+        layout = type("Layout", (), {"width": 1000})()
+
+        def update_layout(self, **kwargs):
+            calls["layout"] = kwargs
+
+        def to_image(self, **kwargs):
+            calls["to_image"] = kwargs
+            return b"rendered-png"
+
+    monkeypatch.setattr(market_forecast.chart_data, "load_price_history", lambda conn, stock_id, days: (
+        calls.update({"stock_id": stock_id, "days": days}) or price_df
+    ))
+    monkeypatch.setattr(market_forecast.chart_data, "load_holidays_for_chart", lambda df: ([], True))
+    monkeypatch.setattr(
+        market_forecast.chart_data,
+        "build_candlestick_figure",
+        lambda df, **kwargs: calls.update({"figure_options": kwargs}) or FakeFigure(),
+    )
+
+    image = build_taiex_chart_image(object())
+
+    assert image == b"rendered-png"
+    assert calls["days"] == 20
+    assert calls["figure_options"]["show_sar"] is True
+    assert calls["figure_options"]["show_macd"] is True
+    assert calls["figure_options"]["show_kd"] is True
+    assert len(price_df) == 20
 
 
 def test_forecast_log_is_idempotent_and_verifiable(tmp_path):

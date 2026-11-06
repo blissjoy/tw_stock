@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.indicators.moving_average import sma
+from src.data.yfinance_client import TAIEX_STOCK_ID
+from src.indicators.moving_average import FULL_PERIODS, sma
 from src.indicators.pivots import compute_turning_points
+from src.presentation import chart_data
 
 FORECAST_LOG_PATH = Path(__file__).resolve().parents[1] / "ai" / "MARKET_FORECAST_LOG.md"
 FORECAST_TITLE = "【明日大盤預估｜朱老師短線】"
@@ -107,6 +109,77 @@ def format_taiex_forecast(forecast: dict) -> str:
     ])
 
 
+def build_taiex_chart_image(conn) -> bytes:
+    """Render the latest 20 TAIEX sessions with the shared desktop chart implementation."""
+    price_df = chart_data.load_price_history(conn, TAIEX_STOCK_ID, days=20)
+    if len(price_df) != 20:
+        raise ValueError(f"加權指數圖表資料不足20個交易日（目前{len(price_df)}筆）。")
+
+    holidays, _holidays_ok = chart_data.load_holidays_for_chart(price_df)
+    figure = chart_data.build_candlestick_figure(
+        price_df,
+        title="加權指數｜近20個交易日",
+        holidays=holidays,
+        ma_periods=FULL_PERIODS,
+        show_macd=True,
+        show_kd=True,
+        show_sar=True,
+    )
+    figure.update_layout(width=1000)
+    image = figure.to_image(format="png")
+    if not image:
+        raise RuntimeError("加權指數圖表輸出為空。")
+    return image
+
+
+def format_taiex_forecast_flex(forecast: dict, image_url: str) -> dict:
+    """Format the forecast and its chart as one LINE Flex message."""
+    text_lines = format_taiex_forecast(forecast).splitlines()
+    body = [
+        {"type": "text", "text": text_lines[0], "weight": "bold", "size": "md", "wrap": True},
+        *(
+            {"type": "text", "text": line, "size": "sm", "wrap": True}
+            for line in text_lines[1:]
+        ),
+        {
+            "type": "text",
+            "text": "圖表：近20個交易日（K線、SAR、成交量、MACD、KD）",
+            "size": "xs",
+            "color": "#777777",
+            "wrap": True,
+        },
+    ]
+    return {
+        "type": "flex",
+        "altText": f"{FORECAST_TITLE} {forecast['direction']}｜信心：{forecast['confidence']}",
+        "contents": {
+            "type": "bubble",
+            "hero": {
+                "type": "image",
+                "url": image_url,
+                "size": "full",
+                "aspectRatio": "25:21",
+                "aspectMode": "fit",
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": body,
+            },
+        },
+    }
+
+
+def is_taiex_forecast_recorded(
+    forecast_date: str,
+    log_path: Path = FORECAST_LOG_PATH,
+) -> bool:
+    """Return whether a forecast for the given data date is already in the log."""
+    content = log_path.read_text(encoding="utf-8")
+    return any(date == forecast_date for date, _ in _forecast_sections(content))
+
+
 def _forecast_sections(content: str) -> list[tuple[str, str]]:
     matches = list(re.finditer(r"(?m)^### 預估資料日 (\d{4}-\d{2}-\d{2}).*$", content))
     sections = []
@@ -120,7 +193,7 @@ def record_taiex_forecast(forecast: dict, log_path: Path = FORECAST_LOG_PATH) ->
     """Append one forecast per target date; return False if already recorded."""
     content = log_path.read_text(encoding="utf-8")
     target_date = forecast["date"]
-    if any(date == target_date for date, _ in _forecast_sections(content)):
+    if is_taiex_forecast_recorded(target_date, log_path):
         return False
 
     entry = f"""
