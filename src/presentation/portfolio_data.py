@@ -17,6 +17,14 @@ from __future__ import annotations
 import pandas as pd
 
 from src.data import portfolio_storage
+from src.trading_costs import (
+    BROKER_COMMISSION_DISCOUNT,
+    MIN_COMMISSION_FEE,
+    TWSE_MAX_COMMISSION_RATE,
+    TWSE_TRANSACTION_TAX_RATE,
+    estimate_commission_fee,
+    estimate_transaction_tax,
+)
 
 # 依市場別(stocks.listing_type，見src/data/finmind_client.py的fetch_stock_info()
 # 說明)決定股票名稱的字體顏色：上市藍/上櫃黑/興櫃灰。2026-08-04新增，desktop/
@@ -53,20 +61,13 @@ def listing_type_color(listing_type: str | None) -> str:
 # 交易稅(TWSE_TRANSACTION_TAX_RATE)一起，是計算「帳面損益/報酬率」(這個功能
 # 本來就是用現價模擬「現在賣掉」的損益)時要從市值扣除的部分，見
 # estimate_sell_cost()跟_merge_holdings_with_snapshot()。
-TWSE_MAX_COMMISSION_RATE = 0.001425  # 政府公告(牌告)手續費上限0.1425%，買賣雙邊都收
-TWSE_TRANSACTION_TAX_RATE = 0.003  # 證券交易稅0.3%，政府規定只課賣方，不因券商折扣而變動
-BROKER_COMMISSION_DISCOUNT = 0.3  # 3折，依使用者實際數字反推校準，買賣雙邊套用同一折扣
-MIN_COMMISSION_FEE = 1  # 多數數位券商最低手續費約1元
-
-
 def estimate_buy_fee(cost_price: float | None, shares: int | None) -> int | None:
     """估算買進手續費(四捨五入到整數元)，計入成本基礎——這是實際買進時真正付出的
     錢，不是`estimate_sell_cost()`那種「如果現在賣出」的假設性金額。成本價或股數
     缺值時無從估算，回傳None。"""
     if cost_price is None or shares is None or pd.isna(cost_price) or pd.isna(shares):
         return None
-    raw_fee = cost_price * shares * TWSE_MAX_COMMISSION_RATE * BROKER_COMMISSION_DISCOUNT
-    return max(round(raw_fee), MIN_COMMISSION_FEE)
+    return estimate_commission_fee(cost_price * shares)
 
 
 def effective_cost_price(cost_price: float | None, shares: int | None, fee: float | None) -> float | None:
@@ -104,8 +105,8 @@ def estimate_sell_cost(market_value: float | None) -> int | None:
         return None
     if market_value <= 0:
         return 0
-    commission = max(round(market_value * TWSE_MAX_COMMISSION_RATE * BROKER_COMMISSION_DISCOUNT), MIN_COMMISSION_FEE)
-    tax = round(market_value * TWSE_TRANSACTION_TAX_RATE)
+    commission = estimate_commission_fee(market_value)
+    tax = estimate_transaction_tax(market_value)
     return commission + tax
 
 

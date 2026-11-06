@@ -11,15 +11,23 @@ import numpy as np
 import pandas as pd
 
 from src.screener.indicator_precompute import compute_indicator_rows
+from src.trading_costs import (
+    BROKER_COMMISSION_DISCOUNT,
+    MIN_COMMISSION_FEE,
+    TWSE_MAX_COMMISSION_RATE,
+    TWSE_TRANSACTION_TAX_RATE,
+    estimate_commission_fee,
+    estimate_transaction_tax,
+)
 
 INITIAL_CAPITAL = 100_000.0
 ENTRY_BUDGET = 10_000.0
 ADD_BUDGET = 5_000.0
-BUY_FEE_RATE = 0.001425
-SELL_FEE_RATE = 0.001425
-MINIMUM_FEE = 20.0
-SELL_TAX_RATE = 0.003
-SAR_STRATEGY_VERSION = 2
+BUY_FEE_RATE = TWSE_MAX_COMMISSION_RATE * BROKER_COMMISSION_DISCOUNT
+SELL_FEE_RATE = BUY_FEE_RATE
+MINIMUM_FEE = MIN_COMMISSION_FEE
+SELL_TAX_RATE = TWSE_TRANSACTION_TAX_RATE
+SAR_STRATEGY_VERSION = 3
 LOT_SIZE_SHARES = 1_000
 
 MARKET_DATA_COLUMNS = [
@@ -318,10 +326,6 @@ def load_sar_market_data_with_recomputed_indicators(
     return market_data
 
 
-def _fee(notional: float, rate: float) -> float:
-    return max(MINIMUM_FEE, notional * rate)
-
-
 def _sell_position(
     position: SimulatedPosition,
     date: str,
@@ -330,8 +334,8 @@ def _sell_position(
     cash: float,
 ) -> tuple[float, SimulationEvent]:
     notional = position.shares * price
-    fee = _fee(notional, SELL_FEE_RATE)
-    tax = notional * SELL_TAX_RATE
+    fee = estimate_commission_fee(notional)
+    tax = estimate_transaction_tax(notional)
     proceeds = notional - fee - tax
     event = SimulationEvent(
         date=date,
@@ -465,7 +469,7 @@ def run_sar_portfolio_simulation(
                     else math.floor(ADD_BUDGET / add_price)
                 )
                 add_notional = add_shares * add_price
-                add_fee = _fee(add_notional, BUY_FEE_RATE) if add_shares > 0 else 0.0
+                add_fee = estimate_commission_fee(add_notional) if add_shares > 0 else 0.0
                 position.add_attempted = True
                 if add_shares > 0 and result.cash >= add_notional + add_fee:
                     result.cash -= add_notional + add_fee
@@ -540,7 +544,7 @@ def run_sar_portfolio_simulation(
             else math.floor(ENTRY_BUDGET / entry_price)
         )
         notional = shares * entry_price
-        fee = _fee(notional, BUY_FEE_RATE) if shares > 0 else 0.0
+        fee = estimate_commission_fee(notional) if shares > 0 else 0.0
         total_cost = notional + fee
         if shares <= 0 or result.cash < total_cost:
             result.events.append(SimulationEvent(

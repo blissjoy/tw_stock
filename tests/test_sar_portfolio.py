@@ -160,8 +160,8 @@ def test_simulation_enters_next_day_adds_once_then_stops_out():
     assert result.closed_positions[0].exit_reason == "停損出場"
     assert result.cash == pytest.approx(100_000 + stop.cash_change + entry.cash_change + add.cash_change)
     assert result.realized_pnl == pytest.approx(stop.cash_change - result.closed_positions[0].cost_basis)
-    assert stop.tax == pytest.approx(stop.shares * stop.price * 0.003)
-    assert stop.fee == pytest.approx(max(20, stop.shares * stop.price * 0.001425))
+    assert stop.tax == round(stop.shares * stop.price * 0.003)
+    assert stop.fee == max(1, round(stop.shares * stop.price * 0.001425 * 0.3))
 
 
 def test_trailing_exit_uses_previous_day_peak_before_updating_current_high():
@@ -265,11 +265,11 @@ def test_insufficient_entry_cash_skips_signal_without_queueing():
     ])
 
     result = run_sar_portfolio_simulation(
-        data, "2026-01-05", "2026-01-06", initial_capital=10_010,
+        data, "2026-01-05", "2026-01-06", initial_capital=9_999,
     )
 
     assert [event.event_type for event in result.events if event.event_type != "每日選股"] == ["資金不足跳過"]
-    assert result.cash == 10_010
+    assert result.cash == 9_999
     assert result.positions == []
 
 
@@ -327,16 +327,26 @@ def test_failed_add_attempt_is_not_retried_later():
     assert result.positions[0].added is False
 
 
-def test_fee_floor_applies_to_entry_and_sale():
+def test_entry_and_sale_fees_match_inventory_estimates():
     data = pd.DataFrame([
         market_row("2026-01-05"),
         market_row("2026-01-06", high=51.0, low=48.0, close=50.0, sar_flip_days_ago=2),
+        market_row("2026-01-07", high=45.0, low=42.0, close=44.0, sar_flip_days_ago=2),
+        market_row("2026-01-08", high=40.0, low=30.0, close=35.0, sar_flip_days_ago=2),
     ])
 
-    result = run_sar_portfolio_simulation(data, "2026-01-05", "2026-01-06")
+    result = run_sar_portfolio_simulation(data, "2026-01-05", "2026-01-08")
 
     entry_event = next(event for event in result.events if event.event_type == "進場")
-    assert entry_event.fee == 20.0
+    assert entry_event.shares == 196
+    assert entry_event.fee == 4
+    assert entry_event.cash_change == -(entry_event.shares * entry_event.price + entry_event.fee)
+
+    sale_event = next(event for event in result.events if event.event_type == "停損出場")
+    sale_notional = sale_event.shares * sale_event.price
+    assert sale_event.fee == max(1, round(sale_notional * 0.001425 * 0.3))
+    assert sale_event.tax == round(sale_notional * 0.003)
+    assert sale_event.cash_change == sale_event.shares * sale_event.price - sale_event.fee - sale_event.tax
 
 
 def test_cash_from_same_day_exit_can_fund_new_signal():

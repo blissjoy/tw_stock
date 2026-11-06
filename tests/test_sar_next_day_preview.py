@@ -1,7 +1,7 @@
 import pandas as pd
 
 from src.backtest import sar_next_day_preview
-from src.backtest.sar_portfolio import SarSimulationResult, SimulatedPosition
+from src.backtest.sar_portfolio import SAR_STRATEGY_VERSION, SarSimulationResult, SimulatedPosition
 from src.data.sar_simulation_storage import init_sar_simulation_db, save_simulation_result
 
 
@@ -45,12 +45,12 @@ def test_build_sar_next_day_preview_continues_latest_run_and_uses_today_close(mo
                 entry_date="2026-01-05",
                 entry_price=50.0,
                 shares=100,
-                cost_basis=5_020.0,
+                cost_basis=5_002.0,
                 last_price=50.0,
             ),
         ],
     )
-    save_simulation_result(simulation_conn, prior_result, {"version": 2})
+    save_simulation_result(simulation_conn, prior_result, {"version": SAR_STRATEGY_VERSION})
     market_data = pd.DataFrame([
         _market_row(
             "2026-01-06",
