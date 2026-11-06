@@ -315,6 +315,11 @@ def _truncate_signal_lines(signal_name: str | None, max_lines: int = CANDIDATE_S
     return "\n".join(lines[:max_lines]) + f"\n(...+{hidden} more)"
 
 
+def _should_follow_latest_sar_date(selected_end_date: str, previous_latest_date: str | None) -> bool:
+    """Keep the simulation end date following new market data unless the user chose an older date."""
+    return previous_latest_date is None or selected_end_date >= previous_latest_date
+
+
 class _NumericTableWidgetItem(QTableWidgetItem):
     """支援依實際數值排序的QTableWidgetItem，取代候選清單表格點欄位標題排序時預設的
     字串排序——字串排序會把"10.00"排在"9.00"前面(逐字元比較，'1'<'9')、"1,000"這種
@@ -3536,6 +3541,7 @@ class MainWindow(QMainWindow):
             date_input.setMaximumDate(maximum)
         self.sar_sim_start_date.setDate(default_start)
         self.sar_sim_end_date.setDate(maximum)
+        self._sar_simulation_latest_date = latest_date
 
         self.sar_sim_summary_label = QLabel("請選擇模擬區間並執行。結果儲存在獨立模擬資料庫，不會修改真實庫存。")
         self.sar_sim_summary_label.setWordWrap(True)
@@ -4140,7 +4146,29 @@ class MainWindow(QMainWindow):
             curve_table.setItem(row, 1, QTableWidgetItem(f"NT${snapshot.total_assets:,.2f}"))
 
     def _refresh_sar_simulation_tab(self) -> None:
-        """切回分頁時保留已載入或剛保存的模擬結果，不重跑歷史行情。"""
+        """切回分頁時更新可選行情日期，並讓預設迄日跟隨最新資料。"""
+        if self.conn is None:
+            return
+
+        first_date, latest_date = self.conn.execute(
+            "SELECT MIN(date), MAX(date) FROM stock_prices"
+        ).fetchone()
+        if not latest_date:
+            return
+
+        minimum = QDate.fromString(first_date, "yyyy-MM-dd")
+        maximum = QDate.fromString(latest_date, "yyyy-MM-dd")
+        previous_latest_date = self._sar_simulation_latest_date
+        selected_end_date = self.sar_sim_end_date.date().toString("yyyy-MM-dd")
+        follow_latest = _should_follow_latest_sar_date(selected_end_date, previous_latest_date)
+
+        self.sar_sim_start_date.setMinimumDate(minimum)
+        self.sar_sim_start_date.setMaximumDate(maximum)
+        self.sar_sim_end_date.setMinimumDate(minimum)
+        self.sar_sim_end_date.setMaximumDate(maximum)
+        if follow_latest:
+            self.sar_sim_end_date.setDate(maximum)
+        self._sar_simulation_latest_date = latest_date
 
     def _run_sar_simulation(self) -> None:
         if self.conn is None:
@@ -4151,6 +4179,7 @@ class MainWindow(QMainWindow):
             return
         if self._sar_simulation_worker is not None and self._sar_simulation_worker.isRunning():
             return
+        self._refresh_sar_simulation_tab()
         start_date = self.sar_sim_start_date.date().toString("yyyy-MM-dd")
         end_date = self.sar_sim_end_date.date().toString("yyyy-MM-dd")
         if start_date > end_date:
