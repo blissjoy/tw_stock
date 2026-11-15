@@ -106,14 +106,20 @@ def test_fetch_stock_info_deduplicates_keeping_latest_date_per_stock(monkeypatch
     assert rows[0]["industry"] == "最新產業"
 
 
-def test_fetch_stock_prices_maps_fields(monkeypatch):
+def test_fetch_stock_prices_maps_fields_and_omits_zero_trade_rows(monkeypatch):
     def fake_get(dataset, data_id=None, start_date=None, end_date=None, **kwargs):
         assert dataset == "TaiwanStockPrice"
         assert data_id == "6488"
-        return [{
-            "date": "2025-07-15", "stock_id": "6488", "Trading_Volume": 1805862, "Trading_money": 564751306,
-            "open": 311.5, "max": 316.5, "min": 309.5, "close": 310.0, "spread": -1.5, "Trading_turnover": 2065,
-        }]
+        return [
+            {
+                "date": "2025-07-15", "stock_id": "6488", "Trading_Volume": 1805862, "Trading_money": 564751306,
+                "open": 311.5, "max": 316.5, "min": 309.5, "close": 310.0, "spread": -1.5, "Trading_turnover": 2065,
+            },
+            {
+                "date": "2025-07-14", "stock_id": "6488", "Trading_Volume": 0, "Trading_money": 0,
+                "open": 0, "max": 0, "min": 0, "close": 0, "spread": 0, "Trading_turnover": 0,
+            },
+        ]
 
     monkeypatch.setattr(finmind_client, "_get", fake_get)
     rows = finmind_client.fetch_stock_prices("6488", "2025-07-15", "2025-07-15")

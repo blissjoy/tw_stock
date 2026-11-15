@@ -315,6 +315,11 @@ def _truncate_signal_lines(signal_name: str | None, max_lines: int = CANDIDATE_S
     return "\n".join(lines[:max_lines]) + f"\n(...+{hidden} more)"
 
 
+def _format_intraday_notice(target_date: str | None) -> str:
+    date_label = f"{target_date} " if target_date else ""
+    return f"⚠ {date_label}行情資料來自盤中備援，可能與官方收盤值不同"
+
+
 def _should_follow_latest_sar_date(selected_end_date: str, previous_latest_date: str | None) -> bool:
     """Keep the simulation end date following new market data unless the user chose an older date."""
     return previous_latest_date is None or selected_end_date >= previous_latest_date
@@ -1909,7 +1914,7 @@ class MainWindow(QMainWindow):
         bulk_action_bar.addStretch()
         root_layout.addLayout(bulk_action_bar)
 
-        self.intraday_label = QLabel("⚠ 尚未收盤，本頁為盤中即時資料，收盤後數字可能改變")
+        self.intraday_label = QLabel("⚠ 所選日期的行情資料來自盤中備援，可能與官方收盤值不同")
         self.intraday_label.setStyleSheet("color: red; font-weight: bold;")
         self.intraday_label.setVisible(False)
         root_layout.addWidget(self.intraday_label)
@@ -5077,6 +5082,8 @@ class MainWindow(QMainWindow):
         # 重新整理表格後，勾選欄全部重置成未勾選，表頭的「全選」checkbox要跟著重置，
         # 不然重篩選後表頭還顯示上一批資料的勾選狀態。
         self._candidates_header.set_checked_silently(False)
+        if is_intraday:
+            self.intraday_label.setText(_format_intraday_notice(latest_date))
         self.intraday_label.setVisible(is_intraday)
         if latest_date is None:
             self.setWindowTitle("台股每日選股（本機版）— 尚無候選清單")

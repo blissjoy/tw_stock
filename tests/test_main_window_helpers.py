@@ -8,6 +8,7 @@ from PySide6.QtCore import QDate
 from desktop.main_window import (
     CANDIDATE_SIGNAL_MAX_LINES,
     MainWindow,
+    _format_intraday_notice,
     _should_follow_latest_sar_date,
     _truncate_signal_lines,
 )
@@ -33,6 +34,14 @@ def test_truncate_signal_lines_truncates_and_appends_more_count():
     assert len(lines) == CANDIDATE_SIGNAL_MAX_LINES + 1
     assert lines[:CANDIDATE_SIGNAL_MAX_LINES] == [f"規則{i}" for i in range(CANDIDATE_SIGNAL_MAX_LINES)]
     assert lines[-1] == "(...+8 more)"
+
+
+def test_intraday_notice_identifies_the_selected_date_without_claiming_market_is_open():
+    notice = _format_intraday_notice("2026-11-13")
+
+    assert "2026-11-13" in notice
+    assert "盤中備援" in notice
+    assert "尚未收盤" not in notice
 
 
 def test_sar_simulation_end_date_follows_new_latest_market_date():

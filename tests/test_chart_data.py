@@ -28,7 +28,9 @@ from src.presentation.chart_data import (
     load_industry_rotation_stocks,
     load_institutional_accumulation_flags,
     load_ma_bullish_flags_from_table,
+    load_no_pressure_flags_from_table,
     load_price_history,
+    load_sar_distance_flags_from_table,
     load_sar_flip_flags_from_table,
     load_stock_universe_for_date,
     load_trend_position_flags_from_table,
@@ -1133,6 +1135,45 @@ def test_candidate_filter_defaults_only_checks_ma5_10_20_by_default():
     assert chart_data.CANDIDATE_FILTER_DEFAULTS["（...>MA60）"] is False
     assert chart_data.CANDIDATE_FILTER_DEFAULTS["（...>MA120）"] is False
     assert chart_data.CANDIDATE_FILTER_DEFAULTS["（...>MA240）"] is False
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["無壓力區（MA60/MA120壓力距離≥3%）"] is True
+    assert chart_data.CANDIDATE_FILTER_DEFAULTS["SAR距離（<35%）"] is True
+
+
+def test_reference_sar_filters_apply_pressure_and_sar_distance_thresholds():
+    conn = _fresh_conn()
+    upsert_stocks(conn, [
+        {"stock_id": stock_id, "name": stock_id, "market": "TWSE", "industry": None, "updated_at": "2026-08-03"}
+        for stock_id in ("2330", "2454", "2317")
+    ])
+    upsert_stock_prices(conn, [
+        {"stock_id": "2330", "date": "2026-08-03", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2454", "date": "2026-08-03", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+        {"stock_id": "2317", "date": "2026-08-03", "open": 100.0, "high": 101.0, "low": 99.0,
+         "close": 100.0, "volume": 1000, "trading_money": None, "trading_turnover": None, "spread": None},
+    ])
+    upsert_daily_indicators(conn, [
+        {"stock_id": "2330", "date": "2026-08-03", "ma5": 100.0, "ma10": 100.0, "ma20": 100.0,
+         "ma60": 102.0, "ma120": 110.0, "ma200": 90.0, "ma240": 90.0, "sar_value": 65.0,
+         "sar_is_bull": True, "sar_flip_days_ago": 1, "trend_is_at_high": None, "trend_is_at_low": None,
+         "trend_swing_pct": None, "updated_at": "2026-08-03T17:03:00"},
+        {"stock_id": "2454", "date": "2026-08-03", "ma5": 100.0, "ma10": 100.0, "ma20": 100.0,
+         "ma60": 103.0, "ma120": 105.0, "ma200": 90.0, "ma240": 90.0, "sar_value": 65.01,
+         "sar_is_bull": True, "sar_flip_days_ago": 1, "trend_is_at_high": None, "trend_is_at_low": None,
+         "trend_swing_pct": None, "updated_at": "2026-08-03T17:03:00"},
+        {"stock_id": "2317", "date": "2026-08-03", "ma5": 100.0, "ma10": 100.0, "ma20": 100.0,
+         "ma60": 99.0, "ma120": None, "ma200": 90.0, "ma240": 90.0, "sar_value": None,
+         "sar_is_bull": True, "sar_flip_days_ago": 1, "trend_is_at_high": None, "trend_is_at_low": None,
+         "trend_swing_pct": None, "updated_at": "2026-08-03T17:03:00"},
+    ])
+
+    assert load_no_pressure_flags_from_table(conn, ["2330", "2454", "2317"], "2026-08-03") == {
+        "2330": False, "2454": True, "2317": False,
+    }
+    assert load_sar_distance_flags_from_table(conn, ["2330", "2454", "2317"], "2026-08-03") == {
+        "2330": False, "2454": True, "2317": False,
+    }
 
 
 def test_candidate_filter_ma60_extension_uses_correct_periods():

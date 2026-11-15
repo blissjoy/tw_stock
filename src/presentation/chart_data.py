@@ -178,6 +178,60 @@ def _ma_bullish_filter(periods: tuple[int, ...]) -> Callable[[object, list[str],
     )
 
 
+def load_no_pressure_flags_from_table(
+    conn, stock_ids: list[str], as_of_date: str, pressure_distance_pct: float = 3.0,
+) -> dict[str, bool]:
+    """依參考選股器定義，排除收盤價上方 3% 內的 MA60 或 MA120 壓力。"""
+    if not stock_ids:
+        return {}
+    placeholders = ",".join("?" * len(stock_ids))
+    cur = conn.execute(
+        f"""
+        SELECT di.stock_id, di.ma60, di.ma120, sp.close
+        FROM daily_indicators di
+        JOIN stock_prices sp ON sp.stock_id = di.stock_id AND sp.date = di.date
+        WHERE di.stock_id IN ({placeholders}) AND di.date = ?
+        """,
+        [*stock_ids, as_of_date],
+    )
+    flags: dict[str, bool] = {stock_id: False for stock_id in stock_ids}
+    for stock_id, ma60, ma120, close in cur.fetchall():
+        if ma60 is None or ma120 is None or close is None or close <= 0:
+            continue
+        distance60 = round((ma60 - close) / close * 100, 2)
+        distance120 = round((ma120 - close) / close * 100, 2)
+        flags[stock_id] = not (
+            (ma60 > close and distance60 < pressure_distance_pct)
+            or (ma120 > close and distance120 < pressure_distance_pct)
+        )
+    return flags
+
+
+def load_sar_distance_flags_from_table(
+    conn, stock_ids: list[str], as_of_date: str, threshold_pct: float = 35.0,
+) -> dict[str, bool]:
+    """依參考選股器的預設值，保留 SAR 與收盤價距離小於 35% 的股票。"""
+    if not stock_ids:
+        return {}
+    placeholders = ",".join("?" * len(stock_ids))
+    cur = conn.execute(
+        f"""
+        SELECT di.stock_id, di.sar_value, sp.close
+        FROM daily_indicators di
+        JOIN stock_prices sp ON sp.stock_id = di.stock_id AND sp.date = di.date
+        WHERE di.stock_id IN ({placeholders}) AND di.date = ?
+        """,
+        [*stock_ids, as_of_date],
+    )
+    flags: dict[str, bool] = {stock_id: False for stock_id in stock_ids}
+    for stock_id, sar_value, close in cur.fetchall():
+        if sar_value is None or close is None or close <= 0:
+            continue
+        distance = round((sar_value - close) / close * 100, 2)
+        flags[stock_id] = abs(distance) < threshold_pct
+    return flags
+
+
 # 候選清單篩選器registry：{顯示標籤: 計算函式(conn, stock_ids, as_of_date) -> {stock_id: bool}}。
 # 之後要加其他篩選條件(例如量能/型態)時，在這裡多加一組標籤/函式即可，兩個前端
 # (dashboard/app.py、desktop/main_window.py)都是迴圈讀取這個registry動態產生勾選框、
@@ -191,16 +245,25 @@ CANDIDATE_FILTERS: dict[str, Callable[[object, list[str], str | None], dict[str,
     "（...>MA60）": _ma_bullish_filter((5, 10, 20, 60)),
     "（...>MA120）": _ma_bullish_filter((5, 10, 20, 60, 120)),
     "（...>MA240）": _ma_bullish_filter((5, 10, 20, 60, 120, 240)),
+    "無壓力區（MA60/MA120壓力距離≥3%）": lambda conn, stock_ids, as_of_date: load_no_pressure_flags_from_table(
+        conn, stock_ids, as_of_date, pressure_distance_pct=3.0
+    ),
+    "SAR距離（<35%）": lambda conn, stock_ids, as_of_date: load_sar_distance_flags_from_table(
+        conn, stock_ids, as_of_date, threshold_pct=35.0
+    ),
 }
 
 # 各篩選器預設勾選狀態：MA5>MA10>MA20是書中做多的基本地基條件，預設打勾；延伸到
 # MA60/MA120/MA240的「多線多排」條件較嚴格(篩到的股票會少很多)，預設不勾，避免使用者
-# 一開啟候選清單就發現空空如也、誤以為系統壞掉。未列在這裡的篩選標籤視為預設不勾。
+# 一開啟候選清單就發現空空如也、誤以為系統壞掉。參考選股器預設的無壓力區與SAR距離
+# 條件則預設勾選。未列在這裡的篩選標籤視為預設不勾。
 CANDIDATE_FILTER_DEFAULTS: dict[str, bool] = {
     "均線多頭排列（MA5>MA10>MA20）": True,
     "（...>MA60）": False,
     "（...>MA120）": False,
     "（...>MA240）": False,
+    "無壓力區（MA60/MA120壓力距離≥3%）": True,
+    "SAR距離（<35%）": True,
 }
 
 

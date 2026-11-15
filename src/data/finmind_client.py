@@ -116,7 +116,10 @@ def fetch_stock_info() -> list[dict]:
 
 
 def fetch_stock_prices(stock_id: str, start_date: str, end_date: str) -> list[dict]:
-    """date格式為 'YYYY-MM-DD'（與TWSE官方端點的西元年YYYYMMDD不同，注意轉換）。"""
+    """date格式為 'YYYY-MM-DD'（與TWSE官方端點的西元年YYYYMMDD不同，注意轉換）。
+
+    FinMind會為無成交日回傳零價/零量列；它們不是有效日K，必須排除以免扭曲均線與SAR。
+    """
     raw_rows = _get("TaiwanStockPrice", data_id=stock_id, start_date=start_date, end_date=end_date)
     return [
         {
@@ -132,6 +135,7 @@ def fetch_stock_prices(stock_id: str, start_date: str, end_date: str) -> list[di
             "spread": r.get("spread"),
         }
         for r in raw_rows
+        if float(r.get("Trading_Volume") or 0) > 0 and float(r.get("close") or 0) > 0
     ]
 
 

@@ -14,7 +14,7 @@
 > 重新產生(但要先確認該腳本裡的手動覆寫清單是否需要同步更新，見腳本docstring)。
 
 **狀態**：規劃討論中，尚未開始寫程式（使用者要求先完整討論方案，還有其他想法要補充）
-**最後更新**：2026-07-20
+**最後更新**：2026-11-15
 
 ---
 
@@ -10467,3 +10467,31 @@ yfinance備援都沒有資料才判定非交易日。本機DB另確認`daily_can
 - `src/notify/line_notify.py`：買進候選、賣出觀察與庫存警示統一顯示「5日力道 外資↑ 投信↑」格式；箭頭沿用個股明細動能分類，並在Flex中依箭頭著色。買賣預覽列簡化為股票代號、名稱、當日價格及力道，不再混入買超/賣超字樣。
 - README及INSTALL同步說明買賣預覽與庫存警示共用的力道欄位。
 - 驗證：`tests/test_notify.py`及`tests/test_daily_pipeline.py`共91項通過；既有5項Pandas警告。
+
+## 對照 Google Sheet 修正 SAR 選股條件與資料（2026-11-15）
+
+使用者比對「SAR 當天轉多頭」分頁（資料日 2026-11-13）與桌面版，要求依
+`ref-project/tw_stock_analyzer` 的選股邏輯查明差異。參考版設定
+`config/scanner_settings.json` 的預設為：SAR 翻轉 1 日內、成交量至少 10、
+收盤價高於 MA200、MA5>MA10>MA20、無壓力區距離 3%、SAR 距離小於 35%；
+`BIAS_THRESHOLD=999`，對本次候選沒有實際限制。SAR 加速參數為 0.03/0.03/0.6。
+
+- `src/presentation/chart_data.py`：原本共用候選篩選器已檢查 MA 排列及 SAR 翻轉／MA200，
+  但漏掉無壓力區與 SAR 距離門檻。新增兩個共用篩選，分別以 MA60/MA120 壓力距離 3%、
+  `abs((SAR-close)/close*100) < 35` 判斷，並設為預設啟用，供桌面版、dashboard、通知共用。
+- `src/data/finmind_client.py`：FinMind 對無成交日可能回傳零收盤價、零成交量列；不再將這些
+  無效列當成日 K 寫入，避免 MA/SAR 遞迴受零值污染。Yahoo 的零成交量但有效收盤價列仍保留，
+  因參考版以 Yahoo 歷史序列計算，該類列會影響其 SAR 結果。
+- 本機 `data/tw_stock.db`：以官方資料回補 11/12–11/13 TWSE 行情，以 Yahoo 參考來源更新本次
+  比對的 8 檔 TPEx 股票 800 日視窗並重算指標；移除 6212 一筆 `delisted_date IS NULL` 的
+  過期自動下市標記。該股 11/12、11/13 已恢復成交，標記存在時會被 universe 與指標回算排除。
+- `desktop/main_window.py`：盤中標記改為指出「所選日期」行情來自盤中備援，避免瀏覽已過去日期
+  時仍顯示「尚未收盤」。
+- 修正後 2026-11-13 預設清單為 2008、4533、6212、6690、7704；Google Sheet 列出其中四檔。
+  依使用者決定以 ref-project 現行程式與設定為準，2008 通過該版可確認的預設條件，因此保留；
+  不針對單一股票硬編碼排除。試算表與參考版現行預設輸出的這一檔差異尚未找到來源，後續若要
+  完全重現試算表，需再確認其產生時的資料快照或未列出的條件。
+- 11/13 的全市場 `daily_data_status.is_intraday` 仍為 True；本次回補範圍僅涵蓋相關股票，
+  未將全市場狀態誤改為正式收盤。
+- 驗證：`tests/test_chart_data.py`、`tests/test_finmind_client.py`、
+  `tests/test_main_window_helpers.py` 共 225 項通過；`git diff --check` 通過。
