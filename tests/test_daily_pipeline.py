@@ -603,15 +603,11 @@ def test_market_forecast_chart_and_text_are_sent_in_one_flex_message(
     monkeypatch.setattr(daily_pipeline, "fetch_today_twse", lambda *args, **kwargs: (True, False))
     monkeypatch.setattr(daily_pipeline, "fetch_today_taiex", lambda *args, **kwargs: True)
     monkeypatch.setattr(daily_pipeline, "fetch_today_tpex", lambda *args, **kwargs: 0)
+    realtime_calls = []
     monkeypatch.setattr(
         daily_pipeline.twse_client,
         "fetch_taiex_realtime",
-        lambda value: {
-            "date": forecast_date,
-            "high": 19972.0,
-            "low": 19958.0,
-            "close": 19960.0,
-        },
+        lambda value: realtime_calls.append(value),
     )
     monkeypatch.setattr(daily_pipeline, "run_screen_and_store", lambda *args, **kwargs: [])
     monkeypatch.setattr(
@@ -639,6 +635,12 @@ def test_market_forecast_chart_and_text_are_sent_in_one_flex_message(
     line_messages = []
     monkeypatch.setattr(daily_pipeline, "send_line_broadcast", line_messages.append)
     monkeypatch.setattr(daily_pipeline, "send_email", lambda *args, **kwargs: None)
+    run_logs = []
+    monkeypatch.setattr(
+        daily_pipeline.data_fetch_log,
+        "record_fetch_run",
+        lambda conn, **kwargs: run_logs.append(kwargs),
+    )
 
     daily_pipeline.run_daily_pipeline(
         conn,
@@ -651,9 +653,12 @@ def test_market_forecast_chart_and_text_are_sent_in_one_flex_message(
     assert len(recorded) == 1
     assert len(line_messages) == 2
     assert line_messages[0]["type"] == "flex"
+    assert realtime_calls == []
     if image_upload_fails:
         assert isinstance(line_messages[1], str)
         assert line_messages[1].startswith("【明日大盤預估｜朱老師短線】")
+        assert "圖表暫時無法產生或載入" in line_messages[1]
+        assert any("temporary host unavailable" in error for error in run_logs[-1]["errors"])
     else:
         assert line_messages[1]["type"] == "flex"
         assert line_messages[1]["contents"]["hero"]["url"] == "https://tmpfiles.org/dl/chart.png"
@@ -719,6 +724,43 @@ def test_get_taiex_sar_direction_rejects_stale_realtime_quote():
             "close": 108.0,
         },
     ) is None
+
+
+def test_get_taiex_sar_direction_falls_back_to_stored_daily_candle(monkeypatch):
+    conn = _fresh_conn()
+    index_id = daily_pipeline.yfinance_client.TAIEX_STOCK_ID
+    storage.upsert_stocks(conn, [{
+        "stock_id": index_id,
+        "name": "台股加權指數",
+        "market": "INDEX",
+        "industry": None,
+        "updated_at": "2026-11-03T10:00:00",
+    }])
+    storage.upsert_stock_prices(conn, [
+        {
+            "stock_id": index_id,
+            "date": f"2026-11-0{day}",
+            "open": 100.0,
+            "high": 105.0,
+            "low": 95.0,
+            "close": 102.0,
+            "volume": 0,
+            "trading_money": None,
+            "trading_turnover": None,
+            "spread": None,
+        }
+        for day in range(1, 4)
+    ])
+    monkeypatch.setattr(
+        daily_pipeline,
+        "compute_sar",
+        lambda high, low, close: (
+            pd.Series([True, True, True]),
+            pd.Series([90.0, 91.0, 94.0]),
+        ),
+    )
+
+    assert daily_pipeline.get_taiex_sar_direction(conn, "20261103", None) is True
 
 
 def test_run_daily_pipeline_combines_inventory_warnings_into_line_message(monkeypatch):

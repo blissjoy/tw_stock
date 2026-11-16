@@ -472,11 +472,22 @@ def fetch_today_taiex(conn, date_str: str) -> bool:
 
 
 def get_taiex_sar_direction(conn, date_str: str, realtime_row: dict | None) -> bool | None:
-    """Return whether the latest index SAR point is below the current day's candle."""
-    if realtime_row is None or realtime_row.get("date") != (
-        f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-    ):
+    """Use a live candle when available, otherwise use the stored candle for that date."""
+    expected_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    if realtime_row is not None and realtime_row.get("date") != expected_date:
         return None
+    if realtime_row is None:
+        row = conn.execute(
+            """
+            SELECT date, high, low, close
+            FROM stock_prices
+            WHERE stock_id = ? AND date = ?
+            """,
+            (yfinance_client.TAIEX_STOCK_ID, expected_date),
+        ).fetchone()
+        if row is None:
+            return None
+        realtime_row = {"date": row[0], "high": row[1], "low": row[2], "close": row[3]}
 
     rows = conn.execute(
         """
@@ -751,12 +762,19 @@ def run_daily_pipeline(
 
             taiex_sar_is_bull = None
             try:
-                realtime_index_row = twse_client.fetch_taiex_realtime(date_str)
+                realtime_index_row = None
+                if is_intraday:
+                    try:
+                        realtime_index_row = twse_client.fetch_taiex_realtime(date_str)
+                    except Exception as exc:  # noqa: BLE001
+                        error = f"加權指數即時行情取得失敗，改用本機當日行情：{exc}"
+                        print(error)
+                        run_errors.append(error)
                 taiex_sar_is_bull = get_taiex_sar_direction(
                     conn, date_str, realtime_index_row,
                 )
                 if taiex_sar_is_bull is None:
-                    error = "無法取得今日加權指數即時K線/SAR，LINE將標示資料不足。"
+                    error = "本機缺少當日加權指數行情或SAR計算資料，LINE將標示資料不足。"
                     print(error)
                     run_errors.append(error)
             except Exception as exc:  # noqa: BLE001
@@ -838,8 +856,12 @@ def run_daily_pipeline(
                                 )
                                 forecast_message = format_taiex_forecast_flex(forecast, image_url)
                             except Exception as exc:  # noqa: BLE001
-                                print(f"加權指數圖表產生或上傳失敗，改發純文字預估：{exc}")
-                                forecast_message = format_taiex_forecast(forecast)
+                                error = f"加權指數圖表產生或上傳失敗，改發純文字預估：{exc}"
+                                print(error)
+                                run_errors.append(error)
+                                forecast_message = (
+                                    f"{format_taiex_forecast(forecast)}\n（圖表暫時無法產生或載入）"
+                                )
 
                             send_line_broadcast(forecast_message)
                             if not record_taiex_forecast(forecast):
